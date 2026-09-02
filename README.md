@@ -391,6 +391,114 @@ When you send a prompt:
 3. **Extension parses response and sends to mobile app**
 4. **Process terminates**
 
+CLI mode starts a **new** Cursor CLI interaction. It does **not** attach to the Agent chat already open in the Cursor IDE.
+
+### Existing Agent mode (CDP)
+
+Attach to an **already-running** Cursor IDE Agent session via Chrome DevTools Protocol (localhost only).
+
+```
+Android Chrome → Flutter Web → Extension WS :8766 → CDP 127.0.0.1:9222 → Cursor IDE Agent
+```
+
+| Mode | What it controls |
+|------|------------------|
+| **CLI Agent** | New `agent` CLI process (fallback; always available) |
+| **Existing Agent (CDP)** | Same Agent session already open in Cursor IDE |
+
+#### Mobile control center
+
+When **Existing Agent** is selected, the Flutter Web UI becomes a Cursor-like control center:
+
+1. **Dashboard** — status summary (Working / Waiting / Idle / Error) and a card per Cursor window/session
+2. **Session screen** — Chat · Plan · Changes · Activity tabs
+3. **Permissions** — Approve / Reject never auto-approved
+4. **Multi-session** — each session keeps its own conversation, plan, activity, and pending permission
+
+Prompts from the session composer use `agent_prompt` and inject into the **selected existing** Cursor Agent UI via CDP — they do **not** run `agent -p`.
+
+#### 1. Start Cursor with CDP (macOS)
+
+```bash
+# Quit Cursor completely first, then:
+open -a Cursor --args --remote-debugging-port=9222
+```
+
+Or from Terminal:
+
+```bash
+/Applications/Cursor.app/Contents/MacOS/Cursor --remote-debugging-port=9222
+```
+
+#### 2. Verify CDP (localhost only)
+
+```bash
+curl http://127.0.0.1:9222/json
+curl http://127.0.0.1:9222/json/version
+```
+
+Do **not** bind CDP to `0.0.0.0`. It must stay on loopback.
+
+#### 3. Enable CDP in the extension
+
+- Settings → **Cursor Remote: Enable Cdp** = `true`, or
+- Env: `ENABLE_CDP=true`
+- Optional: `CDP_HOST=127.0.0.1` (loopback only), `CDP_PORT=9222`
+
+#### 4. Connect the Flutter Web / Android UI
+
+1. Start the Cursor Remote extension (WebSocket `:8766`)
+2. Open the Flutter Web UI and connect (local or relay)
+3. Choose **Existing Agent** backend
+4. Select a Cursor window/session from the control center
+5. Send prompts, approve/reject permissions, monitor plan/activity
+
+#### CDP WebSocket API (allowlisted — not a raw CDP proxy)
+
+| Type | Direction | Description |
+|------|-----------|-------------|
+| `cdp_status` | both | CDP connection status + targets + summary |
+| `cdp_targets` | Server→App | Discovered targets |
+| `get_sessions` / `sessions` | both | Live Cursor window sessions |
+| `get_agent_history` / `agent_history` | both | Agents sidebar history/pinned (DOM scrape) |
+| `open_agent_history` | App→Server | Click a history row in Cursor Agents UI (`historyId`) |
+| `select_session` | App→Server | Set active remote-control target |
+| `get_agent_state` / `agent_state` | both | Conversation + state snapshot |
+| `agent_prompt` | App→Server | Prompt → **existing** IDE Agent |
+| `cli_prompt` | App→Server | Prompt → CLI (explicit) |
+| `approve_action` / `reject_action` | App→Server | Permission UI |
+| `get_plan` / `get_agent_plan` / `agent_plan` | both | Plan steps when detectable |
+| `agent_message` / `agent_message_delta` / `agent_state_changed` / `agent_plan_changed` / `permission_request` / `permission_resolved` / `file_changed` / `activity_event` / `agent_completed` / `agent_error` | Server→App | Live updates |
+
+#### Security
+
+- Android talks **only** to WebSocket `:8766`
+- Extension talks to CDP at `127.0.0.1:9222`
+- Non-loopback CDP hosts are rejected
+- No generic `{ "method": "...", "params": ... }` CDP proxy
+
+#### Capability honesty (do not fake)
+
+| Capability | Level | Notes |
+|------------|-------|-------|
+| Session discovery | PARTIALLY_SUPPORTED | Via `/json` targets + scoring |
+| Agents history / pinned list | PARTIALLY_SUPPORTED | Scraped from Cursor Agents sidebar DOM (visible rows only) |
+| Open history item | PARTIALLY_SUPPORTED | Best-effort click in Agents sidebar |
+| Conversation read | PARTIALLY_SUPPORTED | DOM heuristics; may miss nested webviews |
+| Prompt inject | PARTIALLY_SUPPORTED | Composer textarea/contenteditable + Enter |
+| Permissions | PARTIALLY_SUPPORTED | Button label heuristics; never auto-approve |
+| Plan | PARTIALLY_SUPPORTED / NOT_CURRENTLY_ACCESSIBLE | When plan UI not in DOM |
+| File changes / diffs | NOT_CURRENTLY_ACCESSIBLE often | SCM list heuristics only when visible |
+| Full Agents storage / offline history API | NOT_CURRENTLY_ACCESSIBLE | No private Cursor store access |
+
+#### Known limitations
+
+- Conversation/plan/permission extraction uses best-effort DOM heuristics; Cursor Electron UI can change
+- History list reflects only currently visible Agents sidebar rows — not a full offline archive
+- Nested webviews may not always expose full Agent internals
+- Unavailable data is reported as unavailable — never fabricated
+- Approvals are **never** automatic
+
 ### View CLI Logs
 
 Select "Cursor Remote" channel in Cursor IDE's Output panel to see logs like:
@@ -402,6 +510,8 @@ Select "Cursor Remote" channel in Cursor IDE's Output panel to see logs like:
 [CLI] CLI stdout: {...}
 [CLI] CLI process exited with code 0
 ```
+
+CDP logs use the `[CDP]` prefix (connect, targets, session state, permissions, reconnect).
 
 ---
 
@@ -430,6 +540,26 @@ Select "Cursor Remote" channel in Cursor IDE's Output panel to see logs like:
 ---
 
 ## Troubleshooting
+
+### CDP / Existing Agent Issues
+
+#### `curl http://127.0.0.1:9222/json` fails
+
+- Quit Cursor completely and relaunch with `--remote-debugging-port=9222`
+- Confirm nothing else is using 9222: `lsof -i :9222`
+- Enable `cursorRemote.enableCdp` in settings
+
+#### Sessions list empty
+
+- CDP must be enabled and Cursor must expose `/json` targets
+- Click refresh in the Existing Agent panel
+- Check Output → Cursor Remote for `[CDP]` logs
+
+#### Prompt does not reach the IDE Agent
+
+- Confirm backend is **Existing Agent** (not CLI)
+- Select the correct Cursor window/session
+- Composer DOM may have changed — check `[CDP]` extraction notes
 
 ### CLI Issues
 

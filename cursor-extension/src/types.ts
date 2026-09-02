@@ -26,6 +26,11 @@ export interface CommandMessage {
   limit?: number; // 조회 제한 (대화 히스토리 조회용)
   agentMode?: AgentMode; // 에이전트 모드 (agent, ask, plan, debug, auto)
   senderDeviceId?: string; // 릴레이 모드에서 요청을 보낸 모바일 디바이스 ID (유니캐스트 응답용)
+  /** Prefer CLI or existing IDE Agent (CDP). */
+  agentBackend?: "cli" | "cdp";
+  requestId?: string;
+  /** Agents sidebar history row id (CDP DOM scrape). */
+  historyId?: string;
 }
 
 export interface CommandResult {
@@ -42,7 +47,7 @@ export interface ChatResponseMessage {
   type: "chat_response";
   text: string;
   timestamp: string;
-  source?: "ide" | "cli" | "hook";
+  source?: "ide" | "cli" | "hook" | "cdp";
   sessionId?: string; // 현재 세션 ID (클라이언트가 추적 가능)
   clientId?: string; // 클라이언트 ID (어떤 클라이언트의 세션인지)
 }

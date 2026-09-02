@@ -8,6 +8,7 @@ import { RulesManager } from "./rules-manager";
 import { StatusBarManager } from "./status-bar";
 import { RelayClient } from "./relay-client";
 import { CONFIG } from "./config";
+import { CdpManager } from "./cdp/cdp-manager";
 
 let wsServer: WebSocketServer | null = null;
 let commandHandler: CommandHandler | null = null;
@@ -17,6 +18,7 @@ let httpServer: HttpServer | null = null;
 let rulesManager: RulesManager | null = null;
 let statusBarManager: StatusBarManager | null = null;
 let relayClient: RelayClient | null = null;
+let cdpManager: CdpManager | null = null;
 let outputChannel: vscode.OutputChannel;
 /** 연결 정보 Webview 패널 (열려 있을 때만 갱신용) */
 let connectionsPanel: vscode.WebviewPanel | null = null;
@@ -38,19 +40,19 @@ function getConnectionsViewHtml(data: {
   const { serverRunning, serverPort, relaySessionId, relayStoreLabel, relayServerUrl, localClientIds } = data;
   const relayStoreLine =
     relayStoreLabel != null
-      ? `<p class="relay-meta"><strong>저장소:</strong> ${escapeHtml(relayStoreLabel)}</p>`
+      ? `<p class="relay-meta"><strong>Store:</strong> ${escapeHtml(relayStoreLabel)}</p>`
       : "";
   const relayUrlLine =
     relayServerUrl != null
-      ? `<p class="relay-meta"><strong>서버:</strong> <code>${escapeHtml(relayServerUrl)}</code></p>`
+      ? `<p class="relay-meta"><strong>Server:</strong> <code>${escapeHtml(relayServerUrl)}</code></p>`
       : "";
   const relaySection =
     relaySessionId != null
       ? `
     <section class="section">
-      <h2>📡 릴레이</h2>
-      <p class="status connected">릴레이 서버를 통해 접속 중</p>
-      <p class="session-id"><strong>세션 ID:</strong> <code>${escapeHtml(
+      <h2>📡 Relay</h2>
+      <p class="status connected">Connected via relay server</p>
+      <p class="session-id"><strong>Session ID:</strong> <code>${escapeHtml(
         relaySessionId
       )}</code></p>
       ${relayStoreLine}
@@ -58,8 +60,8 @@ function getConnectionsViewHtml(data: {
     </section>`
       : `
     <section class="section">
-      <h2>📡 릴레이</h2>
-      <p class="status disconnected">연결 안 됨</p>
+      <h2>📡 Relay</h2>
+      <p class="status disconnected">Not connected</p>
       ${relayStoreLine}
       ${relayUrlLine}
     </section>`;
@@ -68,15 +70,15 @@ function getConnectionsViewHtml(data: {
     localClientIds.length > 0
       ? `
     <section class="section">
-      <h2>🖥️ 로컬 클라이언트 (${localClientIds.length}개)</h2>
+      <h2>🖥️ Local clients (${localClientIds.length})</h2>
       <ul>${localClientIds
         .map((id) => `<li><code>${escapeHtml(id)}</code></li>`)
         .join("")}</ul>
     </section>`
       : `
     <section class="section">
-      <h2>🖥️ 로컬 클라이언트</h2>
-      <p class="status disconnected">연결 없음</p>
+      <h2>🖥️ Local clients</h2>
+      <p class="status disconnected">No connections</p>
     </section>`;
 
   return `<!DOCTYPE html>
@@ -96,11 +98,11 @@ function getConnectionsViewHtml(data: {
   </style>
 </head>
 <body>
-  <h1>Cursor Remote - 연결 정보</h1>
+  <h1>Cursor Remote - Connection Info</h1>
   <section class="section">
-    <h2>🔌 서버</h2>
+    <h2>🔌 Server</h2>
     <p class="status ${serverRunning ? "connected" : "disconnected"}">
-      ${serverRunning ? `포트 ${serverPort ?? "-"}에서 실행 중` : "중지됨"}
+      ${serverRunning ? `Running on port ${serverPort ?? "-"}` : "Stopped"}
     </p>
   </section>
   ${relaySection}
@@ -195,6 +197,85 @@ export async function activate(context: vscode.ExtensionContext) {
 
   outputChannel.appendLine(
     "[Cursor Remote] CLI mode is enabled - using Cursor CLI"
+  );
+
+  // CDP (Existing Cursor Agent) — localhost only, never exposed to Android
+  const startOrRefreshCdp = async (reason: string) => {
+    const cfg = vscode.workspace.getConfiguration("cursorRemote");
+    const enableCdp =
+      CONFIG.ENABLE_CDP || cfg.get<boolean>("enableCdp", false) === true;
+    const cdpHostRaw =
+      process.env.CDP_HOST ||
+      cfg.get<string>("cdpHost", CONFIG.CDP_HOST) ||
+      CONFIG.CDP_HOST;
+    const cdpPort =
+      Number(process.env.CDP_PORT) ||
+      cfg.get<number>("cdpPort", CONFIG.CDP_PORT) ||
+      CONFIG.CDP_PORT;
+    const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1"]);
+    const cdpHostNorm = String(cdpHostRaw).trim().toLowerCase();
+    const cdpHost =
+      cdpHostNorm === "localhost" || cdpHostNorm === "::1"
+        ? "127.0.0.1"
+        : cdpHostNorm;
+
+    if (enableCdp && !loopbackHosts.has(cdpHostNorm)) {
+      outputChannel.appendLine(
+        `[CDP] Refusing non-loopback host "${cdpHostRaw}". CDP must stay on localhost.`
+      );
+      return;
+    }
+
+    if (!cdpManager) {
+      cdpManager = new CdpManager({
+        host: cdpHost,
+        port: cdpPort,
+        enabled: enableCdp,
+        pollIntervalMs: CONFIG.CDP_POLL_INTERVAL_MS,
+        log: (msg) => outputChannel.appendLine(msg),
+        logError: (msg, err) =>
+          outputChannel.appendLine(
+            `${msg}${err ? ` - ${err instanceof Error ? err.message : String(err)}` : ""}`
+          ),
+        broadcast: (payload) => {
+          if (wsServer) {
+            wsServer.send(JSON.stringify(payload));
+          }
+        },
+      });
+      commandHandler?.setCdpManager(cdpManager);
+    } else {
+      cdpManager.setEnabled(enableCdp);
+      cdpManager.updateEndpoint(cdpHost, cdpPort);
+    }
+
+    outputChannel.appendLine(
+      `[CDP] Config refresh (${reason}): enableCdp=${enableCdp} ${cdpHost}:${cdpPort}`
+    );
+
+    if (enableCdp) {
+      await cdpManager.start();
+    } else {
+      await cdpManager.stop();
+      outputChannel.appendLine("[CDP] Disabled via settings");
+    }
+  };
+
+  await startOrRefreshCdp("activate");
+
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration(async (e) => {
+      if (!e.affectsConfiguration("cursorRemote")) return;
+      try {
+        await startOrRefreshCdp("settings-change");
+      } catch (error) {
+        outputChannel.appendLine(
+          `[CDP] Settings refresh failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    })
   );
 
   // HTTP server for hooks
@@ -405,27 +486,27 @@ export async function activate(context: vscode.ExtensionContext) {
         return;
       }
       const sid = await vscode.window.showInputBox({
-        title: "Cursor Remote: 릴레이 세션 ID",
-        prompt: "모바일에서 연결한 세션 ID 6자 입력 (예: 3ZUESK)",
+        title: "Cursor Remote: Relay Session ID",
+        prompt: "Enter the 6-character session ID from the mobile app (e.g. 3ZUESK)",
         placeHolder: "3ZUESK",
         validateInput: (value) => {
           const v = value?.trim().toUpperCase() ?? "";
-          if (!v) return "세션 ID를 입력하세요.";
-          if (!/^[A-Z0-9]{6}$/.test(v)) return "6자 영숫자 (예: 3ZUESK)";
+          if (!v) return "Please enter a session ID.";
+          if (!/^[A-Z0-9]{6}$/.test(v)) return "Must be 6 alphanumeric characters (e.g. 3ZUESK)";
           return null;
         },
       });
       if (!sid) return;
       const pin = await vscode.window.showInputBox({
-        title: "Cursor Remote: PIN (선택)",
+        title: "Cursor Remote: PIN (optional)",
         prompt:
-          "PC가 이 세션에 PIN을 설정했다면 4~6자리 PIN 입력. (설정 안 했으면 공백)",
+          "If this session has a PIN, enter the 4–6 digit PIN. Leave blank if none was set.",
         placeHolder: "1234",
         password: true,
         validateInput: (v) => {
           const t = (v ?? "").trim();
           if (!t) return null;
-          if (!/^\d{4,6}$/.test(t)) return "4~6자리 숫자";
+          if (!/^\d{4,6}$/.test(t)) return "Must be 4–6 digits";
           return null;
         },
       });
@@ -439,15 +520,15 @@ export async function activate(context: vscode.ExtensionContext) {
     "cursorRemote.setRelaySessionId",
     async () => {
       const sid = await vscode.window.showInputBox({
-        title: "Cursor Remote: 릴레이 세션 ID 설정",
+        title: "Cursor Remote: Set Relay Session ID",
         prompt:
-          "다음 릴레이 시작 시 사용할 세션 ID 6자 (모바일에서 같은 ID로 연결)",
+          "Enter a 6-character session ID to use on the next relay start (connect from mobile with the same ID)",
         placeHolder: "3ZUESK",
         value: context.globalState.get<string>("cursorRemote.sessionId") ?? "",
         validateInput: (value) => {
           const v = (value ?? "").trim().toUpperCase();
-          if (!v) return "세션 ID를 입력하세요.";
-          if (!/^[A-Z0-9]{6}$/.test(v)) return "6자 영숫자 (예: 3ZUESK)";
+          if (!v) return "Please enter a session ID.";
+          if (!/^[A-Z0-9]{6}$/.test(v)) return "Must be 6 alphanumeric characters (e.g. 3ZUESK)";
           return null;
         },
       });
@@ -457,9 +538,9 @@ export async function activate(context: vscode.ExtensionContext) {
           sid.trim().toUpperCase()
         );
         vscode.window.showInformationMessage(
-          `Cursor Remote: 세션 ID가 ${sid
+          `Cursor Remote: Session ID ${sid
             .trim()
-            .toUpperCase()}로 저장되었습니다. (다음 릴레이 시작 시 사용)`
+            .toUpperCase()} saved. (Used on next relay start)`
         );
       }
     }
@@ -506,7 +587,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
       const panel = vscode.window.createWebviewPanel(
         "cursorRemote.connections",
-        "Cursor Remote - 연결 정보",
+        "Cursor Remote - Connection Info",
         vscode.ViewColumn.One,
         { enableScripts: false }
       );
@@ -536,15 +617,15 @@ export async function activate(context: vscode.ExtensionContext) {
         return;
       }
       const sid = await vscode.window.showInputBox({
-        title: "Cursor Remote: 릴레이 세션 ID",
+        title: "Cursor Remote: Relay Session ID",
         prompt:
-          "모바일에서 연결할 세션 ID 6자 입력 (같은 ID를 모바일에서 입력하면 연결됩니다)",
+          "Enter a 6-character session ID to connect (enter the same ID on mobile to pair)",
         placeHolder: "3ZUESK",
         value: context.globalState.get<string>("cursorRemote.sessionId") ?? "",
         validateInput: (value) => {
           const v = (value ?? "").trim().toUpperCase();
-          if (!v) return "세션 ID를 입력하세요.";
-          if (!/^[A-Z0-9]{6}$/.test(v)) return "6자 영숫자 (예: 3ZUESK)";
+          if (!v) return "Please enter a session ID.";
+          if (!/^[A-Z0-9]{6}$/.test(v)) return "Must be 6 alphanumeric characters (e.g. 3ZUESK)";
           return null;
         },
       });
@@ -553,15 +634,15 @@ export async function activate(context: vscode.ExtensionContext) {
       await context.globalState.update("cursorRemote.sessionId", sidTrimmed);
 
       const pin = await vscode.window.showInputBox({
-        title: "Cursor Remote: PIN (선택)",
+        title: "Cursor Remote: PIN (optional)",
         prompt:
-          "4~6자리 PIN을 설정하면 모바일에서 이 PIN을 알아야만 접속할 수 있습니다. (공백으로 두면 PIN 없음)",
+          "Set a 4–6 digit PIN so mobile clients must know it to connect. Leave blank for no PIN.",
         placeHolder: "1234",
         password: true,
         validateInput: (v) => {
           const t = (v ?? "").trim();
           if (!t) return null;
-          if (!/^\d{4,6}$/.test(t)) return "4~6자리 숫자";
+          if (!/^\d{4,6}$/.test(t)) return "Must be 4–6 digits";
           return null;
         },
       });
@@ -569,25 +650,25 @@ export async function activate(context: vscode.ExtensionContext) {
       try {
         await relayClient.start(sidTrimmed, pinToUse);
         outputChannel.appendLine(
-          `[${new Date().toLocaleTimeString()}] ✅ Relay 연결됨 - 세션: ${sidTrimmed}${
-            pinToUse ? " (PIN 설정됨)" : ""
+          `[${new Date().toLocaleTimeString()}] ✅ Relay connected - Session: ${sidTrimmed}${
+            pinToUse ? " (PIN set)" : ""
           }`
         );
         outputChannel.show();
         if (statusBarManager) statusBarManager.refresh();
         updateConnectionsView();
         vscode.window.showInformationMessage(
-          `Cursor Remote: 세션 ${sidTrimmed}에 연결되었습니다.`
+          `Cursor Remote: Connected to session ${sidTrimmed}.`
         );
       } catch (error) {
         const errorMsg =
           error instanceof Error ? error.message : "Unknown error";
         outputChannel.appendLine(
-          `[${new Date().toLocaleTimeString()}] ⚠️ 릴레이 연결 실패: ${errorMsg}`
+          `[${new Date().toLocaleTimeString()}] ⚠️ Relay connection failed: ${errorMsg}`
         );
         outputChannel.show();
         vscode.window.showErrorMessage(
-          `Cursor Remote: 릴레이 연결 실패 - ${errorMsg}`
+          `Cursor Remote: Relay connection failed - ${errorMsg}`
         );
       }
     }
@@ -643,8 +724,8 @@ export async function activate(context: vscode.ExtensionContext) {
       }
       vscode.window.showInformationMessage(
         sessionId != null
-          ? `Cursor Remote: 익스텐션은 릴레이 서버를 통해 세션 ${sessionId}에 접속했습니다.`
-          : "Cursor Remote: 익스텐션은 릴레이 서버에 연결되었습니다."
+          ? `Cursor Remote: Extension connected to session ${sessionId} via the relay server.`
+          : "Cursor Remote: Extension connected to the relay server."
       );
     });
     // 복수 세션 발견 시 사용자가 선택할 수 있도록 QuickPick 표시
@@ -652,12 +733,12 @@ export async function activate(context: vscode.ExtensionContext) {
       const picked = await vscode.window.showQuickPick(
         sessions.map((s) => ({
           label: s.sessionId,
-          description: "세션 ID",
+          description: "Session ID",
         })),
         {
-          title: "Cursor Remote: 연결할 릴레이 세션 선택",
+          title: "Cursor Remote: Select Relay Session",
           placeHolder:
-            "대기 중인 세션이 여러 개입니다. 모바일에서 연결한 세션을 선택하세요.",
+            "Multiple sessions are waiting. Select the one connected from mobile.",
         }
       );
       return picked?.label ?? null;
@@ -672,7 +753,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // Set up message forwarding: Relay Server -> Extension WebSocket
   relayClient.setOnMessage((message: string) => {
     outputChannel.appendLine(
-      `[${new Date().toLocaleTimeString()}] === RELAY: 메시지 수신됨 (길이: ${
+      `[${new Date().toLocaleTimeString()}] === RELAY: message received (length: ${
         message.length
       }) ===`
     );
@@ -743,7 +824,7 @@ export async function activate(context: vscode.ExtensionContext) {
       }
       updateConnectionsView();
       outputChannel.appendLine(
-        `[${new Date().toLocaleTimeString()}] [Relay] 릴레이 비활성. 상태줄 'Cursor Remote' 클릭 → 세션 ID·PIN 입력하여 연결`
+        `[${new Date().toLocaleTimeString()}] [Relay] Relay inactive. Click the 'Cursor Remote' status bar item → enter Session ID and PIN to connect`
       );
     })
     .catch((error) => {
@@ -759,12 +840,31 @@ export async function activate(context: vscode.ExtensionContext) {
       }
     });
 
+  // Keep :8766 alive — if the listener dies, live chat sync to phone breaks.
+  const wsWatchdog = setInterval(() => {
+    if (!wsServer) return;
+    void wsServer.ensureListening().then((ok) => {
+      if (ok && statusBarManager) {
+        // refresh port display if recovered
+        statusBarManager.refresh();
+      }
+    });
+  }, 5000);
+  context.subscriptions.push({
+    dispose: () => clearInterval(wsWatchdog),
+  });
+
   if (statusBarManager) {
     statusBarManager.show();
   }
 }
 
 export function deactivate() {
+  if (cdpManager) {
+    void cdpManager.stop();
+    cdpManager = null;
+  }
+
   if (relayClient) {
     relayClient.stop();
     relayClient = null;

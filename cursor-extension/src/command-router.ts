@@ -99,6 +99,47 @@ export class CommandRouter {
         case "execute_action":
           result = await this.handleExecuteAction(command);
           break;
+        case "cdp_status":
+        case "get_cdp_status":
+          result = await this.handleCdpStatus();
+          break;
+        case "cdp_targets":
+        case "get_cdp_targets":
+          result = await this.handleCdpTargets();
+          break;
+        case "get_sessions":
+        case "sessions":
+          result = await this.handleGetSessions();
+          break;
+        case "get_agent_history":
+        case "agent_history":
+          result = await this.handleGetAgentHistory();
+          break;
+        case "open_agent_history":
+          result = await this.handleOpenAgentHistory(command);
+          break;
+        case "select_session":
+          result = await this.handleSelectSession(command);
+          break;
+        case "get_agent_state":
+          result = await this.handleGetAgentState(command);
+          break;
+        case "get_agent_plan":
+        case "get_plan":
+          result = await this.handleGetAgentPlan(command);
+          break;
+        case "agent_prompt":
+          result = await this.handleAgentPrompt(command);
+          break;
+        case "cli_prompt":
+          result = await this.handleCliPrompt(command);
+          break;
+        case "approve_action":
+          result = await this.handleApproveAction(command);
+          break;
+        case "reject_action":
+          result = await this.handleRejectAction(command);
+          break;
         default:
           const errorMsg = `Unknown command type: ${command.type}`;
           this.log(errorMsg);
@@ -275,13 +316,16 @@ export class CommandRouter {
         this.log("Routing to prompt");
         const newSession = command.newSession === true;
         const agentMode = command.agentMode || "auto";
+        const agentBackend =
+          command.agentBackend === "cdp" ? "cdp" : ("cli" as const);
         await this.commandHandler.insertToPrompt(
           text,
           execute,
           command.clientId,
           newSession,
           agentMode,
-          command.senderDeviceId // 유니캐스트 응답용
+          command.senderDeviceId,
+          agentBackend
         );
         return {
           success: true,
@@ -391,5 +435,192 @@ export class CommandRouter {
       command.action || ""
     );
     return result;
+  }
+
+  private async handleCdpStatus(): Promise<CommandResult> {
+    const status = await this.commandHandler.getCdpStatus();
+    this.wsServer.send(JSON.stringify(status));
+    return { success: true, data: status };
+  }
+
+  private async handleCdpTargets(): Promise<CommandResult> {
+    const targets = await this.commandHandler.refreshCdpTargets();
+    this.wsServer.send(JSON.stringify({ type: "cdp_targets", targets }));
+    return { success: true, data: { targets } };
+  }
+
+  private async handleGetSessions(): Promise<CommandResult> {
+    await this.commandHandler.refreshCdpTargets();
+    const sessions = await this.commandHandler.listCdpSessions();
+    this.wsServer.send(JSON.stringify({ type: "sessions", sessions }));
+    const history = this.commandHandler.getCachedAgentHistory();
+    this.wsServer.send(JSON.stringify({ type: "agent_history", ...history }));
+    return { success: true, data: { sessions, history } };
+  }
+
+  private async handleGetAgentHistory(): Promise<CommandResult> {
+    const history = await this.commandHandler.getAgentHistory();
+    this.wsServer.send(JSON.stringify({ type: "agent_history", ...history }));
+    return { success: true, data: history };
+  }
+
+  private async handleOpenAgentHistory(
+    command: CommandMessage
+  ): Promise<CommandResult> {
+    const historyId = command.historyId || "";
+    if (!historyId) {
+      return { success: false, error: "historyId required" };
+    }
+    const result = await this.commandHandler.openAgentHistory(historyId);
+    if (!result.ok) {
+      return { success: false, error: result.error || "Failed to open history" };
+    }
+    return { success: true, data: result };
+  }
+
+  private async handleSelectSession(
+    command: CommandMessage
+  ): Promise<CommandResult> {
+    const sessionId = command.sessionId || "";
+    const ok = this.commandHandler.selectCdpSession(sessionId);
+    if (!ok) {
+      return { success: false, error: "Session not found" };
+    }
+    const state = await this.commandHandler.getAgentState(sessionId);
+    if (state) {
+      this.wsServer.send(
+        JSON.stringify({
+          type: "agent_state",
+          sessionId: state.id,
+          state: state.state,
+          messages: state.messages,
+          plan: state.plan,
+          pendingApproval: state.pendingApproval,
+          title: state.title,
+          workspace: state.workspace,
+          model: state.model,
+          fileChanges: state.fileChanges,
+          activity: state.activity,
+          latestMessage: state.latestMessage,
+          latestActivity: state.latestActivity,
+          lastActivity: state.lastActivity,
+          capabilities: state.capabilities,
+          extractionNotes: state.extractionNotes,
+        })
+      );
+    }
+    return { success: true, data: { sessionId } };
+  }
+
+  private async handleGetAgentState(
+    command: CommandMessage
+  ): Promise<CommandResult> {
+    const state = await this.commandHandler.getAgentState(command.sessionId);
+    if (!state) {
+      return {
+        success: false,
+        error:
+          "No Cursor Agent session available. Enable CDP and launch Cursor with --remote-debugging-port=9222.",
+      };
+    }
+    this.wsServer.send(
+      JSON.stringify({
+        type: "agent_state",
+        sessionId: state.id,
+        state: state.state,
+        messages: state.messages,
+        plan: state.plan,
+        pendingApproval: state.pendingApproval,
+        title: state.title,
+        workspace: state.workspace,
+        model: state.model,
+        fileChanges: state.fileChanges,
+        activity: state.activity,
+        latestMessage: state.latestMessage,
+        latestActivity: state.latestActivity,
+        lastActivity: state.lastActivity,
+        capabilities: state.capabilities,
+        extractionNotes: state.extractionNotes,
+      })
+    );
+    return { success: true, data: state };
+  }
+
+  private async handleGetAgentPlan(
+    command: CommandMessage
+  ): Promise<CommandResult> {
+    const state = await this.commandHandler.getAgentState(command.sessionId);
+    const plan = state?.plan || { title: "", steps: [], available: false };
+    this.wsServer.send(
+      JSON.stringify({
+        type: "agent_plan",
+        sessionId: state?.id || command.sessionId || null,
+        plan,
+      })
+    );
+    return { success: true, data: { plan } };
+  }
+
+  private async handleAgentPrompt(
+    command: CommandMessage
+  ): Promise<CommandResult> {
+    const text = this.normalizePromptText(command.text || "");
+    if (!text) {
+      return { success: false, error: "Empty prompt" };
+    }
+    await this.commandHandler.insertToPrompt(
+      text,
+      true,
+      command.clientId,
+      false,
+      command.agentMode || "auto",
+      command.senderDeviceId,
+      "cdp",
+      command.sessionId
+    );
+    return { success: true, message: "Prompt sent to existing Cursor Agent" };
+  }
+
+  private async handleCliPrompt(
+    command: CommandMessage
+  ): Promise<CommandResult> {
+    const text = this.normalizePromptText(command.text || "");
+    if (!text) {
+      return { success: false, error: "Empty prompt" };
+    }
+    await this.commandHandler.insertToPrompt(
+      text,
+      true,
+      command.clientId,
+      command.newSession === true,
+      command.agentMode || "auto",
+      command.senderDeviceId,
+      "cli"
+    );
+    return { success: true, message: "Prompt sent to Cursor CLI" };
+  }
+
+  private async handleApproveAction(
+    command: CommandMessage
+  ): Promise<CommandResult> {
+    const result = await this.commandHandler.approveCdpAction(
+      command.sessionId,
+      command.requestId
+    );
+    return result.ok
+      ? { success: true, message: "Approved" }
+      : { success: false, error: result.error || "Approve failed" };
+  }
+
+  private async handleRejectAction(
+    command: CommandMessage
+  ): Promise<CommandResult> {
+    const result = await this.commandHandler.rejectCdpAction(
+      command.sessionId,
+      command.requestId
+    );
+    return result.ok
+      ? { success: true, message: "Rejected" }
+      : { success: false, error: result.error || "Reject failed" };
   }
 }

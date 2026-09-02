@@ -92,14 +92,14 @@ export class HttpServer {
         const availablePort = await this.findAvailablePort(httpPort);
 
         if (availablePort === null) {
-            const errorMsg = `포트 ${httpPort}부터 ${httpPort + CONFIG.PORT_SEARCH_MAX_ATTEMPTS}까지 모두 사용 중입니다. 다른 프로세스를 종료하거나 Cursor를 재시작해주세요.`;
+            const errorMsg = `All ports from ${httpPort} to ${httpPort + CONFIG.PORT_SEARCH_MAX_ATTEMPTS} are in use. Stop other processes or restart Cursor.`;
             this.logError(errorMsg);
             vscode.window.showErrorMessage(`Cursor Remote: ${errorMsg}`);
             return;
         }
 
         if (availablePort !== httpPort) {
-            const warningMsg = `포트 ${httpPort}가 사용 중이어서 포트 ${availablePort}를 사용합니다.`;
+            const warningMsg = `Port ${httpPort} is in use; using port ${availablePort} instead.`;
             this.log(`⚠️ ${warningMsg}`);
             vscode.window.showWarningMessage(`Cursor Remote: ${warningMsg}`);
         }
@@ -181,7 +181,7 @@ export class HttpServer {
 
             this.server!.on('error', (error: NodeJS.ErrnoException) => {
                 const errorMsg = error.code === 'EADDRINUSE'
-                    ? `포트 ${availablePort}가 사용 중입니다. Cursor를 재시작해주세요.`
+                    ? `Port ${availablePort} is in use. Please restart Cursor.`
                     : error.message;
                 this.logError('HTTP server error', errorMsg);
                 if (error.code === 'EADDRINUSE') {
@@ -189,7 +189,7 @@ export class HttpServer {
                     this.server = null;
                     this.port = null;
                 } else {
-                    vscode.window.showErrorMessage(`Cursor Remote: HTTP 서버 오류 - ${errorMsg}`);
+                    vscode.window.showErrorMessage(`Cursor Remote: HTTP server error - ${errorMsg}`);
                 }
                 reject(new Error(errorMsg));
             });

@@ -4,12 +4,14 @@ import * as fs from "fs";
 import { CLIHandler } from "./cli-handler";
 import { WebSocketServer } from "./websocket-server";
 import { CONFIG } from "./config";
+import { CdpManager } from "./cdp/cdp-manager";
 
 export class CommandHandler {
   private outputChannel: vscode.OutputChannel | null = null;
   private wsServer: WebSocketServer | null = null;
   private cliHandler: CLIHandler | null = null;
   private useCLIMode: boolean = true;
+  private cdpManager: CdpManager | null = null;
 
   constructor(
     outputChannel?: vscode.OutputChannel,
@@ -20,15 +22,118 @@ export class CommandHandler {
     this.wsServer = wsServer || null;
     this.useCLIMode = useCLIMode;
 
-    // CLI 핸들러 초기화 (CLI 모드가 기본)
-    // 워크스페이스가 없으면 undefined 전달 (F5 테스트 시 process.cwd()가 '/'가 되어 /.cursor 생성 오류 방지)
+    // CLI handler always available as fallback
     const workspaceFolders = vscode.workspace.workspaceFolders;
     const workspaceRoot =
       workspaceFolders && workspaceFolders.length > 0
         ? workspaceFolders[0].uri.fsPath
         : undefined;
     this.cliHandler = new CLIHandler(outputChannel, wsServer, workspaceRoot);
-    this.log("[Cursor Remote] CLI mode enabled");
+    this.log("[Cursor Remote] CLI mode available");
+  }
+
+  setCdpManager(manager: CdpManager | null): void {
+    this.cdpManager = manager;
+  }
+
+  /** If settings enable CDP but manager was started disabled, start it now. */
+  async ensureCdpRunning(): Promise<void> {
+    if (!this.cdpManager) return;
+    const cfg = vscode.workspace.getConfiguration("cursorRemote");
+    const enable =
+      CONFIG.ENABLE_CDP || cfg.get<boolean>("enableCdp", false) === true;
+    if (!enable) return;
+    if (!this.cdpManager.enabled) {
+      this.log("[CDP] enableCdp is on — starting CDP manager on demand");
+      this.cdpManager.setEnabled(true);
+      await this.cdpManager.start();
+    }
+  }
+
+  async getCdpStatus() {
+    await this.ensureCdpRunning();
+    if (!this.cdpManager) {
+      return {
+        type: "cdp_status" as const,
+        enabled: false,
+        connected: false,
+        host: CONFIG.CDP_HOST,
+        port: CONFIG.CDP_PORT,
+        activeSessionId: null,
+        targets: [],
+        error: "CDP manager not started",
+      };
+    }
+    return this.cdpManager.getStatus();
+  }
+
+  async refreshCdpTargets() {
+    await this.ensureCdpRunning();
+    if (!this.cdpManager || !this.cdpManager.enabled) {
+      return [];
+    }
+    return this.cdpManager.rediscover();
+  }
+
+  async listCdpSessions() {
+    await this.ensureCdpRunning();
+    return this.cdpManager?.listSessions() ?? [];
+  }
+
+  selectCdpSession(sessionId: string): boolean {
+    return this.cdpManager?.selectSession(sessionId) ?? false;
+  }
+
+  async getAgentState(sessionId?: string) {
+    if (!this.cdpManager) return null;
+    return this.cdpManager.getAgentState(sessionId);
+  }
+
+  async approveCdpAction(sessionId?: string, requestId?: string) {
+    if (!this.cdpManager) {
+      return { ok: false, error: "CDP not available" };
+    }
+    return this.cdpManager.approveAction(sessionId, requestId);
+  }
+
+  async rejectCdpAction(sessionId?: string, requestId?: string) {
+    if (!this.cdpManager) {
+      return { ok: false, error: "CDP not available" };
+    }
+    return this.cdpManager.rejectAction(sessionId, requestId);
+  }
+
+  async getAgentHistory() {
+    await this.ensureCdpRunning();
+    if (!this.cdpManager) {
+      return {
+        available: false,
+        support: "NOT_CURRENTLY_ACCESSIBLE" as const,
+        items: [],
+        count: 0,
+        note: "CDP manager not started",
+      };
+    }
+    return this.cdpManager.refreshAgentHistory();
+  }
+
+  getCachedAgentHistory() {
+    return (
+      this.cdpManager?.getAgentHistory() ?? {
+        available: false,
+        support: "NOT_CURRENTLY_ACCESSIBLE" as const,
+        items: [],
+        count: 0,
+      }
+    );
+  }
+
+  async openAgentHistory(historyId: string) {
+    await this.ensureCdpRunning();
+    if (!this.cdpManager) {
+      return { ok: false, error: "CDP not available" };
+    }
+    return this.cdpManager.openAgentHistoryItem(historyId);
   }
 
   /** 릴레이 모드일 때 챗 히스토리에 relaySessionId를 넣기 위한 getter 설정 */
@@ -245,7 +350,7 @@ export class CommandHandler {
           error instanceof Error ? error.stack : "N/A"
         }`
       );
-      throw new Error(`터미널 입력 실패: ${errorMsg}`);
+      throw new Error(`Failed to send terminal input: ${errorMsg}`);
     }
   }
 
@@ -255,19 +360,39 @@ export class CommandHandler {
     clientId?: string,
     newSession: boolean = false,
     agentMode: "agent" | "ask" | "plan" | "debug" | "auto" = "auto",
-    senderDeviceId?: string
+    senderDeviceId?: string,
+    agentBackend: "cli" | "cdp" = "cli",
+    cdpSessionId?: string
   ): Promise<void> {
     this.log(
       `[Cursor Remote] insertToPrompt called - textLength: ${
         text.length
       }, execute: ${execute}, clientId: ${
         clientId || "none"
-      }, newSession: ${newSession}, agentMode: ${agentMode}, senderDeviceId: ${
+      }, newSession: ${newSession}, agentMode: ${agentMode}, backend: ${agentBackend}, senderDeviceId: ${
         senderDeviceId || "none"
       }`
     );
 
-    // CLI 모드인 경우 CLI 핸들러 사용
+    // Existing Cursor Agent via CDP (does NOT spawn CLI)
+    if (agentBackend === "cdp") {
+      if (!this.cdpManager || !this.cdpManager.enabled) {
+        throw new Error(
+          "CDP mode is not enabled. Enable cursorRemote.enableCdp and launch Cursor with --remote-debugging-port=9222."
+        );
+      }
+      this.log("[Cursor Remote] Using CDP mode for existing Agent session");
+      const sessionId =
+        cdpSessionId ||
+        (clientId && clientId.startsWith("cursor-") ? clientId : undefined);
+      const result = await this.cdpManager.sendAgentPrompt(text, sessionId);
+      if (!result.ok) {
+        throw new Error(result.error || "Failed to send prompt via CDP");
+      }
+      return;
+    }
+
+    // CLI mode (default / fallback)
     if (this.useCLIMode && this.cliHandler) {
       this.log("[Cursor Remote] Using CLI mode for prompt");
       if (execute) {
@@ -280,7 +405,6 @@ export class CommandHandler {
           senderDeviceId
         );
       } else {
-        // execute가 false인 경우는 CLI에서 지원하지 않으므로 경고만
         this.log(
           "[Cursor Remote] Warning: CLI mode does not support non-execute mode, executing anyway"
         );
@@ -314,7 +438,7 @@ export class CommandHandler {
         await new Promise((resolve) => setTimeout(resolve, 800));
       } catch (e) {
         this.logError(`[Cursor Remote] Failed to open chat panel: ${e}`);
-        throw new Error("채팅 패널을 열 수 없습니다.");
+        throw new Error("Failed to open the chat panel.");
       }
 
       // 채팅 입력창에 텍스트를 입력하는 여러 방법 시도
@@ -363,7 +487,7 @@ export class CommandHandler {
 
       if (!textInserted) {
         this.logError("[Cursor Remote] ❌ Failed to insert text");
-        throw new Error("텍스트를 입력할 수 없습니다.");
+        throw new Error("Failed to insert text.");
       }
 
       // execute 옵션이 true이면 프롬프트 실행 (Enter 키 전송)
@@ -443,7 +567,7 @@ export class CommandHandler {
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : "Unknown error";
       this.logError(`Error in insertToPrompt: ${errorMsg}`);
-      throw new Error(`프롬프트 입력 실패: ${errorMsg}`);
+      throw new Error(`Failed to insert prompt: ${errorMsg}`);
     }
   }
 
@@ -708,7 +832,7 @@ export class CommandHandler {
   async setupTerminalOutputCapture(): Promise<string> {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
-      throw new Error("워크스페이스가 열려있지 않습니다");
+      throw new Error("No workspace is open");
     }
 
     const workspaceRoot = workspaceFolders[0].uri.fsPath;

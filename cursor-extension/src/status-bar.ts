@@ -20,7 +20,7 @@ export class StatusBarManager {
     );
     this.statusBarItem.command = "cursorRemote.statusBarClick";
     this.statusBarItem.tooltip =
-      "Cursor Remote: 클릭 시 릴레이 연결(세션 ID·PIN) 또는 연결 정보 보기";
+      "Cursor Remote: Click to connect to relay (Session ID · PIN) or show connection info";
     context.subscriptions.push(this.statusBarItem);
   }
 
@@ -63,23 +63,23 @@ export class StatusBarManager {
           const sessionId = this.relayClient.getSessionId();
           this.statusBarItem.text =
             sessionId != null
-              ? `$(cloud) Cursor Remote: Connected (세션: ${sessionId})`
+              ? `$(cloud) Cursor Remote: Connected (Session: ${sessionId})`
               : "$(cloud) Cursor Remote: Connected";
           this.statusBarItem.tooltip =
             (sessionId != null
-              ? `Cursor Remote: 릴레이 세션 ${sessionId}`
-              : "Cursor Remote: 릴레이 세션에 연결됨") +
-            " · 클릭: 연결 정보 보기";
+              ? `Cursor Remote: Relay session ${sessionId}`
+              : "Cursor Remote: Connected to relay session") +
+            " · Click: show connection info";
         } else {
           this.statusBarItem.text = "$(cloud) Cursor Remote: Connected";
           this.statusBarItem.tooltip =
-            "Cursor Remote: 클라이언트 연결됨 · 클릭: 연결 정보 보기";
+            "Cursor Remote: Client connected · Click: show connection info";
         }
         this.statusBarItem.backgroundColor = undefined;
       } else if (!hasRelaySession) {
-        this.statusBarItem.text = "$(cloud) Cursor Remote: 비활성";
+        this.statusBarItem.text = "$(cloud) Cursor Remote: Inactive";
         this.statusBarItem.tooltip =
-          "Cursor Remote: 릴레이 끔 · 클릭: 세션 ID·PIN 입력하여 연결";
+          "Cursor Remote: Relay off · Click: enter Session ID and PIN to connect";
         this.statusBarItem.backgroundColor = new vscode.ThemeColor(
           "statusBarItem.warningBackground"
         );
@@ -87,7 +87,7 @@ export class StatusBarManager {
         this.statusBarItem.text =
           "$(cloud) Cursor Remote: Ready (waiting for client)";
         this.statusBarItem.tooltip =
-          "Cursor Remote: 클라이언트 대기 중 · 클릭: 연결 정보 보기";
+          "Cursor Remote: Waiting for client · Click: show connection info";
         this.statusBarItem.backgroundColor = new vscode.ThemeColor(
           "statusBarItem.warningBackground"
         );
@@ -95,7 +95,7 @@ export class StatusBarManager {
     } else {
       this.statusBarItem.text = "$(cloud-off) Cursor Remote: Stopped";
       this.statusBarItem.tooltip =
-        "Cursor Remote: 서버 중지됨 · 클릭: 연결 정보 보기";
+        "Cursor Remote: Server stopped · Click: show connection info";
       this.statusBarItem.backgroundColor = new vscode.ThemeColor(
         "statusBarItem.errorBackground"
       );

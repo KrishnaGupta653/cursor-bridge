@@ -315,7 +315,7 @@ export class CLIHandler {
       const isInstalled = await this.checkCLIInstalled();
       if (!isInstalled) {
         throw new Error(
-          "Cursor CLI (agent)가 설치되어 있지 않습니다. https://cursor.com/cli 에서 설치하세요."
+          "Cursor CLI (agent) is not installed. Install it from https://cursor.com/cli"
         );
       }
 
@@ -595,7 +595,7 @@ export class CLIHandler {
           this.wsServer.send(
             JSON.stringify({
               type: "error",
-              message: `CLI 실행 실패: ${error.message}`,
+              message: `CLI execution failed: ${error.message}`,
               timestamp: new Date().toISOString(),
             })
           );
@@ -636,7 +636,7 @@ export class CLIHandler {
           this.wsServer.send(
             JSON.stringify({
               type: "error",
-              message: `CLI 실행 실패: ${error.message}`,
+              message: `CLI execution failed: ${error.message}`,
               timestamp: new Date().toISOString(),
             })
           );
@@ -645,7 +645,7 @@ export class CLIHandler {
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : "Unknown error";
       this.logError(`Error in sendPrompt: ${errorMsg}`);
-      throw new Error(`CLI 프롬프트 전송 실패: ${errorMsg}`);
+      throw new Error(`Failed to send CLI prompt: ${errorMsg}`);
     }
   }
 
@@ -750,10 +750,10 @@ export class CLIHandler {
         );
         responseText =
           stdout.length > 0
-            ? stdout.trim().substring(0, 2000) || "[CLI 출력이 비어 있습니다.]"
+            ? stdout.trim().substring(0, 2000) || "[CLI output was empty.]"
             : stderr.length > 0
             ? `[CLI stderr]\n${stderr.trim().substring(0, 1000)}`
-            : "[응답이 비어 있습니다. CLI가 출력을 반환하지 않았을 수 있습니다.]";
+            : "[Response was empty. The CLI may not have returned any output.]";
       }
 
       // 대화 히스토리 저장 (응답 수신 시)
@@ -835,7 +835,7 @@ export class CLIHandler {
       if (this.wsServer) {
         const responseMessage = {
           type: "chat_response",
-          text: stdout || stderr || "CLI 실행 완료",
+          text: stdout || stderr || "CLI finished",
           timestamp: new Date().toISOString(),
           source: "cli",
           targetDeviceId: this.currentSenderDeviceId || undefined, // 유니캐스트 응답용
@@ -1497,11 +1497,11 @@ export class CLIHandler {
    */
   private getModeDisplayName(mode: string): string {
     const modeNames: { [key: string]: string } = {
-      agent: "Agent (코딩 작업)",
-      ask: "Ask (질문/학습)",
-      plan: "Plan (계획 수립)",
-      debug: "Debug (버그 수정)",
-      auto: "Auto (자동 선택)",
+      agent: "Agent (coding)",
+      ask: "Ask (questions/learning)",
+      plan: "Plan (planning)",
+      debug: "Debug (bug fixing)",
+      auto: "Auto (automatic)",
     };
     return modeNames[mode] || mode;
   }

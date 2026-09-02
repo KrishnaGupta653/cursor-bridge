@@ -1,15 +1,15 @@
 import 'dart:convert';
 
 enum ConnectionType {
-  local, // 로컬 서버 (IP 주소 직접 연결)
-  relay, // 릴레이 서버 (세션 ID 사용)
+  local, // Local server (direct IP connection)
+  relay, // Relay server (session ID based)
 }
 
 class ConnectionHistoryItem {
   final ConnectionType type;
-  final String? ip; // 로컬 모드일 때
-  final int? port; // 로컬 모드일 때
-  final String? sessionId; // 릴레이 모드일 때
+  final String? ip; // local mode
+  final int? port; // local mode
+  final String? sessionId; // relay mode
   final DateTime timestamp;
 
   ConnectionHistoryItem({
@@ -20,7 +20,7 @@ class ConnectionHistoryItem {
     required this.timestamp,
   });
 
-  // JSON 직렬화
+  // JSON serialization
   Map<String, dynamic> toJson() => {
         'type': type.index,
         'ip': ip,
@@ -29,7 +29,7 @@ class ConnectionHistoryItem {
         'timestamp': timestamp.toIso8601String(),
       };
 
-  // JSON 역직렬화
+  // JSON deserialization
   factory ConnectionHistoryItem.fromJson(Map<String, dynamic> json) {
     return ConnectionHistoryItem(
       type: ConnectionType.values[json['type'] as int],
@@ -42,7 +42,7 @@ class ConnectionHistoryItem {
     );
   }
 
-  // 동일 연결인지 확인 (타입과 주소/세션ID가 같으면 동일)
+  // Checks whether two items represent the same connection (type + address/sessionId)
   bool isSameConnection(ConnectionHistoryItem other) {
     if (type != other.type) return false;
     if (type == ConnectionType.local) {
@@ -52,7 +52,7 @@ class ConnectionHistoryItem {
     }
   }
 
-  // 표시용 문자열
+  // Display string
   String get displayText {
     if (type == ConnectionType.local) {
       final localIp = ip ?? 'Unknown IP';
@@ -62,19 +62,19 @@ class ConnectionHistoryItem {
     }
   }
 
-  // 상대 시간 문자열
+  // Relative time string
   String get relativeTime {
     final now = DateTime.now();
     final diff = now.difference(timestamp);
 
     if (diff.inMinutes < 1) {
-      return '방금 전';
+      return 'Just now';
     } else if (diff.inMinutes < 60) {
-      return '${diff.inMinutes}분 전';
+      return '${diff.inMinutes}m ago';
     } else if (diff.inHours < 24) {
-      return '${diff.inHours}시간 전';
+      return '${diff.inHours}h ago';
     } else if (diff.inDays < 7) {
-      return '${diff.inDays}일 전';
+      return '${diff.inDays}d ago';
     } else {
       return '${timestamp.month}/${timestamp.day}';
     }

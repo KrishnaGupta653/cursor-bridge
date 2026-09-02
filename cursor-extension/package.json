@@ -35,6 +35,32 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "Cursor Remote",
+      "properties": {
+        "cursorRemote.enableCdp": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable CDP mode to attach to an existing Cursor IDE Agent session (requires Cursor launched with --remote-debugging-port=9222). CLI mode remains available."
+        },
+        "cursorRemote.cdpHost": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "CDP host (must remain localhost / loopback for security)."
+        },
+        "cursorRemote.cdpPort": {
+          "type": "number",
+          "default": 9222,
+          "description": "CDP port for Cursor remote debugging."
+        },
+        "cursorRemote.agentBackend": {
+          "type": "string",
+          "enum": ["cli", "cdp"],
+          "default": "cli",
+          "description": "Default agent backend for prompts: cli (Cursor CLI) or cdp (existing IDE Agent via CDP)."
+        }
+      }
+    },
     "commands": [
       {
         "command": "cursorRemote.start",
@@ -50,35 +76,37 @@
       },
       {
         "command": "cursorRemote.showConnections",
-        "title": "Cursor Remote: 연결 정보 보기"
+        "title": "Cursor Remote: Show Connection Info"
       },
       {
         "command": "cursorRemote.statusBarClick",
-        "title": "Cursor Remote: 릴레이 연결 (상태줄 클릭 시)"
+        "title": "Cursor Remote: Connect to Relay (Status Bar)"
       },
       {
         "command": "cursorRemote.checkRelayServer",
-        "title": "Cursor Remote: 릴레이 서버 상태 확인"
+        "title": "Cursor Remote: Check Relay Server Status"
       },
       {
         "command": "cursorRemote.connectToRelaySessionById",
-        "title": "Cursor Remote: 세션 ID로 릴레이 연결"
+        "title": "Cursor Remote: Connect to Relay by Session ID"
       },
       {
         "command": "cursorRemote.setRelaySessionId",
-        "title": "Cursor Remote: 릴레이 세션 ID 설정 (다음 시작 시 사용)"
+        "title": "Cursor Remote: Set Relay Session ID"
       }
     ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run compile && npx esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/extension.js",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node --test out/cdp/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.74.0",
     "@types/ws": "^8.5.0",
+    "esbuild": "^0.28.2",
     "typescript": "^5.0.0"
   },
   "dependencies": {

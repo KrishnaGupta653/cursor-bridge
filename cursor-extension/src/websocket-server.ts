@@ -1,11 +1,11 @@
-import * as WebSocket from "ws";
+import WebSocket, { WebSocketServer as WSServer } from "ws";
 import * as vscode from "vscode";
 import * as net from "net";
 
 type WebSocketClient = WebSocket;
 
 export class WebSocketServer {
-  private wss: WebSocket.Server | null = null;
+  private wss: WSServer | null = null;
   private port: number;
   private actualPort: number | null = null;
   private messageHandlers: ((message: string) => void)[] = [];
@@ -136,9 +136,9 @@ export class WebSocketServer {
     const availablePort = await this.findAvailablePort(this.port);
 
     if (availablePort === null) {
-      const errorMsg = `포트 ${this.port}부터 ${
+      const errorMsg = `All ports from ${this.port} to ${
         this.port + 10
-      }까지 모두 사용 중입니다. 다른 프로세스를 종료하거나 포트를 변경해주세요.`;
+      } are in use. Stop other processes or change the port.`;
       this.logError(errorMsg);
       vscode.window.showErrorMessage(`Cursor Remote: ${errorMsg}`);
       throw new Error(errorMsg);
@@ -146,15 +146,16 @@ export class WebSocketServer {
 
     if (availablePort !== this.port) {
       this.log(
-        `⚠️ 포트 ${this.port}가 사용 중이어서 포트 ${availablePort}를 사용합니다.`
+        `⚠️ Port ${this.port} is in use; using port ${availablePort} instead.`
       );
       vscode.window.showWarningMessage(
-        `Cursor Remote: 포트 ${this.port}가 사용 중이어서 포트 ${availablePort}로 시작합니다.`
+        `Cursor Remote: Port ${this.port} is in use; starting on port ${availablePort}.`
       );
     }
 
     this.actualPort = availablePort;
-    this.wss = new WebSocket.Server({ port: availablePort });
+    // Bind all interfaces so phone on LAN can reach the Mac (not only localhost).
+    this.wss = new WSServer({ host: "0.0.0.0", port: availablePort });
 
     // Promise로 서버 시작 완료 대기
     return new Promise((resolve, reject) => {
@@ -230,19 +231,30 @@ export class WebSocketServer {
       this.wss!.on("error", (error: any) => {
         this.logError("WebSocket server error", error);
         if (error.code === "EADDRINUSE") {
-          const errorMsg = `포트 ${availablePort}가 사용 중입니다. 다른 프로세스를 종료하거나 Cursor를 재시작해주세요.`;
+          const errorMsg = `Port ${availablePort} is in use. Stop other processes or restart Cursor.`;
           vscode.window.showErrorMessage(`Cursor Remote: ${errorMsg}`);
           reject(new Error(errorMsg));
         } else {
           vscode.window.showErrorMessage(
             `Cursor Remote server error: ${error.message}`
           );
+          // Mark dead so ensureListening() can restart
+          this.wss = null;
+          this.actualPort = null;
           reject(error);
         }
       });
 
+      this.wss!.on("close", () => {
+        this.log("WebSocket server closed");
+        this.wss = null;
+        this.actualPort = null;
+      });
+
       this.wss!.on("listening", () => {
-        this.log(`✅ WebSocket server started on port ${availablePort}`);
+        this.log(
+          `✅ WebSocket server started on 0.0.0.0:${availablePort} (phone → Mac LAN)`
+        );
         resolve();
       });
 
@@ -252,7 +264,11 @@ export class WebSocketServer {
 
   stop() {
     if (this.wss) {
-      this.wss.close();
+      try {
+        this.wss.close();
+      } catch (_) {
+        /* ignore */
+      }
       this.wss = null;
       this.actualPort = null;
       this.log("WebSocket server stopped");
@@ -265,6 +281,44 @@ export class WebSocketServer {
 
   isRunning(): boolean {
     return this.wss !== null;
+  }
+
+  /** True if something is accepting TCP on our port. */
+  private probePort(port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const socket = net.connect({ host: "127.0.0.1", port }, () => {
+        socket.destroy();
+        resolve(true);
+      });
+      socket.on("error", () => resolve(false));
+      socket.setTimeout(800, () => {
+        socket.destroy();
+        resolve(false);
+      });
+    });
+  }
+
+  /**
+   * Health-check listener; restart if the socket died while the extension
+   * still thinks the server is up (common after window/host churn).
+   */
+  async ensureListening(): Promise<boolean> {
+    const port = this.actualPort || this.port;
+    if (this.wss) {
+      const alive = await this.probePort(port);
+      if (alive) return true;
+      this.log(
+        `⚠️ WebSocket port ${port} not accepting connections — restarting`
+      );
+      this.stop();
+    }
+    try {
+      await this.start();
+      return this.isRunning();
+    } catch (e) {
+      this.logError("Failed to restart WebSocket server", e);
+      return false;
+    }
   }
 
   onMessage(handler: (message: string) => void) {

@@ -112,7 +112,7 @@ export class RelayClient {
       return;
     }
     if (this.sessionId && this.isConnected) {
-      this.log(`🔌 기존 세션 ${this.sessionId} 연결 해제 후 ${trimmed}로 연결`);
+      this.log(`🔌 Disconnecting from session ${this.sessionId}, then connecting to ${trimmed}`);
       this.clearHeartbeat();
       this.sessionId = null;
       this.isConnected = false;
@@ -186,7 +186,7 @@ export class RelayClient {
       this.sendHeartbeat();
     }, this.HEARTBEAT_INTERVAL_MS);
     this.log(
-      `💓 Heartbeat 시작 (${this.HEARTBEAT_INTERVAL_MS / 1000}초마다, 2분 무응답 시 연결 해제로 간주)`
+      `💓 Heartbeat started (every ${this.HEARTBEAT_INTERVAL_MS / 1000}s; disconnect assumed after 2 min with no heartbeat)`
     );
   }
 
@@ -203,7 +203,7 @@ export class RelayClient {
       });
     }, this.POLL_INTERVAL);
     this.log(
-      "⏱️ Poll interval started (every 2s) - 세션 탐지/메시지 수신 대기 중"
+      "⏱️ Poll interval started (every 2s) - waiting for session discovery / messages"
     );
   }
 
@@ -223,7 +223,7 @@ export class RelayClient {
         ) {
           this.lastNoSessionHeartbeatTime = now;
           this.log(
-            `⏳ 세션 ${this.targetSessionId} 대기 중 (모바일에서 해당 세션 생성·연결 후 자동 연결)`
+            `⏳ Waiting for session ${this.targetSessionId} (will auto-connect after mobile creates/connects that session)`
           );
         }
         await this.connectToSession(this.targetSessionId, this.targetPin ?? undefined);
@@ -238,7 +238,7 @@ export class RelayClient {
       ) {
         this.lastNoSessionHeartbeatTime = now;
         this.log(
-          "⏳ 세션 없음 - 폴링 루프 동작 중 (세션 ID를 입력하거나 모바일에서 세션 생성 후 대기)"
+          "⏳ No session - poll loop running (enter a session ID or wait for mobile to create a session)"
         );
       }
       const discoveredSessionId = await this.discoverSession();
@@ -264,7 +264,7 @@ export class RelayClient {
       const now = Date.now();
       if (now - this.lastPollHeartbeatTime >= this.POLL_HEARTBEAT_INTERVAL) {
         this.lastPollHeartbeatTime = now;
-        this.log(`🔄 Polling sessionId=${this.sessionId} (정상 폴링 중)`);
+        this.log(`🔄 Polling sessionId=${this.sessionId} (polling normally)`);
       }
 
       const pollUrl = `${this.relayServerUrl}/api/poll?sessionId=${
@@ -369,30 +369,30 @@ export class RelayClient {
       const sessions = data.data?.sessions ?? [];
       const sessionsCount = Array.isArray(sessions) ? sessions.length : 0;
       this.log(
-        `🔍 Discovery: 서버 응답 success=true, sessionsCount=${sessionsCount} (모바일 연결된 세션)`
+        `🔍 Discovery: server response success=true, sessionsCount=${sessionsCount} (sessions with mobile connected)`
       );
       if (sessionsCount === 0) {
         this.log(
-          "🔍 Discovery: 모바일이 연결된 세션이 없습니다 (모바일에서 세션 생성 후 연결하세요)"
+          "🔍 Discovery: no sessions with mobile connected (create a session on mobile, then connect)"
         );
         this.log(
-          "💡 다른 Cursor 창이 열려 있으면 그 익스텐션이 세션을 먼저 가져갔을 수 있습니다. 다른 창을 모두 닫고 새 세션으로 다시 시도해 보세요."
+          "💡 If another Cursor window is open, that extension may have claimed the session first. Close other windows and try again with a new session."
         );
         const debugUrl = `${this.relayServerUrl}/api/debug-sessions`;
         this.log(
-          `🔧 서버 상태 확인: GET ${debugUrl} (또는 명령 팔레트에서 "Cursor Remote: 릴레이 서버 상태 확인" 실행)`
+          `🔧 Check server status: GET ${debugUrl} (or run "Cursor Remote: Check Relay Server Status" from the Command Palette)`
         );
         return null;
       }
       let chosenSessionId: string | null = null;
       if (sessionsCount > 1 && this.onSessionsDiscoveredCallback) {
         this.log(
-          `🔍 Discovery: 세션 ${sessionsCount}개 발견 → 사용자 선택 대기`
+          `🔍 Discovery: found ${sessionsCount} sessions → waiting for user selection`
         );
         chosenSessionId = await this.onSessionsDiscoveredCallback(sessions);
         if (chosenSessionId === null || chosenSessionId === undefined) {
           this.log(
-            "🔍 Discovery: 연결할 세션을 선택하지 않음 (다음 탐지에서 다시 표시)"
+            "🔍 Discovery: no session selected (will prompt again on next discovery)"
           );
           return null;
         }
@@ -403,7 +403,7 @@ export class RelayClient {
           ) ?? sessions[0]
         : sessions[0];
       if (foundSession?.sessionId) {
-        this.log(`🔍 Discovery: 세션 발견 → ${foundSession.sessionId}`);
+        this.log(`🔍 Discovery: found session → ${foundSession.sessionId}`);
         return foundSession.sessionId;
       }
       this.log("🔍 Discovery: session has no sessionId");
@@ -441,18 +441,18 @@ export class RelayClient {
         const msg =
           (result.body as any)?.error ?? "Session already in use by another PC";
         this.logError(
-          "중복 사용 중인 세션 ID (다른 PC에서 사용 중입니다)",
+          "Session ID already in use (another PC is connected)",
           msg
         );
         this.log(
-          "💡 다른 PC 창을 닫거나, 모바일에서 새 세션을 만든 뒤 해당 세션 ID를 입력하세요."
+          "💡 Close the other PC window, or create a new session on mobile and enter that session ID."
         );
         return;
       }
 
       if (result.statusCode === 404) {
         this.log(
-          "세션을 찾을 수 없습니다. 모바일에서 먼저 세션을 생성·연결한 뒤 같은 세션 ID로 접속하세요."
+          "Session not found. Create and connect the session on mobile first, then connect with the same session ID."
         );
         return;
       }
@@ -466,9 +466,9 @@ export class RelayClient {
         this.isConnected = true;
         this.startHeartbeat();
         this.log(
-          `✅ 익스텐션은 릴레이 서버를 통해 세션 ${this.sessionId}에 접속했습니다.`
+          `✅ Extension connected to session ${this.sessionId} via the relay server.`
         );
-        this.log(`💡 모바일에서 세션 ID ${this.sessionId}로 연결하세요.`);
+        this.log(`💡 Connect from mobile using session ID ${this.sessionId}.`);
         if (this.onSessionConnectedCallback) {
           this.onSessionConnectedCallback();
         }
@@ -558,11 +558,11 @@ export class RelayClient {
     try {
       const data = await this.httpRequest(debugUrl);
       if (!data) {
-        this.log("🔧 서버 응답 없음 (네트워크 또는 CORS 확인)");
+        this.log("🔧 No response from server (check network or CORS)");
         return;
       }
       if (!data.success) {
-        this.log(`🔧 API 오류: ${(data as any).error ?? "unknown"}`);
+        this.log(`🔧 API error: ${(data as any).error ?? "unknown"}`);
         return;
       }
       const d = data.data as
@@ -574,7 +574,7 @@ export class RelayClient {
           }
         | undefined;
       if (!d) {
-        this.log("🔧 응답 data 없음");
+        this.log("🔧 Response has no data");
         return;
       }
       this.log(
