@@ -1,6 +1,7 @@
 import WebSocket, { WebSocketServer as WSServer } from "ws";
 import * as vscode from "vscode";
 import * as net from "net";
+import { execFileSync } from "child_process";
 
 type WebSocketClient = WebSocket;
 
@@ -96,13 +97,12 @@ export class WebSocketServer {
     maxAttempts: number = 10
   ): Promise<number | null> {
     return new Promise((resolve) => {
-      let currentPort = startPort;
       let attempts = 0;
 
       const tryPort = (port: number) => {
         const server = net.createServer();
 
-        server.listen(port, () => {
+        server.listen(port, "0.0.0.0", () => {
           server.once("close", () => {
             resolve(port);
           });
@@ -123,50 +123,110 @@ export class WebSocketServer {
         });
       };
 
-      tryPort(currentPort);
+      tryPort(startPort);
     });
   }
 
-  async start(): Promise<void> {
-    if (this.wss) {
-      this.log("WebSocket server is already running");
-      return;
-    }
-
-    // 포트가 사용 중인지 확인하고 사용 가능한 포트 찾기
-    const availablePort = await this.findAvailablePort(this.port);
-
-    if (availablePort === null) {
-      const errorMsg = `All ports from ${this.port} to ${
-        this.port + 10
-      } are in use. Stop other processes or change the port.`;
-      this.logError(errorMsg);
-      vscode.window.showErrorMessage(`Cursor Remote: ${errorMsg}`);
-      throw new Error(errorMsg);
-    }
-
-    if (availablePort !== this.port) {
-      this.log(
-        `⚠️ Port ${this.port} is in use; using port ${availablePort} instead.`
+  /** PIDs listening on TCP port (macOS/Linux). */
+  private listListenerPids(port: number): number[] {
+    try {
+      const out = execFileSync(
+        "lsof",
+        ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"],
+        { encoding: "utf8", timeout: 3000 }
       );
-      vscode.window.showWarningMessage(
-        `Cursor Remote: Port ${this.port} is in use; starting on port ${availablePort}.`
-      );
+      return out
+        .split(/\s+/)
+        .map((s) => parseInt(s, 10))
+        .filter((n) => Number.isFinite(n) && n > 0);
+    } catch {
+      return [];
     }
+  }
 
-    this.actualPort = availablePort;
-    // Bind all interfaces so phone on LAN can reach the Mac (not only localhost).
-    this.wss = new WSServer({ host: "0.0.0.0", port: availablePort });
+  private processCommand(pid: number): string {
+    try {
+      return execFileSync("ps", ["-p", String(pid), "-o", "comm="], {
+        encoding: "utf8",
+        timeout: 3000,
+      }).trim();
+    } catch {
+      return "";
+    }
+  }
 
-    // Promise로 서버 시작 완료 대기
+  /**
+   * Free a stuck port when safe (e.g. leftover cloudflared).
+   * Never kills Cursor / Electron — those require using the next port.
+   */
+  async freePortIfSafe(port: number): Promise<{
+    killed: number[];
+    skipped: string[];
+  }> {
+    const killed: number[] = [];
+    const skipped: string[] = [];
+    const pids = this.listListenerPids(port);
+    for (const pid of pids) {
+      if (pid === process.pid) {
+        skipped.push(`${pid} (self)`);
+        continue;
+      }
+      const name = this.processCommand(pid);
+      const lower = name.toLowerCase();
+      if (
+        lower.includes("cursor") ||
+        lower.includes("electron") ||
+        lower.includes("code helper") ||
+        lower.includes("visual studio")
+      ) {
+        skipped.push(`${pid} (${name || "Cursor"})`);
+        continue;
+      }
+      try {
+        process.kill(pid, "SIGTERM");
+        killed.push(pid);
+        this.log(`Freed port ${port}: sent SIGTERM to pid ${pid} (${name})`);
+      } catch (e) {
+        skipped.push(
+          `${pid} (kill failed: ${e instanceof Error ? e.message : String(e)})`
+        );
+      }
+    }
+    if (killed.length > 0) {
+      await new Promise((r) => setTimeout(r, 600));
+    }
+    return { killed, skipped };
+  }
+
+  /** Bind WebSocket server on an exact port (rejects on EADDRINUSE). */
+  private listenOnPort(port: number): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.wss!.on("connection", (ws: WebSocketClient) => {
-        // 클라이언트 ID 생성 (연결 시점)
+      // Clear any half-built server
+      if (this.wss) {
+        try {
+          this.wss.close();
+        } catch {
+          /* ignore */
+        }
+        this.wss = null;
+      }
+
+      this.actualPort = port;
+      const wss = new WSServer({ host: "0.0.0.0", port });
+      this.wss = wss;
+
+      let settled = false;
+      const settle = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        fn();
+      };
+
+      wss.on("connection", (ws: WebSocketClient) => {
         const clientId = `client-${Date.now()}-${Math.random()
           .toString(36)
           .substring(7)}`;
-        (ws as any).clientId = clientId; // WebSocket 객체에 clientId 저장
-
+        (ws as any).clientId = clientId;
         this.clients.add(ws);
         this.log(`Client connected to Cursor Remote (ID: ${clientId})`);
         this.notifyClientChange(true);
@@ -179,14 +239,10 @@ export class WebSocketServer {
               100
             )}${messageStr.length > 100 ? "..." : ""}`
           );
-
-          // 메시지에 clientId 추가
           try {
             const parsed = JSON.parse(messageStr);
             parsed.clientId = clientId;
             const messageWithClientId = JSON.stringify(parsed);
-
-            // 모든 핸들러에 clientId가 포함된 메시지 전달
             this.messageHandlers.forEach((handler) => {
               try {
                 handler(messageWithClientId);
@@ -194,8 +250,7 @@ export class WebSocketServer {
                 this.logError("Error in message handler", error);
               }
             });
-          } catch (error) {
-            // JSON 파싱 실패 시 원본 메시지 전달
+          } catch {
             this.messageHandlers.forEach((handler) => {
               try {
                 handler(messageStr);
@@ -219,48 +274,120 @@ export class WebSocketServer {
           this.logError("WebSocket error", error);
         });
 
-        // 연결 성공 메시지 전송
         this.sendToClient(
           ws,
           JSON.stringify({
             type: "connected",
             message: "Connected to Cursor Remote",
+            port,
           })
         );
       });
 
-      this.wss!.on("error", (error: any) => {
+      wss.on("error", (error: any) => {
         this.logError("WebSocket server error", error);
-        if (error.code === "EADDRINUSE") {
-          const errorMsg = `Port ${availablePort} is in use. Stop other processes or restart Cursor.`;
-          vscode.window.showErrorMessage(`Cursor Remote: ${errorMsg}`);
-          reject(new Error(errorMsg));
-        } else {
-          vscode.window.showErrorMessage(
-            `Cursor Remote server error: ${error.message}`
-          );
-          // Mark dead so ensureListening() can restart
+        if (!settled) {
+          try {
+            wss.close();
+          } catch {
+            /* ignore */
+          }
           this.wss = null;
           this.actualPort = null;
-          reject(error);
+          settle(() => reject(error));
         }
       });
 
-      this.wss!.on("close", () => {
+      wss.on("close", () => {
         this.log("WebSocket server closed");
-        this.wss = null;
-        this.actualPort = null;
+        if (this.wss === wss) {
+          this.wss = null;
+          this.actualPort = null;
+        }
       });
 
-      this.wss!.on("listening", () => {
+      wss.on("listening", () => {
         this.log(
-          `✅ WebSocket server started on 0.0.0.0:${availablePort} (phone → Mac LAN)`
+          `✅ WebSocket server started on 0.0.0.0:${port} (phone → Mac LAN)`
         );
-        resolve();
+        settle(() => resolve());
       });
 
-      this.log(`WebSocket server starting on port ${availablePort}...`);
+      this.log(`WebSocket server starting on port ${port}...`);
     });
+  }
+
+  /**
+   * Start local WS. If preferred port is busy, automatically try the next ports.
+   * Optionally free safe leftover processes on the preferred port first.
+   */
+  async start(options?: { preferFreePreferredPort?: boolean }): Promise<void> {
+    if (this.wss && this.actualPort != null) {
+      const alive = await this.probePort(this.actualPort);
+      if (alive) {
+        this.log(
+          `WebSocket server is already running on port ${this.actualPort}`
+        );
+        return;
+      }
+      this.log(
+        `Stale WebSocket handle on port ${this.actualPort} — restarting`
+      );
+      this.stop();
+    }
+
+    const maxAttempts = 10;
+    const preferFree = options?.preferFreePreferredPort !== false;
+
+    if (preferFree) {
+      const listeners = this.listListenerPids(this.port);
+      if (listeners.length > 0) {
+        const { killed, skipped } = await this.freePortIfSafe(this.port);
+        if (killed.length > 0) {
+          this.log(
+            `Freed preferred port ${this.port} (killed: ${killed.join(", ")})`
+          );
+        }
+        if (skipped.length > 0) {
+          this.log(
+            `Port ${this.port} still held by: ${skipped.join(
+              ", "
+            )} — will try next free port`
+          );
+        }
+      }
+    }
+
+    let lastErr: unknown = null;
+    for (let i = 0; i < maxAttempts; i++) {
+      const port = this.port + i;
+      try {
+        await this.listenOnPort(port);
+        if (port !== this.port) {
+          this.log(
+            `⚠️ Preferred port ${this.port} was busy; using port ${port} instead.`
+          );
+          vscode.window.showWarningMessage(
+            `Cursor Remote: Port ${this.port} was busy — listening on ${port}. Use this port in the phone Local field.`
+          );
+        }
+        return;
+      } catch (e: any) {
+        lastErr = e;
+        if (e?.code === "EADDRINUSE") {
+          this.log(`Port ${port} in use, trying ${port + 1}…`);
+          continue;
+        }
+        throw e;
+      }
+    }
+
+    const errorMsg = `All ports from ${this.port} to ${
+      this.port + maxAttempts - 1
+    } are in use. Stop other Cursor Remote instances or free a port.`;
+    this.logError(errorMsg, lastErr);
+    vscode.window.showErrorMessage(`Cursor Remote: ${errorMsg}`);
+    throw new Error(errorMsg);
   }
 
   stop() {
@@ -272,6 +399,7 @@ export class WebSocketServer {
       }
       this.wss = null;
       this.actualPort = null;
+      this.clients.clear();
       this.log("WebSocket server stopped");
     }
   }
@@ -281,7 +409,7 @@ export class WebSocketServer {
   }
 
   isRunning(): boolean {
-    return this.wss !== null;
+    return this.wss !== null && this.actualPort != null;
   }
 
   /** True if something is accepting TCP on our port. */

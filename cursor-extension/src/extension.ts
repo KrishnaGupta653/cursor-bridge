@@ -9,6 +9,7 @@ import { StatusBarManager } from "./status-bar";
 import { RelayClient } from "./relay-client";
 import { CONFIG } from "./config";
 import { CdpManager } from "./cdp/cdp-manager";
+import { CloudflareTunnelManager } from "./cloudflare-tunnel";
 import {
   TelegramBridge,
   defaultTelegramSecretsPath,
@@ -25,6 +26,7 @@ let rulesManager: RulesManager | null = null;
 let statusBarManager: StatusBarManager | null = null;
 let relayClient: RelayClient | null = null;
 let cdpManager: CdpManager | null = null;
+let cloudflareTunnel: CloudflareTunnelManager | null = null;
 let telegramBridge: TelegramBridge | null = null;
 let outputChannel: vscode.OutputChannel;
 /** 연결 정보 Webview 패널 (열려 있을 때만 갱신용) */
@@ -43,8 +45,17 @@ function getConnectionsViewHtml(data: {
   relayStoreLabel: string | null;
   relayServerUrl: string | null;
   localClientIds: string[];
+  tunnelWssUrl: string | null;
 }): string {
-  const { serverRunning, serverPort, relaySessionId, relayStoreLabel, relayServerUrl, localClientIds } = data;
+  const {
+    serverRunning,
+    serverPort,
+    relaySessionId,
+    relayStoreLabel,
+    relayServerUrl,
+    localClientIds,
+    tunnelWssUrl,
+  } = data;
   const relayStoreLine =
     relayStoreLabel != null
       ? `<p class="relay-meta"><strong>Store:</strong> ${escapeHtml(relayStoreLabel)}</p>`
@@ -88,6 +99,24 @@ function getConnectionsViewHtml(data: {
       <p class="status disconnected">No connections</p>
     </section>`;
 
+  const tunnelSection =
+    tunnelWssUrl != null
+      ? `
+    <section class="section">
+      <h2>☁️ Cloudflare Tunnel</h2>
+      <p class="status connected">Running</p>
+      <p class="session-id"><strong>Phone URL:</strong> <code>${escapeHtml(
+        tunnelWssUrl
+      )}</code></p>
+      <p class="relay-meta">In the app: Tunnel mode → paste this URL → Connect</p>
+    </section>`
+      : `
+    <section class="section">
+      <h2>☁️ Cloudflare Tunnel</h2>
+      <p class="status disconnected">Not running</p>
+      <p class="relay-meta">Command Palette → “Start Cloudflare Tunnel”</p>
+    </section>`;
+
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -113,6 +142,7 @@ function getConnectionsViewHtml(data: {
     </p>
   </section>
   ${relaySection}
+  ${tunnelSection}
   ${localSection}
 </body>
 </html>`;
@@ -148,6 +178,7 @@ function updateConnectionsView() {
     relayStoreLabel: lastRelayStoreLabel,
     relayServerUrl: CONFIG.RELAY_SERVER_URL,
     localClientIds,
+    tunnelWssUrl: cloudflareTunnel?.getWssUrl() ?? null,
   });
 }
 
@@ -633,6 +664,114 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   );
 
+  cloudflareTunnel = new CloudflareTunnelManager(context, outputChannel);
+  cloudflareTunnel.setOnUrlChanged(() => updateConnectionsView());
+
+  const startCloudflareTunnelCommand = vscode.commands.registerCommand(
+    "cursorRemote.startCloudflareTunnel",
+    async () => {
+      try {
+        if (!wsServer) {
+          vscode.window.showErrorMessage(
+            "Cursor Remote: WebSocket server not ready."
+          );
+          return;
+        }
+        const ok = await wsServer.ensureListening();
+        if (!ok) {
+          vscode.window.showErrorMessage(
+            "Cursor Remote: Could not start local WebSocket server (ports busy)."
+          );
+          return;
+        }
+        const port = wsServer.getActualPort() ?? CONFIG.WEBSOCKET_PORT;
+        const url = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: `Starting Cloudflare Tunnel (local :${port})…`,
+            cancellable: false,
+          },
+          async () => cloudflareTunnel!.start(port)
+        );
+        await vscode.env.clipboard.writeText(url);
+        updateConnectionsView();
+        const pick = await vscode.window.showInformationMessage(
+          `Cloudflare Tunnel ready (local port ${port}). URL copied.\n${url}`,
+          "Copy again",
+          "Show Connection Info"
+        );
+        if (pick === "Copy again") {
+          await vscode.env.clipboard.writeText(url);
+        } else if (pick === "Show Connection Info") {
+          await vscode.commands.executeCommand("cursorRemote.showConnections");
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        outputChannel.show(true);
+        vscode.window.showErrorMessage(
+          `Cursor Remote: Cloudflare Tunnel failed — ${msg}`
+        );
+      }
+    }
+  );
+
+  const restartLocalServerCommand = vscode.commands.registerCommand(
+    "cursorRemote.restartLocalServer",
+    async () => {
+      if (!wsServer) {
+        vscode.window.showErrorMessage(
+          "Cursor Remote: WebSocket server not ready."
+        );
+        return;
+      }
+      try {
+        if (cloudflareTunnel?.isRunning()) {
+          await cloudflareTunnel.stop();
+        }
+        wsServer.stop();
+        await wsServer.start({ preferFreePreferredPort: true });
+        const port = wsServer.getActualPort();
+        updateConnectionsView();
+        if (statusBarManager) statusBarManager.refresh();
+        vscode.window.showInformationMessage(
+          `Cursor Remote: Local server listening on port ${port ?? "?"}.`
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        vscode.window.showErrorMessage(
+          `Cursor Remote: Restart failed — ${msg}`
+        );
+      }
+    }
+  );
+
+  const stopCloudflareTunnelCommand = vscode.commands.registerCommand(
+    "cursorRemote.stopCloudflareTunnel",
+    async () => {
+      if (!cloudflareTunnel) return;
+      await cloudflareTunnel.stop();
+      updateConnectionsView();
+      vscode.window.showInformationMessage(
+        "Cursor Remote: Cloudflare Tunnel stopped."
+      );
+    }
+  );
+
+  const copyCloudflareTunnelUrlCommand = vscode.commands.registerCommand(
+    "cursorRemote.copyCloudflareTunnelUrl",
+    async () => {
+      const url = cloudflareTunnel?.getWssUrl();
+      if (!url) {
+        vscode.window.showWarningMessage(
+          "No active Cloudflare Tunnel. Run “Start Cloudflare Tunnel” first."
+        );
+        return;
+      }
+      await vscode.env.clipboard.writeText(url);
+      vscode.window.showInformationMessage(`Copied: ${url}`);
+    }
+  );
+
   const showConnectionsCommand = vscode.commands.registerCommand(
     "cursorRemote.showConnections",
     async () => {
@@ -670,6 +809,7 @@ export async function activate(context: vscode.ExtensionContext) {
         relayStoreLabel: lastRelayStoreLabel,
         relayServerUrl: CONFIG.RELAY_SERVER_URL,
         localClientIds,
+        tunnelWssUrl: cloudflareTunnel?.getWssUrl() ?? null,
       });
 
       const panel = vscode.window.createWebviewPanel(
@@ -768,6 +908,10 @@ export async function activate(context: vscode.ExtensionContext) {
     checkRelayServerCommand,
     connectToRelaySessionByIdCommand,
     setRelaySessionIdCommand,
+    startCloudflareTunnelCommand,
+    stopCloudflareTunnelCommand,
+    copyCloudflareTunnelUrlCommand,
+    restartLocalServerCommand,
     openTelegramSecretsCommand,
     startTelegramBotCommand,
     stopTelegramBotCommand,
@@ -980,6 +1124,11 @@ export function deactivate() {
   if (telegramBridge) {
     void telegramBridge.stop();
     telegramBridge = null;
+  }
+
+  if (cloudflareTunnel) {
+    void cloudflareTunnel.stop();
+    cloudflareTunnel = null;
   }
 
   if (cdpManager) {

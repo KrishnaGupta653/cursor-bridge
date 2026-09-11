@@ -59,6 +59,27 @@
           "default": "cli",
           "description": "Default agent backend for prompts: cli (Cursor CLI) or cdp (existing IDE Agent via CDP)."
         },
+        "cursorRemote.cloudflaredPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute path to the cloudflared binary. Leave empty to use PATH / Homebrew defaults."
+        },
+        "cursorRemote.cloudflareTunnelAutoRestart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically restart Cloudflare quick tunnels if cloudflared crashes."
+        },
+        "cursorRemote.cloudflareTunnelMaxRestarts": {
+          "type": "number",
+          "default": 5,
+          "description": "Max automatic Cloudflare Tunnel restart attempts after a crash."
+        },
+        "cursorRemote.cloudflareTunnelProtocol": {
+          "type": "string",
+          "enum": ["http2", "quic", "auto"],
+          "default": "http2",
+          "description": "Cloudflare Tunnel transport. Use http2 on corporate networks (Zscaler) where QUIC often times out."
+        },
         "cursorRemote.telegramSecretsPath": {
           "type": "string",
           "default": "",
@@ -103,6 +124,22 @@
       {
         "command": "cursorRemote.setRelaySessionId",
         "title": "Cursor Remote: Set Relay Session ID"
+      },
+      {
+        "command": "cursorRemote.startCloudflareTunnel",
+        "title": "Cursor Remote: Start Cloudflare Tunnel"
+      },
+      {
+        "command": "cursorRemote.stopCloudflareTunnel",
+        "title": "Cursor Remote: Stop Cloudflare Tunnel"
+      },
+      {
+        "command": "cursorRemote.copyCloudflareTunnelUrl",
+        "title": "Cursor Remote: Copy Cloudflare Tunnel URL"
+      },
+      {
+        "command": "cursorRemote.restartLocalServer",
+        "title": "Cursor Remote: Restart Local Server (auto port)"
       },
       {
         "command": "cursorRemote.openTelegramSecrets",

@@ -10,6 +10,7 @@ import 'models/connection_models.dart';
 import 'services/app_settings.dart';
 import 'services/cdp_session_store.dart';
 import 'screens/agent_control_center.dart';
+import 'screens/connection_landing.dart';
 import 'theme/app_theme.dart';
 import 'widgets/cr_ui.dart';
 
@@ -325,21 +326,33 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  // Connect to local server (direct WebSocket)
+  // Connect to local server (direct WebSocket) or Cloudflare Tunnel (wss)
   Future<void> _connectToLocal() async {
     if (_isConnecting) return;
 
+    final asTunnel = _connectionType == ConnectionType.tunnel;
     var host = _localIpController.text.trim();
     if (host.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter the PC hostname or IP address')),
+        SnackBar(
+          content: Text(
+            asTunnel
+                ? 'Paste the Cloudflare Tunnel wss:// URL from the Cursor extension'
+                : 'Please enter the PC hostname or IP address',
+          ),
+        ),
       );
       return;
     }
 
-    // Allow full ws:// or wss:// URLs in the host field
-    String scheme = 'ws';
+    // Allow full ws://, wss://, or https:// URLs in the host field
+    String scheme = asTunnel ? 'wss' : 'ws';
     int? portFromUrl;
+    if (host.startsWith('https://')) {
+      host = 'wss://${host.substring('https://'.length)}';
+    } else if (host.startsWith('http://')) {
+      host = 'ws://${host.substring('http://'.length)}';
+    }
     if (host.startsWith('ws://') || host.startsWith('wss://')) {
       try {
         final uri = Uri.parse(host);
@@ -348,7 +361,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (uri.hasPort) portFromUrl = uri.port;
       } catch (_) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Invalid WebSocket URL. Example: ws://192.168.1.10:8766')),
+          const SnackBar(
+            content: Text(
+              'Invalid WebSocket URL. Example: wss://xxxx.trycloudflare.com',
+            ),
+          ),
         );
         return;
       }
@@ -364,7 +381,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
 
     final portText = _localPortController.text.trim();
-    final port = portFromUrl ?? int.tryParse(portText);
+    // wss/https tunnels default to 443 when port omitted
+    final int? port = portFromUrl ??
+        int.tryParse(portText) ??
+        ((scheme == 'wss' || scheme == 'https') ? 443 : null);
     if (port == null || port < 1 || port > 65535) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Port must be a number between 1 and 65535')),
@@ -390,14 +410,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _isConnected = false;
       _lastConnectionError = null;
       _messages.add(MessageItem(
-          'Connecting to Cursor Remote server at $host:$port…',
+          asTunnel
+              ? 'Connecting via Cloudflare Tunnel ($host)…'
+              : 'Connecting to Cursor Remote server at $host:$port…',
           type: MessageType.system));
     });
 
     var handshakeComplete = false;
     Timer? connectionTimeout;
 
-    void failConnection(String userMessage, {String? technical, bool scheduleRetry = true}) {
+    void failConnection(String userMessage,
+        {String? technical, bool scheduleRetry = true}) {
       if (!mounted || handshakeComplete) return;
       handshakeComplete = true;
       connectionTimeout?.cancel();
@@ -426,13 +449,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _lastConnectionError = null;
         _stopReconnect();
         _messages.add(MessageItem(
-            '✅ Connected to Cursor Remote server at $host:$port',
+            asTunnel
+                ? '✅ Connected via Cloudflare Tunnel ($host)'
+                : '✅ Connected to Cursor Remote server at $host:$port',
             type: MessageType.system));
       });
 
       _saveConnectionSettings();
       AppSettings().addConnectionHistory(ConnectionHistoryItem(
-        type: ConnectionType.local,
+        type: asTunnel ? ConnectionType.tunnel : ConnectionType.local,
         ip: host,
         port: port,
         timestamp: DateTime.now(),
@@ -457,9 +482,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
       connectionTimeout = Timer(const Duration(seconds: 10), () {
         failConnection(
-          'Unable to connect to the Cursor Remote server. '
-          'Check that Cursor is open with the extension running, '
-          'and that your phone and Mac are on the same Wi-Fi network.',
+          asTunnel
+              ? 'Tunnel connection timed out. Confirm the extension tunnel is running and paste the latest wss:// URL.'
+              : 'Unable to connect to the Cursor Remote server. '
+                  'Check that Cursor is open with the extension running, '
+                  'and that your phone and Mac are on the same Wi-Fi network.',
           technical:
               'Connection timed out after 10s ($wsUrl). Extension may not be listening on port $port.',
         );
@@ -475,16 +502,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _handleLocalMessage(raw);
         },
         onError: (error) {
-          final friendly =
-              'Unable to connect to the local Cursor Remote server. '
-              'Make sure the Cursor extension is running and the server is listening on port $port.';
+          final friendly = asTunnel
+              ? 'Tunnel unreachable. This network may block Cloudflare edge. '
+                  'Use Local on same Wi‑Fi — port may be 8767 if 8766 was busy.'
+              : 'Unable to connect to the local Cursor Remote server. '
+                  'Make sure the Cursor extension is running and the server is listening on port $port.';
           failConnection(friendly, technical: error.toString());
         },
         onDone: () {
           if (!handshakeComplete) {
             failConnection(
-              'Unable to connect to the local Cursor Remote server. '
-              'The connection closed before the handshake completed.',
+              asTunnel
+                  ? 'Tunnel failed. Cloudflare edge is often blocked here — use Local (same Wi‑Fi). Check Cursor log for the real port (may be 8767, not 8766).'
+                  : 'Unable to connect to the local Cursor Remote server. '
+                      'The connection closed before the handshake completed.',
               technical: 'WebSocket closed before handshake ($wsUrl)',
             );
             return;
@@ -504,8 +535,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
     } catch (e) {
       failConnection(
-        'Unable to connect to the local Cursor Remote server. '
-        'Check the address and that the extension is running.',
+        asTunnel
+            ? 'Unable to open the tunnel WebSocket. Check the wss:// URL.'
+            : 'Unable to connect to the local Cursor Remote server. '
+                'Check the address and that the extension is running.',
         technical: e.toString(),
         scheduleRetry: false,
       );
@@ -1113,7 +1146,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _connect() {
     if (_isConnecting || _isConnected) return;
-    if (_connectionType == ConnectionType.local) {
+    if (_connectionType == ConnectionType.local ||
+        _connectionType == ConnectionType.tunnel) {
       _connectToLocal();
     } else {
       final sessionId = _sessionIdController.text.trim();
@@ -1130,10 +1164,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void _connectFromHistory(ConnectionHistoryItem item) {
     setState(() {
       _connectionType = item.type;
-      if (item.type == ConnectionType.local) {
+      if (item.type == ConnectionType.local ||
+          item.type == ConnectionType.tunnel) {
         _localIpController.text = item.ip ?? '';
         if (item.port != null) {
           _localPortController.text = item.port!.toString();
+        } else if (item.type == ConnectionType.tunnel) {
+          _localPortController.text = '443';
         }
       } else {
         _sessionIdController.text = item.sessionId ?? '';
@@ -1711,7 +1748,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     _reconnectTimer = Timer(delay, () {
       if (mounted && !_isConnected) {
-        if (_connectionType == ConnectionType.local) {
+        if (_connectionType == ConnectionType.local ||
+            _connectionType == ConnectionType.tunnel) {
           _connectToLocal();
         } else {
           final sessionId = _sessionIdController.text.trim();
@@ -1819,8 +1857,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         });
       }
 
-      if (_connectionType == ConnectionType.local) {
-        // 로컬 서버로 메시지 전송 (WebSocket)
+      if (_connectionType == ConnectionType.local ||
+          _connectionType == ConnectionType.tunnel) {
+        // 로컬/터널 서버로 메시지 전송 (WebSocket)
         if (_localWebSocket != null) {
           _localWebSocket!.sink.add(jsonEncode(commandData));
           if (mounted) {
@@ -2422,7 +2461,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         setState(() {
           _connectionType = connectionTypeStr == 'local'
               ? ConnectionType.local
-              : ConnectionType.relay;
+              : connectionTypeStr == 'tunnel'
+                  ? ConnectionType.tunnel
+                  : ConnectionType.relay;
         });
       }
 
@@ -2452,8 +2493,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final prefs = await SharedPreferences.getInstance();
 
       // 연결 타입 저장
-      await prefs.setString('connection_type',
-          _connectionType == ConnectionType.local ? 'local' : 'relay');
+      await prefs.setString(
+          'connection_type',
+          _connectionType == ConnectionType.local
+              ? 'local'
+              : _connectionType == ConnectionType.tunnel
+                  ? 'tunnel'
+                  : 'relay');
 
       // PC(Extension) IP 주소 저장
       if (_localIpController.text.trim().isNotEmpty) {
@@ -2771,8 +2817,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   // 연결 상태 확인 및 필요시 재연결
   void _checkConnectionState() {
-    if (_connectionType == ConnectionType.local) {
-      // 로컬 연결: WebSocket 상태 확인
+    if (_connectionType == ConnectionType.local ||
+        _connectionType == ConnectionType.tunnel) {
+      // 로컬/터널 연결: WebSocket 상태 확인
       if (_localWebSocket == null && _isConnected) {
         if (mounted) {
           setState(() {
@@ -3069,6 +3116,63 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
+  /// Spacious Local / Tunnel / Relay landing when offline.
+  Widget _buildConnectionLanding() {
+    return ConnectionLandingPage(
+      connectionType: _connectionType,
+      onTypeChanged: (t) {
+        setState(() => _connectionType = t);
+        if (t == ConnectionType.tunnel &&
+            (_localPortController.text.trim().isEmpty ||
+                _localPortController.text.trim() == '8766')) {
+          _localPortController.text = '443';
+        } else if (t == ConnectionType.local &&
+            _localPortController.text.trim() == '443') {
+          _localPortController.text = '8766';
+        }
+        _saveConnectionSettings();
+      },
+      hostController: _localIpController,
+      portController: _localPortController,
+      sessionIdController: _sessionIdController,
+      hostFocus: _localIpFocusNode,
+      sessionFocus: _sessionIdFocusNode,
+      connecting: _isConnecting,
+      reconnecting: _isReconnecting,
+      error: _lastConnectionError,
+      recent: AppSettings().connectionHistory,
+      onConnect: _connect,
+      onGenerateSession: _createSession,
+      onSelectRecent: _connectFromHistory,
+      onDeleteRecent: (item) async {
+        await AppSettings().removeConnectionHistory(item);
+        if (mounted) setState(() {});
+      },
+      onClearRecent: () async {
+        await AppSettings().clearConnectionHistory();
+        if (mounted) setState(() {});
+      },
+      onHostChanged: (_) => _saveConnectionSettings(),
+      onPortChanged: (_) => _saveConnectionSettings(),
+      onCopySession: () async {
+        final id = _sessionIdController.text.trim();
+        if (id.isEmpty) return;
+        await Clipboard.setData(ClipboardData(text: id));
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Session ID copied')),
+        );
+      },
+      onRetry: () {
+        _stopReconnect();
+        _connect();
+      },
+      onUseLocal: () {
+        setState(() => _connectionType = ConnectionType.local);
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final narrow = MediaQuery.sizeOf(context).width < 720;
@@ -3100,7 +3204,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     ? 'Working'
                     : (_connectionType == ConnectionType.local
                         ? 'Local'
-                        : 'Relay'),
+                        : (_connectionType == ConnectionType.tunnel
+                            ? 'Tunnel'
+                            : 'Relay')),
               ),
             ),
             IconButton(
@@ -3139,7 +3245,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ),
       ),
       body: SafeArea(
-        child: _isCompactView && _isConnected
+        child: !_isConnected
+          ? _buildConnectionLanding()
+          : _isCompactView
           ? _buildCompactBody()
           : LayoutBuilder(
               builder: (context, bodyConstraints) {

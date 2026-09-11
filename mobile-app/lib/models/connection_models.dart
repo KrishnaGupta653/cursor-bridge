@@ -3,12 +3,13 @@ import 'dart:convert';
 enum ConnectionType {
   local, // Local server (direct IP connection)
   relay, // Relay server (session ID based)
+  tunnel, // Cloudflare Tunnel (wss://….trycloudflare.com)
 }
 
 class ConnectionHistoryItem {
   final ConnectionType type;
-  final String? ip; // local mode
-  final int? port; // local mode
+  final String? ip; // local / tunnel host
+  final int? port; // local / tunnel port
   final String? sessionId; // relay mode
   final DateTime timestamp;
 
@@ -31,8 +32,12 @@ class ConnectionHistoryItem {
 
   // JSON deserialization
   factory ConnectionHistoryItem.fromJson(Map<String, dynamic> json) {
+    final typeIndex = json['type'] as int;
+    final type = (typeIndex >= 0 && typeIndex < ConnectionType.values.length)
+        ? ConnectionType.values[typeIndex]
+        : ConnectionType.relay;
     return ConnectionHistoryItem(
-      type: ConnectionType.values[json['type'] as int],
+      type: type,
       ip: json['ip'] as String?,
       port: json['port'] is int
           ? json['port'] as int
@@ -45,21 +50,19 @@ class ConnectionHistoryItem {
   // Checks whether two items represent the same connection (type + address/sessionId)
   bool isSameConnection(ConnectionHistoryItem other) {
     if (type != other.type) return false;
-    if (type == ConnectionType.local) {
+    if (type == ConnectionType.local || type == ConnectionType.tunnel) {
       return ip == other.ip && port == other.port;
-    } else {
-      return sessionId == other.sessionId;
     }
+    return sessionId == other.sessionId;
   }
 
   // Display string
   String get displayText {
-    if (type == ConnectionType.local) {
-      final localIp = ip ?? 'Unknown IP';
+    if (type == ConnectionType.local || type == ConnectionType.tunnel) {
+      final localIp = ip ?? 'Unknown host';
       return port != null ? '$localIp:$port' : localIp;
-    } else {
-      return sessionId ?? 'Unknown Session';
     }
+    return sessionId ?? 'Unknown Session';
   }
 
   // Relative time string
@@ -85,7 +88,8 @@ List<ConnectionHistoryItem> parseConnectionHistory(String historyJson) {
   try {
     final historyList = jsonDecode(historyJson) as List;
     return historyList
-        .map((item) => ConnectionHistoryItem.fromJson(item as Map<String, dynamic>))
+        .map((item) =>
+            ConnectionHistoryItem.fromJson(item as Map<String, dynamic>))
         .toList();
   } catch (_) {
     return [];
