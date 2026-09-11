@@ -58,6 +58,16 @@
           "enum": ["cli", "cdp"],
           "default": "cli",
           "description": "Default agent backend for prompts: cli (Cursor CLI) or cdp (existing IDE Agent via CDP)."
+        },
+        "cursorRemote.telegramSecretsPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to telegram.json secrets. Empty = ~/.config/cursor-remote/telegram.json"
+        },
+        "cursorRemote.telegramAutoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-start Telegram bot on activation when secrets file exists and enabled is true."
         }
       }
     },
@@ -93,6 +103,22 @@
       {
         "command": "cursorRemote.setRelaySessionId",
         "title": "Cursor Remote: Set Relay Session ID"
+      },
+      {
+        "command": "cursorRemote.openTelegramSecrets",
+        "title": "Cursor Remote: Open Telegram Secrets File"
+      },
+      {
+        "command": "cursorRemote.startTelegramBot",
+        "title": "Cursor Remote: Start Telegram Bot"
+      },
+      {
+        "command": "cursorRemote.stopTelegramBot",
+        "title": "Cursor Remote: Stop Telegram Bot"
+      },
+      {
+        "command": "cursorRemote.restartTelegramBot",
+        "title": "Cursor Remote: Restart Telegram Bot"
       }
     ]
   },

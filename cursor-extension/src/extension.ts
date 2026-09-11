@@ -9,6 +9,12 @@ import { StatusBarManager } from "./status-bar";
 import { RelayClient } from "./relay-client";
 import { CONFIG } from "./config";
 import { CdpManager } from "./cdp/cdp-manager";
+import {
+  TelegramBridge,
+  defaultTelegramSecretsPath,
+  ensureTelegramSecretsTemplate,
+  loadTelegramSecrets,
+} from "./telegram-bridge";
 
 let wsServer: WebSocketServer | null = null;
 let commandHandler: CommandHandler | null = null;
@@ -19,6 +25,7 @@ let rulesManager: RulesManager | null = null;
 let statusBarManager: StatusBarManager | null = null;
 let relayClient: RelayClient | null = null;
 let cdpManager: CdpManager | null = null;
+let telegramBridge: TelegramBridge | null = null;
 let outputChannel: vscode.OutputChannel;
 /** 연결 정보 Webview 패널 (열려 있을 때만 갱신용) */
 let connectionsPanel: vscode.WebviewPanel | null = null;
@@ -546,6 +553,86 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   );
 
+  const openTelegramSecretsCommand = vscode.commands.registerCommand(
+    "cursorRemote.openTelegramSecrets",
+    async () => {
+      const cfg = vscode.workspace.getConfiguration("cursorRemote");
+      const custom = (cfg.get<string>("telegramSecretsPath", "") || "").trim();
+      const filePath = ensureTelegramSecretsTemplate(
+        custom || defaultTelegramSecretsPath()
+      );
+      const doc = await vscode.workspace.openTextDocument(filePath);
+      await vscode.window.showTextDocument(doc);
+      vscode.window.showInformationMessage(
+        "Paste BotFather token and your Telegram user id into allowedUserIds, save, then Start Telegram Bot."
+      );
+    }
+  );
+
+  const startTelegramBotCommand = vscode.commands.registerCommand(
+    "cursorRemote.startTelegramBot",
+    async () => {
+      if (!commandRouter || !wsServer || !commandHandler) {
+        vscode.window.showErrorMessage("Cursor Remote: not ready yet.");
+        return;
+      }
+      if (!telegramBridge) {
+        telegramBridge = new TelegramBridge(
+          outputChannel,
+          commandRouter,
+          commandHandler,
+          wsServer,
+          context.extensionPath
+        );
+      }
+      if (telegramBridge.isRunning()) {
+        vscode.window.showInformationMessage("Telegram bot already running.");
+        return;
+      }
+      const result = await telegramBridge.start();
+      if (!result.ok) {
+        outputChannel.show(true);
+        const pick = await vscode.window.showErrorMessage(
+          `Telegram bot failed: ${result.error}`,
+          "Open secrets file"
+        );
+        if (pick === "Open secrets file") {
+          await vscode.commands.executeCommand(
+            "cursorRemote.openTelegramSecrets"
+          );
+        }
+        return;
+      }
+      vscode.window.showInformationMessage(
+        "Cursor Remote: Telegram bot started. Message your bot with /help"
+      );
+    }
+  );
+
+  const stopTelegramBotCommand = vscode.commands.registerCommand(
+    "cursorRemote.stopTelegramBot",
+    async () => {
+      if (!telegramBridge?.isRunning()) {
+        vscode.window.showInformationMessage("Telegram bot is not running.");
+        return;
+      }
+      await telegramBridge.stop();
+      vscode.window.showInformationMessage(
+        "Cursor Remote: Telegram bot stopped."
+      );
+    }
+  );
+
+  const restartTelegramBotCommand = vscode.commands.registerCommand(
+    "cursorRemote.restartTelegramBot",
+    async () => {
+      if (telegramBridge?.isRunning()) {
+        await telegramBridge.stop();
+      }
+      await vscode.commands.executeCommand("cursorRemote.startTelegramBot");
+    }
+  );
+
   const showConnectionsCommand = vscode.commands.registerCommand(
     "cursorRemote.showConnections",
     async () => {
@@ -681,6 +768,10 @@ export async function activate(context: vscode.ExtensionContext) {
     checkRelayServerCommand,
     connectToRelaySessionByIdCommand,
     setRelaySessionIdCommand,
+    openTelegramSecretsCommand,
+    startTelegramBotCommand,
+    stopTelegramBotCommand,
+    restartTelegramBotCommand,
     showConnectionsCommand,
     statusBarClickCommand
   );
@@ -857,9 +948,40 @@ export async function activate(context: vscode.ExtensionContext) {
   if (statusBarManager) {
     statusBarManager.show();
   }
+
+  // Auto-start Telegram bot when secrets file exists and enabled
+  const tgCfg = vscode.workspace.getConfiguration("cursorRemote");
+  const tgAuto = tgCfg.get<boolean>("telegramAutoStart", true);
+  if (tgAuto && commandRouter && wsServer && commandHandler) {
+    const secretsPath =
+      (tgCfg.get<string>("telegramSecretsPath", "") || "").trim() ||
+      defaultTelegramSecretsPath();
+    const loaded = loadTelegramSecrets(secretsPath);
+    if (loaded.ok && loaded.secrets.enabled) {
+      telegramBridge = new TelegramBridge(
+        outputChannel,
+        commandRouter,
+        commandHandler,
+        wsServer,
+        context.extensionPath
+      );
+      void telegramBridge.start(secretsPath).then((result) => {
+        if (!result.ok) {
+          outputChannel.appendLine(
+            `[${new Date().toLocaleTimeString()}] [Telegram] Auto-start skipped: ${result.error}`
+          );
+        }
+      });
+    }
+  }
 }
 
 export function deactivate() {
+  if (telegramBridge) {
+    void telegramBridge.stop();
+    telegramBridge = null;
+  }
+
   if (cdpManager) {
     void cdpManager.stop();
     cdpManager = null;

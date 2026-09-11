@@ -10,6 +10,7 @@ export class WebSocketServer {
   private actualPort: number | null = null;
   private messageHandlers: ((message: string) => void)[] = [];
   private clientChangeHandlers: ((connected: boolean) => void)[] = [];
+  private outboundHandlers: ((message: string) => void)[] = [];
   private clients: Set<WebSocketClient> = new Set();
   private outputChannel: vscode.OutputChannel | null = null;
   private relayClient: {
@@ -348,6 +349,27 @@ export class WebSocketServer {
     this.clientChangeHandlers.push(handler);
   }
 
+  /**
+   * Observe outbound messages (chat_response, etc.) for bridges like Telegram.
+   * Returns a dispose function.
+   */
+  onOutbound(handler: (message: string) => void): () => void {
+    this.outboundHandlers.push(handler);
+    return () => {
+      this.outboundHandlers = this.outboundHandlers.filter((h) => h !== handler);
+    };
+  }
+
+  private notifyOutbound(message: string) {
+    for (const handler of this.outboundHandlers) {
+      try {
+        handler(message);
+      } catch (error) {
+        this.logError("Error in outbound handler", error);
+      }
+    }
+  }
+
   private notifyClientChange(connected: boolean) {
     this.clientChangeHandlers.forEach((handler) => {
       try {
@@ -412,6 +434,9 @@ export class WebSocketServer {
   }
 
   send(message: string) {
+    // Notify outbound observers (e.g. Telegram live sync) before fan-out
+    this.notifyOutbound(message);
+
     // Send to local WebSocket clients
     if (this.wss) {
       this.clients.forEach((client) => {
