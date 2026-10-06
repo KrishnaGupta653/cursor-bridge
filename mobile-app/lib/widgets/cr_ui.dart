@@ -124,8 +124,8 @@ class CrModeSwitch extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          pill('cli', 'CLI', Icons.terminal_rounded),
           pill('cdp', 'Agents', Icons.auto_awesome_rounded),
+          pill('cli', 'CLI', Icons.terminal_rounded),
         ],
       ),
     );

@@ -23,18 +23,32 @@ void main() {
     await tester.pumpAndSettle(const Duration(milliseconds: 100));
   }
 
-  testWidgets('App loads with connection UI in English', (WidgetTester tester) async {
+  testWidgets('Offline app shows the connection landing page', (WidgetTester tester) async {
     await pumpApp(tester);
 
-    expect(find.textContaining('Not Connected'), findsWidgets);
-    expect(find.text('Messages'), findsOneWidget);
+    expect(find.text('Offline'), findsOneWidget);
+    expect(find.text('Local'), findsOneWidget);
+    expect(find.text('Tunnel'), findsOneWidget);
+    expect(find.text('Relay'), findsOneWidget);
+    expect(find.text('Connect'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Relay tab joins a Cursor-created session', (WidgetTester tester) async {
+    await pumpApp(tester);
+
+    await tester.tap(find.text('Relay'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Connect with Session ID'), findsOneWidget);
+    expect(find.text('Generate Session ID'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
   testWidgets('Narrow phone layout has no overflow', (WidgetTester tester) async {
     await pumpApp(tester, size: const Size(360, 640));
 
-    expect(find.text('Messages'), findsOneWidget);
+    expect(find.text('Connect'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }

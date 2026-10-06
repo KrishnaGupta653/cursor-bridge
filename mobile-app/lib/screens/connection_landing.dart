@@ -19,7 +19,6 @@ class ConnectionLandingPage extends StatelessWidget {
   final String? error;
   final List<ConnectionHistoryItem> recent;
   final VoidCallback onConnect;
-  final VoidCallback? onGenerateSession;
   final VoidCallback? onCancelPairing;
   final VoidCallback? onCopySession;
   final VoidCallback? onShareSession;
@@ -48,7 +47,6 @@ class ConnectionLandingPage extends StatelessWidget {
     this.hostFocus,
     this.sessionFocus,
     this.error,
-    this.onGenerateSession,
     this.onCancelPairing,
     this.onCopySession,
     this.onShareSession,
@@ -138,7 +136,6 @@ class ConnectionLandingPage extends StatelessWidget {
                                   sessionIdController: sessionIdController,
                                   sessionFocus: sessionFocus,
                                   busy: _busy,
-                                  onGenerate: onGenerateSession ?? onConnect,
                                   onJoin: onConnect,
                                 )),
                 ),
@@ -646,19 +643,17 @@ class _TunnelSetupPanel extends StatelessWidget {
   }
 }
 
-/// Idle Relay: generate-first, or join an existing Session ID.
+/// Idle Relay: join a session created in Cursor.
 class _RelaySetupPanel extends StatelessWidget {
   final TextEditingController sessionIdController;
   final FocusNode? sessionFocus;
   final bool busy;
-  final VoidCallback onGenerate;
   final VoidCallback onJoin;
 
   const _RelaySetupPanel({
     super.key,
     required this.sessionIdController,
     required this.busy,
-    required this.onGenerate,
     required this.onJoin,
     this.sessionFocus,
   });
@@ -689,69 +684,19 @@ class _RelaySetupPanel extends StatelessWidget {
               ),
               SizedBox(height: 6),
               Text(
-                'Generate a Session ID here, then paste it into Cursor on your Mac. Same Wi‑Fi is not required.',
+                '1. In Cursor: connect to Relay to create the session\n'
+                '2. Run “Cursor Remote: Pair Relay Client”\n'
+                '3. Enter the Session ID below, then paste the pairing code',
                 style: TextStyle(
                   color: Cr.textSecondary,
                   fontSize: 13,
-                  height: 1.4,
+                  height: 1.45,
                 ),
               ),
             ],
           ),
         ),
         const SizedBox(height: 20),
-        SizedBox(
-          height: 54,
-          child: FilledButton.icon(
-            onPressed: busy ? null : onGenerate,
-            icon: busy
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Colors.white70,
-                    ),
-                  )
-                : const Icon(Icons.auto_awesome_rounded, size: 20),
-            label: Text(
-              busy ? 'Creating session…' : 'Generate Session ID',
-              style: const TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
-                letterSpacing: -0.2,
-              ),
-            ),
-            style: FilledButton.styleFrom(
-              backgroundColor: Cr.accent,
-              disabledBackgroundColor: Cr.surfaceHigh,
-              foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(14),
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(height: 28),
-        const Row(
-          children: [
-            Expanded(child: Divider(color: Cr.borderSubtle)),
-            Padding(
-              padding: EdgeInsets.symmetric(horizontal: 12),
-              child: Text(
-                'or join existing',
-                style: TextStyle(
-                  color: Cr.textFaint,
-                  fontSize: 11.5,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.3,
-                ),
-              ),
-            ),
-            Expanded(child: Divider(color: Cr.borderSubtle)),
-          ],
-        ),
-        const SizedBox(height: 16),
         const _FieldLabel('Session ID'),
         const SizedBox(height: 8),
         TextField(

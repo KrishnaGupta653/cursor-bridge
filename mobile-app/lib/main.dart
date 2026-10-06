@@ -176,6 +176,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   // 로컬 서버 관련
   WebSocketChannel? _localWebSocket;
+  final Map<String, String> _localCredentials = {};
+  final Map<String, String> _relayCredentials = {};
+  final Map<String, String> _relayDeviceIds = {};
+  Map<String, String> _relayHeaders([String? session]) => {
+    'Content-Type': 'application/json',
+    if (_relayCredentials[session ?? _sessionId] != null)
+      'Authorization': 'Bearer ${_relayCredentials[session ?? _sessionId]}',
+  };
   final TextEditingController _localIpController = TextEditingController();
   final TextEditingController _localPortController =
       TextEditingController(text: '8766');
@@ -192,7 +200,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   MessageItem? _lastUserPrompt; // 마지막 User Prompt 메시지 (모드 업데이트용)
 
   // Agent backend: CLI (new agent) vs CDP (existing Cursor IDE session)
-  String _selectedAgentBackend = 'cli'; // cli | cdp
+  String _selectedAgentBackend = 'cdp'; // cdp (Agents) | cli — Agents first
   final CdpSessionStore _cdpStore = CdpSessionStore();
   String? get _selectedCdpSessionId =>
       _cdpStore.sessions.keys.isEmpty ? null : _cdpStore.sessions.keys.first;
@@ -272,61 +280,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   // Create a new relay session, then connect (Generate & Connect)
   Future<void> _createSession() async {
-    if (_isConnecting) return;
     setState(() {
-      _isConnecting = true;
-      _lastConnectionError = null;
-      _messages.add(
-          MessageItem('Creating new session…', type: MessageType.system));
+      _lastConnectionError = 'Create the relay session in Cursor first, then enter its ID here.';
+      _messages.add(MessageItem(
+          'Use Cursor Remote in Cursor to create a session, then Pair Relay Client to obtain a pairing code.',
+          type: MessageType.system));
     });
-
-    try {
-      final response = await http
-          .post(
-            Uri.parse('$kRelayServerUrl/api/session'),
-            headers: {'Content-Type': 'application/json'},
-          )
-          .timeout(const Duration(seconds: 15));
-
-      if (response.statusCode == 201) {
-        final data = jsonDecode(response.body);
-        if (data['success'] == true) {
-          final sessionId = data['data']['sessionId'] as String;
-          setState(() {
-            _sessionIdController.text = sessionId;
-            _messages.add(MessageItem('✅ Session created: $sessionId',
-                type: MessageType.system));
-            _messages.add(MessageItem(
-                '💡 The Cursor Remote extension will automatically detect this session (may take up to 10 seconds)',
-                type: MessageType.system));
-            _messages.add(
-                MessageItem('📋 Session ID: $sessionId', type: MessageType.system));
-          });
-
-          await _connectToSession(sessionId);
-          return;
-        }
-      }
-      setState(() {
-        _isConnecting = false;
-        _lastConnectionError =
-            'Failed to create session (HTTP ${response.statusCode})';
-        _messages.add(MessageItem(
-            '❌ Failed to create session. Check your internet connection and try again.',
-            type: MessageType.system));
-      });
-    } catch (e) {
-      setState(() {
-        _isConnecting = false;
-        _lastConnectionError = e.toString();
-        _messages.add(MessageItem(
-            '❌ Unable to create a relay session. Check your internet connection and try again.',
-            type: MessageType.system));
-      });
-    }
   }
 
-  // Connect to local server (direct WebSocket) or Cloudflare Tunnel (wss)
   Future<void> _connectToLocal() async {
     if (_isConnecting) return;
 
@@ -417,6 +378,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
 
     var handshakeComplete = false;
+    var authenticationStarted = false;
     Timer? connectionTimeout;
 
     void failConnection(String userMessage,
@@ -478,9 +440,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
 
     try {
-      _localWebSocket = WebSocketChannel.connect(Uri.parse(wsUrl));
+      final connection = WebSocketChannel.connect(Uri.parse(wsUrl));
+      _localWebSocket = connection;
 
-      connectionTimeout = Timer(const Duration(seconds: 10), () {
+      connectionTimeout = Timer(const Duration(seconds: 120), () {
         failConnection(
           asTunnel
               ? 'Tunnel connection timed out. Confirm the extension tunnel is running and paste the latest wss:// URL.'
@@ -488,20 +451,35 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   'Check that Cursor is open with the extension running, '
                   'and that your phone and Mac are on the same Wi-Fi network.',
           technical:
-              'Connection timed out after 10s ($wsUrl). Extension may not be listening on port $port.',
+              'Connection or pairing timed out after 120s ($wsUrl). Extension may not be listening on port $port.',
         );
       });
 
-      _localWebSocket!.stream.listen(
+      connection.stream.listen(
         (message) {
+          if (_localWebSocket != connection) return;
           final raw = message.toString();
-          // First message (typically type: connected) confirms the handshake
           if (!handshakeComplete) {
-            succeedConnection();
+            try {
+              final frame = jsonDecode(raw);
+              if (frame is Map && frame['type'] == 'auth_required') {
+                if (authenticationStarted) return;
+                authenticationStarted = true;
+              }
+            } catch (_) {
+              failConnection('Invalid authentication response', scheduleRetry: false);
+              return;
+            }
+            _authenticateLocalFrame(raw, wsUrl, succeedConnection, () {
+              failConnection('Pairing failed. Use Cursor Remote: Pair Client in Cursor.',
+                  scheduleRetry: false);
+            });
+            return;
           }
           _handleLocalMessage(raw);
         },
         onError: (error) {
+          if (_localWebSocket != connection) return;
           final friendly = asTunnel
               ? 'Tunnel unreachable. This network may block Cloudflare edge. '
                   'Use Local on same Wi‑Fi — port may be 8767 if 8766 was busy.'
@@ -510,6 +488,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           failConnection(friendly, technical: error.toString());
         },
         onDone: () {
+          if (_localWebSocket != connection) return;
+          if (connection.closeCode == 4001) {
+            _localCredentials.remove(wsUrl);
+          }
+          if (!handshakeComplete && connection.closeCode == 4001) {
+            failConnection(
+              'Pairing code rejected or expired. Run Cursor Remote: Pair Client again and paste the new code.',
+              technical: 'Authentication failed (4001): ${connection.closeReason ?? ''}',
+              scheduleRetry: false,
+            );
+            return;
+          }
           if (!handshakeComplete) {
             failConnection(
               asTunnel
@@ -517,6 +507,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   : 'Unable to connect to the local Cursor Remote server. '
                       'The connection closed before the handshake completed.',
               technical: 'WebSocket closed before handshake ($wsUrl)',
+              scheduleRetry: connection.closeCode != 4001,
             );
             return;
           }
@@ -542,6 +533,66 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         technical: e.toString(),
         scheduleRetry: false,
       );
+    }
+  }
+
+  Future<void> _authenticateLocalFrame(String raw, String endpoint,
+      VoidCallback onAuthenticated, VoidCallback onFailure) async {
+    final socket = _localWebSocket;
+    try {
+      final frame = jsonDecode(raw);
+      if (frame is! Map || frame['protocolVersion'] != 2) {
+        onFailure();
+        return;
+      }
+      if (frame['type'] == 'authenticated' && frame['scope'] == 'control') {
+        final token = frame['token'];
+        if (token is String) _localCredentials[endpoint] = token;
+        onAuthenticated();
+        return;
+      }
+      if (frame['type'] != 'auth_required') {
+        onFailure();
+        return;
+      }
+      final token = _localCredentials[endpoint];
+      if (token != null) {
+        socket?.sink.add(jsonEncode({
+          'type': 'authenticate', 'protocolVersion': 2, 'token': token,
+        }));
+        return;
+      }
+      if (!mounted) return;
+      String secret = '';
+      final accepted = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Pair with Cursor'),
+          content: TextField(
+            autofocus: true,
+            enableSuggestions: false, autocorrect: false,
+            decoration: const InputDecoration(
+              labelText: 'Pairing code',
+              helperText: 'Run Cursor Remote: Pair Client in Cursor first.',
+            ),
+            onChanged: (value) => secret = value.trim(),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel')),
+            TextButton(onPressed: () => Navigator.pop(context, true),
+                child: const Text('Pair')),
+          ],
+        ),
+      );
+      if (!mounted || socket != _localWebSocket) return;
+      if (accepted != true || secret.isEmpty) { onFailure(); return; }
+      socket?.sink.add(jsonEncode({
+        'type': 'pair', 'protocolVersion': 2, 'secret': secret,
+      }));
+    } catch (_) {
+      _localCredentials.remove(endpoint);
+      onFailure();
     }
   }
 
@@ -911,31 +962,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       barrierDismissible: false,
       useSafeArea: true,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('PIN Required'),
+        title: const Text('Relay pairing code'),
         content: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Text(
-                'This session is PIN-protected.\nEnter the 4–6 digit PIN set on the PC (Cursor extension).',
+                'Run Cursor Remote: Pair Relay Client in Cursor and paste the single-use code.',
                 style: TextStyle(fontSize: 14),
               ),
               const SizedBox(height: 16),
               TextField(
                 controller: controller,
                 keyboardType: TextInputType.text,
-                obscureText: true,
-                maxLength: 6,
+                maxLength: 43,
                 autofocus: true,
                 textInputAction: TextInputAction.done,
                 onSubmitted: (_) => navigator.pop(controller.text.trim()),
-                inputFormatters: [
-                  FilteringTextInputFormatter.digitsOnly,
-                ],
+                enableSuggestions: false,
+                autocorrect: false,
                 decoration: const InputDecoration(
-                  labelText: 'PIN',
-                  hintText: '4–6 digits',
+                  labelText: 'Pairing code',
+                  hintText: 'Single-use code from Cursor',
                   counterText: '',
                   border: OutlineInputBorder(),
                 ),
@@ -959,6 +1008,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   // Connect to an existing session (PIN only required when set by PC)
   Future<void> _connectToSession(String sessionId, [String? pin]) async {
+    sessionId = sessionId.trim().toUpperCase();
+    _deviceId = _relayDeviceIds[sessionId] ?? _deviceId;
     if (sessionId.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please enter a Session ID')),
@@ -981,7 +1032,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       setState(() {
         _messages.add(MessageItem(
             pin != null
-                ? 'Connecting to session $sessionId with PIN...'
+                ? 'Connecting to session $sessionId with a pairing code...'
                 : 'Connecting to session $sessionId...',
             type: MessageType.system));
       });
@@ -992,13 +1043,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         'deviceType': 'mobile',
       };
       if (pin != null && pin.isNotEmpty) {
-        body['pin'] = pin;
+        body['pairingCode'] = pin;
       }
 
       final response = await http
           .post(
             Uri.parse('$kRelayServerUrl/api/connect'),
-            headers: {'Content-Type': 'application/json'},
+            headers: _relayHeaders(sessionId),
             body: jsonEncode(body),
           )
           .timeout(const Duration(seconds: 15));
@@ -1010,7 +1061,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final errorCode = dataMap['errorCode']?.toString();
       final errorMessage = dataMap['error']?.toString() ?? '';
 
-      if (response.statusCode == 200 && dataMap['success'] == true) {
+      if (response.statusCode == 200 && dataMap['success'] == true && dataMap['protocolVersion'] == 2) {
+        final assignedDeviceId = dataMap['data']?['deviceId'];
+        if (assignedDeviceId is String) {
+          _deviceId = assignedDeviceId;
+          _relayDeviceIds[sessionId] = assignedDeviceId;
+        }
+        final issued = dataMap['data']?['token'];
+        if (issued is String && issued.length == 43) _relayCredentials[sessionId] = issued;
+        if (_relayCredentials[sessionId] == null) throw StateError('Missing relay credential');
         setState(() {
           _sessionId = sessionId;
           _isConnected = true;
@@ -1053,66 +1112,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _loadCommandApprovals(silent: true);
           _loadCommandEvents(silent: true);
         });
-      } else if (response.statusCode == 403 &&
-          (errorCode == 'PIN_REQUIRED' ||
-              errorMessage.toLowerCase().contains('pin required') ||
-              errorMessage.toLowerCase().contains('pin을 입력') ||
-              errorMessage.toLowerCase().contains('enter a pin'))) {
-        // PC has set a PIN — prompt user then retry
+      } else if (errorCode == 'PAIRING_CODE_REQUIRED') {
         if (!mounted) return;
-        setState(() {
-          _messages.add(MessageItem(
-              'This session requires a PIN. Please enter the PIN set on the PC.',
-              type: MessageType.system));
-        });
-        final enteredPin = await _showPinDialog();
+        final enteredCode = await _showPinDialog();
         if (!mounted) return;
-        if (enteredPin != null && enteredPin.isNotEmpty) {
-          await _connectToSession(sessionId, enteredPin);
+        if (enteredCode != null && enteredCode.isNotEmpty) {
+          await _connectToSession(sessionId, enteredCode);
         } else {
-          setState(() {
-            _isConnecting = false;
-            _messages.add(MessageItem('Connection cancelled — no PIN entered.',
-                type: MessageType.system));
-          });
+          setState(() => _isConnecting = false);
         }
-      } else if (response.statusCode == 403 &&
-          (errorCode == 'INVALID_PIN' ||
-              errorMessage.toLowerCase().contains('invalid pin'))) {
+      } else if ([401, 403, 409, 429].contains(response.statusCode)) {
+        _relayCredentials.remove(sessionId);
         setState(() {
+          _isConnected = false;
           _isConnecting = false;
-          _lastConnectionError = 'Authentication failed: incorrect PIN';
-          _messages.add(MessageItem(
-              '❌ Incorrect PIN. Please check the PIN set on the PC (Cursor extension).',
-              type: MessageType.system));
-        });
-        if (mounted) {
-          await showDialog<void>(
-            context: context,
-            builder: (ctx) => AlertDialog(
-              title: const Text('Incorrect PIN'),
-              content: const Text(
-                'The PIN you entered is incorrect.\nCheck the 4–6 digit PIN configured in the Cursor Remote extension on your PC.',
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(ctx).pop(),
-                  child: const Text('OK'),
-                ),
-              ],
-            ),
-          );
-        }
-      } else if (response.statusCode == 403 &&
-          (errorCode == 'PC_MUST_CONNECT_FIRST' ||
-              errorMessage.toLowerCase().contains('pc must connect first'))) {
-        setState(() {
-          _isConnecting = false;
-          _lastConnectionError =
-              'The Cursor extension must connect to the relay session first.';
-          _messages.add(MessageItem(
-              '❌ The Cursor extension must connect first. Click the status bar item in Cursor to generate and connect with a Session ID, then try again.',
-              type: MessageType.system));
+          _lastConnectionError = 'Relay authentication failed ($errorCode). Check the session and obtain a new pairing code in Cursor.';
         });
       } else {
         final error = errorMessage.isNotEmpty
@@ -1192,6 +1206,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         final response = await http.get(
           Uri.parse(
               '$kRelayServerUrl/api/poll?sessionId=$_sessionId&deviceType=mobile&deviceId=$_deviceId'),
+          headers: _relayHeaders(),
         );
 
         if (response.statusCode == 200) {
@@ -1203,9 +1218,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             }
           }
           unawaited(_refreshCommandMetaIfStale());
+        } else {
+          _stopPolling();
+          if ([401, 403].contains(response.statusCode)) _relayCredentials.remove(_sessionId);
+          if (mounted) setState(() {
+            _isConnected = false;
+            _lastConnectionError = 'Relay polling failed (HTTP ${response.statusCode}). Reconnect to continue.';
+          });
         }
       } catch (e) {
-        // 폴링 에러는 조용히 무시 (일시적인 네트워크 문제일 수 있음)
+        _stopPolling();
+        if (mounted) setState(() {
+          _isConnected = false;
+          _lastConnectionError = 'Relay connection lost. Reconnect to continue.';
+        });
       }
     });
   }
@@ -1223,9 +1249,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final messageData = msg['data'] ?? msg;
 
     setState(() {
-      _messages.add(MessageItem('Received: ${jsonEncode(msg)}',
-          type: MessageType.system));
-
       if (type == 'command_result') {
         if (messageData['success'] == true) {
           final commandType = messageData['command_type'] as String? ?? '';
@@ -1692,7 +1715,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return 'Not Connected';
   }
 
-  void _disconnect() {
+  Future<void> _disconnect() async {
+    final relaySession = _sessionId;
+    final relayHeaders = _relayHeaders();
     _stopPolling();
     _stopReconnect();
 
@@ -1714,6 +1739,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _lastCommandMetaRefreshAt = null;
         _messages.add(MessageItem('Disconnected', type: MessageType.system));
       });
+    }
+    if (relaySession != null && _relayCredentials.containsKey(relaySession)) {
+      try {
+        final response = await http.post(Uri.parse('$kRelayServerUrl/api/disconnect'),
+          headers: relayHeaders, body: jsonEncode({'sessionId': relaySession}))
+          .timeout(const Duration(seconds: 15));
+        if (response.statusCode != 200) throw StateError('Disconnect failed');
+        _relayCredentials.remove(relaySession);
+      } catch (_) {
+        if (mounted) setState(() => _lastConnectionError =
+            'Disconnected locally; server revocation was not confirmed. Revoke the relay session in Cursor if needed.');
+      }
     }
   }
 
@@ -1820,7 +1857,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
       final commandData = {
         'type': type,
-        'id': DateTime.now().millisecondsSinceEpoch.toString(),
+        'id': DateTime.now().microsecondsSinceEpoch.toString(),
+        'deadline': DateTime.now().add(const Duration(minutes: 1)).millisecondsSinceEpoch,
         if (text != null) 'text': text,
         if (command != null) 'command': command,
         if (args != null) 'args': args,
@@ -1883,7 +1921,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           try {
             final response = await http.post(
               Uri.parse('$kRelayServerUrl/api/send'),
-              headers: {'Content-Type': 'application/json'},
+              headers: _relayHeaders(),
               body: jsonEncode({
                 'sessionId': _sessionId,
                 'deviceId': _deviceId,
@@ -2600,7 +2638,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     try {
       final uri = Uri.parse('$kRelayServerUrl/api/command-approvals')
           .replace(queryParameters: {'sessionId': _sessionId});
-      final response = await http.get(uri);
+      final response = await http.get(uri, headers: _relayHeaders());
       final body = response.body.isNotEmpty
           ? jsonDecode(response.body) as Map<String, dynamic>
           : <String, dynamic>{};
@@ -2660,7 +2698,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     try {
       final uri = Uri.parse('$kRelayServerUrl/api/command-events').replace(
           queryParameters: {'sessionId': _sessionId, 'limit': '$limit'});
-      final response = await http.get(uri);
+      final response = await http.get(uri, headers: _relayHeaders());
       final body = response.body.isNotEmpty
           ? jsonDecode(response.body) as Map<String, dynamic>
           : <String, dynamic>{};
@@ -2714,7 +2752,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     try {
       final response = await http.post(
         Uri.parse('$kRelayServerUrl/api/resolve-command-approval'),
-        headers: {'Content-Type': 'application/json'},
+        headers: _relayHeaders(),
         body: jsonEncode({
           'sessionId': _sessionId,
           'approvalId': approvalId,
@@ -3142,7 +3180,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       error: _lastConnectionError,
       recent: AppSettings().connectionHistory,
       onConnect: _connect,
-      onGenerateSession: _createSession,
       onSelectRecent: _connectFromHistory,
       onDeleteRecent: (item) async {
         await AppSettings().removeConnectionHistory(item);
