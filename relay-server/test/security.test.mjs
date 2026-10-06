@@ -89,6 +89,20 @@ test('all data/control endpoints reject unauthenticated requests before datastor
   }
 });
 
+test('single-function router dispatches to endpoints and keeps their auth', async () => {
+  const relay = (await import('../.test-dist/api/relay.js')).default;
+  const call = async (query, url) => {
+    const res = response();
+    await relay({ method: 'GET', headers: {}, url, query: { sessionId: 'ABC123', ...query }, body: {} }, res);
+    return res;
+  };
+  assert.equal((await call({ route: 'poll' }, '/api/poll')).code, 401);
+  assert.equal((await call({}, '/api/send?x=1')).code, 401);
+  assert.equal((await call({ route: 'debug-sessions' })).code, 403);
+  assert.equal((await call({ route: 'nope' })).code, 404);
+  assert.equal((await call({ route: '__proto__' })).code, 404);
+});
+
 test('public discovery and debug enumeration are disabled', async () => {
   for (const name of ['sessions-with-mobile','sessions-waiting-for-pc','debug-sessions']) {
     const handler = (await import(`../.test-dist/api/${name}.js`)).default;
