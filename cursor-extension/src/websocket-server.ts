@@ -1,14 +1,58 @@
 import WebSocket, { WebSocketServer as WSServer } from "ws";
 import * as vscode from "vscode";
 import * as net from "net";
-import { execFileSync } from "child_process";
+import { execFile, execFileSync } from "child_process";
+import { WsAuth } from "./ws-auth";
 
 type WebSocketClient = WebSocket;
 
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function terminate(pid: number, signal: NodeJS.Signals, waitMs: number): Promise<boolean> {
+  try {
+    process.kill(pid, signal);
+  } catch {
+    return !isAlive(pid);
+  }
+  for (let waited = 0; waited < waitMs; waited += 100) {
+    if (!isAlive(pid)) return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return !isAlive(pid);
+}
+
+export function isOrphanedExtensionHost(pid: number): boolean {
+  try {
+    const out = execFileSync("ps", ["-o", "ppid=,uid=,command=", "-p", String(pid)], {
+      encoding: "utf8",
+      timeout: 3000,
+    }).trim();
+    const m = out.match(/^(\d+)\s+(\d+)\s+(.*)$/);
+    if (!m) return false;
+    const [, ppid, uid, command] = m;
+    const sameUser = typeof process.getuid !== "function" || Number(uid) === process.getuid();
+    return ppid === "1" && sameUser && /(Cursor|Code) Helper \(Plugin\): extension-host/.test(command);
+  } catch {
+    return false;
+  }
+}
+
 export class WebSocketServer {
   private wss: WSServer | null = null;
+  readonly auth = new WsAuth();
   private port: number;
   private actualPort: number | null = null;
+  /** False after a user-initiated stop, so the watchdog leaves the server off. */
+  private wanted = false;
+  private starting: Promise<void> | null = null;
+  private lastRestartError: string | null = null;
   private messageHandlers: ((message: string) => void)[] = [];
   private clientChangeHandlers: ((connected: boolean) => void)[] = [];
   private outboundHandlers: ((message: string) => void)[] = [];
@@ -70,132 +114,40 @@ export class WebSocketServer {
     source: string;
     error?: string;
   }) {
-    const logMessage = JSON.stringify({
-      type: "log",
-      ...logData,
-    });
-
-    // 로컬 WebSocket 클라이언트에 전송
-    if (this.wss && this.clients.size > 0) {
-      this.clients.forEach((client) => {
-        if (client.readyState === WebSocket.OPEN) {
-          client.send(logMessage);
-        }
-      });
-    }
-
-    // 릴레이 서버에도 전송 (연결되어 있는 경우)
-    if (this.relayClient && this.relayClient.isConnectedToSession()) {
-      this.relayClient.sendMessage(logMessage).catch(() => {
-        // 로그 전송 실패는 무시 (무한 루프 방지)
-      });
-    }
+    // Diagnostics are local; they can contain information from other principals.
   }
 
-  private async findAvailablePort(
-    startPort: number,
-    maxAttempts: number = 10
-  ): Promise<number | null> {
+  /** PIDs of other processes listening anywhere in [from, to] (one lsof call, non-blocking). */
+  private listForeignListenerPids(from: number, to: number): Promise<number[]> {
     return new Promise((resolve) => {
-      let attempts = 0;
-
-      const tryPort = (port: number) => {
-        const server = net.createServer();
-
-        server.listen(port, "0.0.0.0", () => {
-          server.once("close", () => {
-            resolve(port);
-          });
-          server.close();
-        });
-
-        server.on("error", (err: NodeJS.ErrnoException) => {
-          if (err.code === "EADDRINUSE") {
-            attempts++;
-            if (attempts < maxAttempts) {
-              tryPort(port + 1);
-            } else {
-              resolve(null);
-            }
-          } else {
-            resolve(null);
-          }
-        });
-      };
-
-      tryPort(startPort);
+      execFile("lsof", ["-nP", `-iTCP:${from}-${to}`, "-sTCP:LISTEN", "-t"], { timeout: 3000 }, (_err, stdout) => {
+        const pids = new Set(
+          String(stdout || "")
+            .split(/\s+/)
+            .map((s) => parseInt(s, 10))
+            .filter((n) => Number.isFinite(n) && n > 0 && n !== process.pid)
+        );
+        resolve([...pids]);
+      });
     });
-  }
-
-  /** PIDs listening on TCP port (macOS/Linux). */
-  private listListenerPids(port: number): number[] {
-    try {
-      const out = execFileSync(
-        "lsof",
-        ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"],
-        { encoding: "utf8", timeout: 3000 }
-      );
-      return out
-        .split(/\s+/)
-        .map((s) => parseInt(s, 10))
-        .filter((n) => Number.isFinite(n) && n > 0);
-    } catch {
-      return [];
-    }
-  }
-
-  private processCommand(pid: number): string {
-    try {
-      return execFileSync("ps", ["-p", String(pid), "-o", "comm="], {
-        encoding: "utf8",
-        timeout: 3000,
-      }).trim();
-    } catch {
-      return "";
-    }
   }
 
   /**
-   * Free a stuck port when safe (e.g. leftover cloudflared).
-   * Never kills Cursor / Electron — those require using the next port.
+   * Free the Cursor Remote port range (WS fallbacks + hooks) from orphaned extension hosts
+   * of the current user (parent pid 1, left behind after Cursor quit). Live windows and
+   * unrelated processes are never touched.
    */
-  async freePortIfSafe(port: number): Promise<{
-    killed: number[];
-    skipped: string[];
-  }> {
-    const killed: number[] = [];
-    const skipped: string[] = [];
-    const pids = this.listListenerPids(port);
-    for (const pid of pids) {
-      if (pid === process.pid) {
-        skipped.push(`${pid} (self)`);
-        continue;
-      }
-      const name = this.processCommand(pid);
-      const lower = name.toLowerCase();
-      if (
-        lower.includes("cursor") ||
-        lower.includes("electron") ||
-        lower.includes("code helper") ||
-        lower.includes("visual studio")
-      ) {
-        skipped.push(`${pid} (${name || "Cursor"})`);
-        continue;
-      }
-      try {
-        process.kill(pid, "SIGTERM");
-        killed.push(pid);
-        this.log(`Freed port ${port}: sent SIGTERM to pid ${pid} (${name})`);
-      } catch (e) {
-        skipped.push(
-          `${pid} (kill failed: ${e instanceof Error ? e.message : String(e)})`
-        );
-      }
-    }
-    if (killed.length > 0) {
-      await new Promise((r) => setTimeout(r, 600));
-    }
-    return { killed, skipped };
+  async releaseOrphanedPorts(count: number = 10): Promise<void> {
+    const pids = await this.listForeignListenerPids(this.port, this.port + count - 1);
+    const orphans = pids.filter(isOrphanedExtensionHost);
+    await Promise.all(
+      orphans.map(async (pid) => {
+        // Orphaned hosts often ignore SIGTERM; escalate after a grace period.
+        if ((await terminate(pid, "SIGTERM", 2000)) || (await terminate(pid, "SIGKILL", 1000))) {
+          this.log(`Stopped orphaned Cursor extension host ${pid} that was holding Cursor Remote ports`);
+        }
+      })
+    );
   }
 
   /** Bind WebSocket server on an exact port (rejects on EADDRINUSE). */
@@ -212,7 +164,17 @@ export class WebSocketServer {
       }
 
       this.actualPort = port;
-      const wss = new WSServer({ host: "0.0.0.0", port });
+      // Read per connection so "Allow it" in the pairing flow applies without a restart.
+      const allowedOrigins = () => vscode.workspace.getConfiguration("cursorRemote")
+        .get<string[]>("allowedWebSocketOrigins", ["http://localhost:8080", "http://127.0.0.1:8080"]);
+      const wss = new WSServer({ host: "0.0.0.0", port, maxPayload: 64 * 1024,
+        verifyClient: (info: { req: import("http").IncomingMessage }) => {
+          const origin = info.req.headers.origin;
+          const ok = this.auth.originAllowed(origin, allowedOrigins());
+          if (!ok) this.log(`Rejected connection from origin ${origin} — add it to cursorRemote.allowedWebSocketOrigins (or run Pair Client and choose "Allow it").`);
+          return ok;
+        },
+      });
       this.wss = wss;
 
       let settled = false;
@@ -223,41 +185,21 @@ export class WebSocketServer {
       };
 
       wss.on("connection", (ws: WebSocketClient) => {
-        const clientId = `client-${Date.now()}-${Math.random()
-          .toString(36)
-          .substring(7)}`;
-        (ws as any).clientId = clientId;
-        this.clients.add(ws);
-        this.log(`Client connected to Cursor Remote (ID: ${clientId})`);
-        this.notifyClientChange(true);
-
-        ws.on("message", (message: Buffer) => {
-          const messageStr = message.toString();
-          this.log(
-            `Received message from ${clientId}: ${messageStr.substring(
-              0,
-              100
-            )}${messageStr.length > 100 ? "..." : ""}`
-          );
-          try {
-            const parsed = JSON.parse(messageStr);
-            parsed.clientId = clientId;
-            const messageWithClientId = JSON.stringify(parsed);
-            this.messageHandlers.forEach((handler) => {
-              try {
-                handler(messageWithClientId);
-              } catch (error) {
-                this.logError("Error in message handler", error);
-              }
-            });
-          } catch {
-            this.messageHandlers.forEach((handler) => {
-              try {
-                handler(messageStr);
-              } catch (err) {
-                this.logError("Error in message handler", err);
-              }
-            });
+        let clientId = "unauthenticated";
+        this.auth.attach(ws, id => {
+          clientId = id;
+          (ws as any).clientId = id;
+          this.clients.add(ws);
+          this.notifyClientChange(true);
+        }, parsed => {
+          // Identity and source always come from the authenticated adapter.
+          delete parsed.senderDeviceId;
+          delete parsed.relaySessionId;
+          parsed.clientId = clientId;
+          parsed.source = "local";
+          for (const handler of this.messageHandlers) {
+            try { handler(JSON.stringify(parsed)); }
+            catch { this.logError("Command dispatch failed"); }
           }
         });
 
@@ -274,14 +216,7 @@ export class WebSocketServer {
           this.logError("WebSocket error", error);
         });
 
-        this.sendToClient(
-          ws,
-          JSON.stringify({
-            type: "connected",
-            message: "Connected to Cursor Remote",
-            port,
-          })
-        );
+
       });
 
       wss.on("error", (error: any) => {
@@ -321,41 +256,29 @@ export class WebSocketServer {
    * Start local WS. If preferred port is busy, automatically try the next ports.
    * Optionally free safe leftover processes on the preferred port first.
    */
-  async start(options?: { preferFreePreferredPort?: boolean }): Promise<void> {
+  async start(options?: { preferFreePreferredPort?: boolean; quiet?: boolean }): Promise<void> {
+    this.wanted = true;
+    // Coalesce concurrent starts (activation, watchdog and commands can overlap).
+    if (!this.starting) {
+      this.starting = this.startOnce(options).finally(() => {
+        this.starting = null;
+      });
+    }
+    return this.starting;
+  }
+
+  private async startOnce(options?: { preferFreePreferredPort?: boolean; quiet?: boolean }): Promise<void> {
     if (this.wss && this.actualPort != null) {
-      const alive = await this.probePort(this.actualPort);
-      if (alive) {
-        this.log(
-          `WebSocket server is already running on port ${this.actualPort}`
-        );
-        return;
-      }
-      this.log(
-        `Stale WebSocket handle on port ${this.actualPort} — restarting`
-      );
-      this.stop();
+      if (await this.probePort(this.actualPort)) return;
+      this.log(`Stale WebSocket handle on port ${this.actualPort} — restarting`);
+      this.closeServer();
     }
 
     const maxAttempts = 10;
     const preferFree = options?.preferFreePreferredPort !== false;
 
     if (preferFree) {
-      const listeners = this.listListenerPids(this.port);
-      if (listeners.length > 0) {
-        const { killed, skipped } = await this.freePortIfSafe(this.port);
-        if (killed.length > 0) {
-          this.log(
-            `Freed preferred port ${this.port} (killed: ${killed.join(", ")})`
-          );
-        }
-        if (skipped.length > 0) {
-          this.log(
-            `Port ${this.port} still held by: ${skipped.join(
-              ", "
-            )} — will try next free port`
-          );
-        }
-      }
+      await this.releaseOrphanedPorts(maxAttempts);
     }
 
     let lastErr: unknown = null;
@@ -364,18 +287,14 @@ export class WebSocketServer {
       try {
         await this.listenOnPort(port);
         if (port !== this.port) {
-          this.log(
-            `⚠️ Preferred port ${this.port} was busy; using port ${port} instead.`
-          );
-          vscode.window.showWarningMessage(
-            `Cursor Remote: Port ${this.port} was busy — listening on ${port}. Use this port in the phone Local field.`
-          );
+          // Expected with several Cursor windows open; the status bar shows the port.
+          this.log(`Port ${this.port} is used by another Cursor window; this window uses ${port}.`);
         }
         return;
       } catch (e: any) {
         lastErr = e;
         if (e?.code === "EADDRINUSE") {
-          this.log(`Port ${port} in use, trying ${port + 1}…`);
+          if (!options?.quiet) this.log(`Port ${port} in use, trying ${port + 1}…`);
           continue;
         }
         throw e;
@@ -385,12 +304,21 @@ export class WebSocketServer {
     const errorMsg = `All ports from ${this.port} to ${
       this.port + maxAttempts - 1
     } are in use. Stop other Cursor Remote instances or free a port.`;
-    this.logError(errorMsg, lastErr);
-    vscode.window.showErrorMessage(`Cursor Remote: ${errorMsg}`);
+    if (!options?.quiet) {
+      this.logError(errorMsg, lastErr);
+      vscode.window.showErrorMessage(`Cursor Remote: ${errorMsg}`);
+    }
     throw new Error(errorMsg);
   }
 
+  /** User-initiated stop: stays stopped (the watchdog will not restart it) and revokes clients. */
   stop() {
+    this.wanted = false;
+    this.auth.revokeAll();
+    this.closeServer();
+  }
+
+  private closeServer() {
     if (this.wss) {
       try {
         this.wss.close();
@@ -399,7 +327,10 @@ export class WebSocketServer {
       }
       this.wss = null;
       this.actualPort = null;
-      this.clients.clear();
+      if (this.clients.size > 0) {
+        this.clients.clear();
+        this.notifyClientChange(false);
+      }
       this.log("WebSocket server stopped");
     }
   }
@@ -431,21 +362,23 @@ export class WebSocketServer {
    * Health-check listener; restart if the socket died while the extension
    * still thinks the server is up (common after window/host churn).
    */
-  async ensureListening(): Promise<boolean> {
+  async ensureListening(options?: { onlyIfWanted?: boolean }): Promise<boolean> {
+    if (options?.onlyIfWanted && (!this.wanted || this.starting)) return this.isRunning();
     const port = this.actualPort || this.port;
     if (this.wss) {
-      const alive = await this.probePort(port);
-      if (alive) return true;
-      this.log(
-        `⚠️ WebSocket port ${port} not accepting connections — restarting`
-      );
-      this.stop();
+      if (await this.probePort(port)) return true;
+      this.log(`⚠️ WebSocket port ${port} not accepting connections — restarting`);
+      this.closeServer();
     }
     try {
-      await this.start();
+      await this.start({ quiet: options?.onlyIfWanted });
+      this.lastRestartError = null;
       return this.isRunning();
     } catch (e) {
-      this.logError("Failed to restart WebSocket server", e);
+      // The watchdog retries every few seconds; only log when the reason changes.
+      const reason = e instanceof Error ? e.message : String(e);
+      if (reason !== this.lastRestartError) this.logError("Failed to restart WebSocket server", e);
+      this.lastRestartError = reason;
       return false;
     }
   }
@@ -456,25 +389,20 @@ export class WebSocketServer {
 
   // Trigger message handlers directly (for relay messages)
   triggerMessageHandlers(message: string) {
-    this.log(
-      `Triggering ${this.messageHandlers.length} message handler(s) for relay message`
-    );
-    this.messageHandlers.forEach((handler, index) => {
+    for (const handler of this.messageHandlers) {
       try {
-        this.log(
-          `Calling message handler ${index + 1}/${this.messageHandlers.length}`
-        );
         handler(message);
-        this.log(`Message handler ${index + 1} completed`);
       } catch (error) {
-        this.logError(`Error in message handler ${index + 1}`, error);
+        this.logError("Error in relay message handler", error);
       }
-    });
-    this.log(`All message handlers processed`);
+    }
   }
 
-  onClientChange(handler: (connected: boolean) => void) {
+  onClientChange(handler: (connected: boolean) => void): () => void {
     this.clientChangeHandlers.push(handler);
+    return () => {
+      this.clientChangeHandlers = this.clientChangeHandlers.filter((h) => h !== handler);
+    };
   }
 
   /**
@@ -562,78 +490,29 @@ export class WebSocketServer {
   }
 
   send(message: string) {
-    // Notify outbound observers (e.g. Telegram live sync) before fan-out
+    let payload: any;
+    try { payload = JSON.parse(message); } catch { return; }
+    // No global fallback for data with unknown ownership.
+    if (!payload || typeof payload.clientId !== "string" || !payload.clientId) return;
+    if (payload.type === "log") return;
     this.notifyOutbound(message);
-
-    // Send to local WebSocket clients
     if (this.wss) {
-      this.clients.forEach((client) => {
-        if (client.readyState === WebSocket.OPEN) {
-          client.send(message);
-        }
-      });
-    }
-
-    // Also send to relay server if connected to relay session
-    // Skip if message is from relay (to prevent loops)
-    if (this.relayClient && this.relayClient.isConnectedToSession()) {
-      try {
-        const parsed = JSON.parse(message);
-        // Only forward if message is not from relay
-        if (parsed.source !== "relay") {
-          // Skip streaming chunks in relay mode - only send final responses
-          // This prevents duplicate/partial messages from reaching mobile app
-          if (parsed.type === "chat_response_chunk") {
-            // Don't send streaming chunks to relay - wait for final chat_response
-            return;
-          }
-          if (parsed.type === "chat_response") {
-            this.log(
-              `Forwarding chat_response to relay (text length: ${
-                (parsed.text || "").length
-              })`
-            );
-          }
-          this.relayClient.sendMessage(message).catch((error) => {
-            const errorMsg =
-              error instanceof Error ? error.message : "Unknown error";
-            this.logError(`Failed to send to relay: ${errorMsg}`);
-          });
-        }
-      } catch (error) {
-        // If message is not JSON, send as-is
-        // But check if it's a log message (which we don't want to forward)
-        if (!message.includes('"type":"log"')) {
-          this.relayClient.sendMessage(message).catch((error) => {
-            const errorMsg =
-              error instanceof Error ? error.message : "Unknown error";
-            this.logError(`Failed to send to relay: ${errorMsg}`);
-          });
-        }
+      for (const client of this.clients) {
+        if (client.readyState === WebSocket.OPEN &&
+            (client as any).clientId === payload.clientId) client.send(message);
       }
+    }
+    if (payload.clientId.startsWith("relay:") && payload.targetDeviceId &&
+        payload.source !== "relay" && payload.type !== "chat_response_chunk" &&
+        this.relayClient?.isConnectedToSession()) {
+      this.relayClient.sendMessage(message).catch(() => {
+        this.logError("Failed to deliver relay response");
+      });
     }
   }
 
-  /**
-   * Broadcast message to all clients including relay (for logs)
-   * Unlike send(), this also sends log messages to relay
-   */
   broadcast(message: string) {
-    // Send to local WebSocket clients
-    if (this.wss) {
-      this.clients.forEach((client) => {
-        if (client.readyState === WebSocket.OPEN) {
-          client.send(message);
-        }
-      });
-    }
-
-    // Also send to relay server (including log messages)
-    if (this.relayClient && this.relayClient.isConnectedToSession()) {
-      this.relayClient.sendMessage(message).catch(() => {
-        // Ignore errors for broadcast (to prevent infinite loops)
-      });
-    }
+    this.send(message);
   }
 
   // HTTP POST 요청으로 메시지 수신 (hook에서 사용)

@@ -24,8 +24,24 @@ export interface CdpManagerOptions {
   broadcast: (payload: Record<string, unknown>) => void;
 }
 
+interface ReplyWatcher {
+  clientId: string;
+  targetDeviceId?: string;
+  baseline: Set<string>;
+  startedAt: number;
+  lastText: string;
+  stableTicks: number;
+}
+
+const REPLY_SETTLE_TICKS = 2;
+// Agents often pause output while running tools, so only force-settle after ~90s of no change.
+const REPLY_FORCE_SETTLE_TICKS = 60;
+const REPLY_TIMEOUT_MS = 10 * 60 * 1000;
+
 export class CdpManager {
   private http: CdpHttpClient;
+  private replyWatchers = new Map<string, ReplyWatcher>();
+  private polling = false;
   private sessions = new Map<string, CursorSession>();
   private targets: CdpTargetInfo[] = [];
   private activeSessionId: string | null = null;
@@ -112,6 +128,8 @@ export class CdpManager {
       return;
     }
     this.disposed = false;
+    // An explicit start (activation or settings change) gets a fresh reconnect budget.
+    this.reconnectAttempts = 0;
     this.options.log(
       `[CDP] Connecting to ${this.options.host}:${this.options.port}`
     );
@@ -121,6 +139,7 @@ export class CdpManager {
   async stop(): Promise<void> {
     this.disposed = true;
     this.stopPolling();
+    this.replyWatchers.clear();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -141,7 +160,7 @@ export class CdpManager {
       this.reconnectAttempts = 0;
       this.options.log("[CDP] Connected");
       await this.rediscover();
-      this.startPolling();
+      if (this.replyWatchers.size > 0) this.startPolling();
     } catch (e) {
       this.connected = false;
       this.lastError = e instanceof Error ? e.message : String(e);
@@ -358,7 +377,8 @@ export class CdpManager {
 
   async sendAgentPrompt(
     text: string,
-    sessionId?: string
+    sessionId?: string,
+    replyTo?: { clientId: string; targetDeviceId?: string }
   ): Promise<{ ok: boolean; error?: string; sessionId?: string }> {
     const session = sessionId
       ? this.sessions.get(sessionId)
@@ -367,7 +387,23 @@ export class CdpManager {
       return { ok: false, error: "No active Cursor session selected" };
     }
     this.activeSessionId = session.id;
+    // Baseline = messages already on screen, so only the new reply is delivered.
+    const before = replyTo ? await session.refresh().catch(() => null) : null;
     const result = await session.sendPrompt(text);
+    if (result.ok && replyTo) {
+      const previous = this.replyWatchers.get(session.id);
+      if (previous && previous.clientId !== replyTo.clientId) {
+        this.deliverReply(session.id, previous, "Another prompt was sent to this session; its reply goes to the newer sender.");
+      }
+      this.replyWatchers.set(session.id, {
+        ...replyTo,
+        baseline: new Set((before?.snapshot.messages || session.getSnapshot()?.messages || []).map((m) => m.id)),
+        startedAt: Date.now(),
+        lastText: "",
+        stableTicks: 0,
+      });
+      this.startPolling();
+    }
     if (result.ok) {
       this.options.broadcast({
         type: "agent_state_changed",
@@ -434,7 +470,7 @@ export class CdpManager {
   }
 
   private startPolling() {
-    this.stopPolling();
+    if (this.pollTimer || !this.connected) return;
     this.pollTimer = setInterval(() => {
       void this.pollOnce();
     }, this.pollIntervalMs);
@@ -447,137 +483,44 @@ export class CdpManager {
     }
   }
 
+  /**
+   * Scraping the Cursor DOM is expensive for the Cursor window itself, so polling only runs
+   * while someone is waiting for a reply. Everything else refreshes on demand.
+   */
   private async pollOnce() {
-    if (this.disposed || !this.connected) return;
+    if (this.disposed || !this.connected || this.polling) return;
+    if (this.replyWatchers.size === 0) {
+      this.stopPolling();
+      return;
+    }
+    this.polling = true;
     try {
-      // Light rediscovery occasionally
-      if (Math.random() < 0.05) {
-        await this.rediscover().catch(() => undefined);
-      }
-      for (const session of this.sessions.values()) {
-        if (!session.connected) continue;
-        const prev = session.getSnapshot();
-        const { snapshot, changed } = await session.refresh();
-        if (!changed) continue;
-
-        this.options.log(`[CDP] Conversation updated (${session.title})`);
-        this.options.broadcast({
-          type: "agent_state_changed",
-          sessionId: session.id,
-          state: snapshot.state,
-          workspace: snapshot.workspace,
-          model: snapshot.model,
-          latestMessage: snapshot.latestMessage,
-          latestActivity: snapshot.latestActivity,
-          hasPendingPermission: !!snapshot.pendingApproval,
-        });
-        this.options.broadcast({
-          type: "agent_state",
-          sessionId: snapshot.id,
-          state: snapshot.state,
-          messages: snapshot.messages,
-          plan: snapshot.plan,
-          pendingApproval: snapshot.pendingApproval,
-          title: snapshot.title,
-          workspace: snapshot.workspace,
-          model: snapshot.model,
-          fileChanges: snapshot.fileChanges,
-          activity: snapshot.activity,
-          latestMessage: snapshot.latestMessage,
-          latestActivity: snapshot.latestActivity,
-          lastActivity: snapshot.lastActivity,
-          capabilities: snapshot.capabilities,
-          extractionNotes: snapshot.extractionNotes,
-        });
-        this.options.broadcast({
-          type: "sessions",
-          sessions: this.listSessions(),
-        });
-
-        if (snapshot.pendingApproval) {
-          this.options.log("[CDP] Permission request detected");
-          this.options.broadcast({
-            type: "permission_request",
-            sessionId: session.id,
-            request: snapshot.pendingApproval,
-          });
+      for (const [sessionId, watcher] of [...this.replyWatchers.entries()]) {
+        const session = this.sessions.get(sessionId);
+        if (!session?.connected) {
+          this.deliverReply(sessionId, watcher, "The Cursor session closed before replying.");
+          continue;
         }
-
-        if (
-          prev?.plan?.available !== snapshot.plan?.available ||
-          JSON.stringify(prev?.plan?.steps) !==
-            JSON.stringify(snapshot.plan?.steps)
-        ) {
-          this.options.broadcast({
-            type: "agent_plan_changed",
-            sessionId: session.id,
-            plan: snapshot.plan,
-          });
-        }
-
-        if (
-          JSON.stringify(prev?.fileChanges?.items) !==
-          JSON.stringify(snapshot.fileChanges?.items)
-        ) {
-          this.options.broadcast({
-            type: "file_changed",
-            sessionId: session.id,
-            fileChanges: snapshot.fileChanges,
-          });
-        }
-
-        const prevAct = prev?.activity?.length || 0;
-        if (snapshot.activity.length > prevAct) {
-          for (const event of snapshot.activity.slice(prevAct)) {
-            this.options.broadcast({
-              type: "activity_event",
-              sessionId: session.id,
-              event,
-            });
-          }
-        }
-
-        if (
-          prev &&
-          prev.state === "RUNNING" &&
-          (snapshot.state === "IDLE" || snapshot.state === "COMPLETED")
-        ) {
-          this.options.log("[CDP] Agent completed");
-          this.options.broadcast({
-            type: "agent_completed",
-            sessionId: session.id,
-          });
-        }
-
-        if (snapshot.state === "ERROR") {
-          this.options.broadcast({
-            type: "agent_error",
-            sessionId: session.id,
-            error: snapshot.extractionNotes?.join("; ") || "Agent error",
-          });
-        }
-
-        // Id-based message sync — never rely on append-only length alone
-        const prevById = new Map(
-          (prev?.messages || []).map((m) => [m.id, m] as const)
-        );
-        for (const message of snapshot.messages) {
-          const before = prevById.get(message.id);
-          if (!before) {
-            this.options.broadcast({
-              type: "agent_message",
-              sessionId: session.id,
-              message,
-            });
-          } else if (message.text !== before.text) {
-            this.options.broadcast({
-              type: "agent_message_delta",
-              sessionId: session.id,
-              messageId: message.id,
-              text: message.text,
-              status: message.status,
-            });
-          }
+        const { snapshot } = await session.refresh();
+        const reply = snapshot.messages
+          .filter((m) => m.role === "assistant" && !watcher.baseline.has(m.id))
+          .map((m) => m.text.trim())
+          .filter(Boolean)
+          .join("\n\n");
+        watcher.stableTicks = reply && reply === watcher.lastText ? watcher.stableTicks + 1 : 0;
+        watcher.lastText = reply;
+        // State detection is heuristic, so a long-stable reply also counts as finished.
+        const settled =
+          (watcher.stableTicks >= REPLY_SETTLE_TICKS && snapshot.state !== "RUNNING") ||
+          watcher.stableTicks >= REPLY_FORCE_SETTLE_TICKS;
+        if (settled) {
+          this.deliverReply(sessionId, watcher, reply);
+        } else if (Date.now() - watcher.startedAt > REPLY_TIMEOUT_MS) {
+          this.deliverReply(
+            sessionId,
+            watcher,
+            reply || "No reply detected after 10 minutes. The agent may still be working — check the session in Cursor."
+          );
         }
       }
     } catch (e) {
@@ -586,7 +529,22 @@ export class CdpManager {
       this.lastError = e instanceof Error ? e.message : String(e);
       this.stopPolling();
       this.scheduleReconnect();
+    } finally {
+      this.polling = false;
     }
+  }
+
+  private deliverReply(sessionId: string, watcher: ReplyWatcher, text: string) {
+    this.replyWatchers.delete(sessionId);
+    this.options.broadcast({
+      type: "chat_response",
+      clientId: watcher.clientId,
+      targetDeviceId: watcher.targetDeviceId,
+      sessionId,
+      text,
+      timestamp: new Date().toISOString(),
+    });
+    if (this.replyWatchers.size === 0) this.stopPolling();
   }
 
   private scheduleReconnect() {

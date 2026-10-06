@@ -22,10 +22,13 @@ interface ChatHistory {
   lastUpdated: string;
 }
 
+export const CLI_NOT_INSTALLED = "Cursor CLI (agent) is not installed. Install it from https://cursor.com/cli";
+
 export class CLIHandler {
   private outputChannel: vscode.OutputChannel | null = null;
   private wsServer: WebSocketServer | null = null;
   private currentProcess: child_process.ChildProcess | null = null;
+  private preparingPrompt = false;
   private workspaceRoot: string | null = null;
   private processingOutput: boolean = false;
   private lastChatId: string | null = null; // 마지막 채팅 세션 ID (대화형 모드 테스트용)
@@ -72,45 +75,11 @@ export class CLIHandler {
     }
     console.log(logMessage);
 
-    // 중요 로그는 클라이언트에게 전송
-    if (sendToClient && this.wsServer) {
-      this.wsServer.broadcast(
-        JSON.stringify({
-          type: "log",
-          level: "info",
-          message: `[CLI] ${message}`,
-          timestamp: new Date().toISOString(),
-          source: "cli",
-        })
-      );
-    }
+    // Diagnostic logs stay local; protocol events require an explicit recipient.
   }
 
-  private logError(message: string, error?: any, sendToClient: boolean = true) {
-    const timestamp = new Date().toLocaleTimeString();
-    const errorStr =
-      error instanceof Error ? error.message : String(error || "");
-    const logMessage = `[${timestamp}] [CLI] ERROR: ${message}${
-      errorStr ? ` - ${errorStr}` : ""
-    }`;
-    if (this.outputChannel) {
-      this.outputChannel.appendLine(logMessage);
-    }
-    console.error(logMessage);
-
-    // 에러는 기본적으로 클라이언트에게 전송
-    if (sendToClient && this.wsServer) {
-      this.wsServer.broadcast(
-        JSON.stringify({
-          type: "log",
-          level: "error",
-          message: `[CLI] ${message}`,
-          timestamp: new Date().toISOString(),
-          source: "cli",
-          error: errorStr,
-        })
-      );
-    }
+  private logError(message: string, _error?: unknown, _sendToClient = false) {
+    this.log(`ERROR: ${message}`);
   }
 
   /**
@@ -234,7 +203,16 @@ export class CLIHandler {
    * @param agentMode 에이전트 모드 (agent, ask, plan, debug, auto)
    * @param senderDeviceId 릴레이 모드에서 요청을 보낸 모바일 디바이스 ID (유니캐스트 응답용)
    */
-  async sendPrompt(
+  async sendPrompt(...args: Parameters<CLIHandler["sendPromptInternal"]>): Promise<void> {
+    if (this.preparingPrompt || this.currentProcess) {
+      throw new Error("CLI is busy; wait for the current run to finish");
+    }
+    this.preparingPrompt = true;
+    try { await this.sendPromptInternal(...args); }
+    finally { this.preparingPrompt = false; }
+  }
+
+  private async sendPromptInternal(
     text: string,
     execute: boolean = true,
     clientId?: string,
@@ -314,52 +292,15 @@ export class CLIHandler {
       // CLI 설치 확인
       const isInstalled = await this.checkCLIInstalled();
       if (!isInstalled) {
-        throw new Error(
-          "Cursor CLI (agent) is not installed. Install it from https://cursor.com/cli"
-        );
+        throw new Error(CLI_NOT_INSTALLED);
       }
 
       const cliCommand = await this.findCLICommand();
       this.log(`Using CLI command: ${cliCommand}`);
 
-      // 테스트: 대화형 모드에서는 프로세스를 유지하거나 --continue 옵션 사용
-      // 현재는 기존 프로세스 종료 로직 유지 (대화형 모드 테스트 후 결정)
-      if (this.currentProcess) {
-        this.log("Stopping previous CLI process");
-        const previousProcess = this.currentProcess;
-        this.currentProcess = null;
-
-        // 이전 프로세스가 죽었을 때 stdout 'end'가 호출되지 않으므로
-        // 스트리밍 상태를 여기서 초기화해야 함. 그렇지 않으면 다음 프롬프트에서
-        // wasStreaming이 true로 남아 최종 chat_response가 건너뛰어져 모바일에서 응답이 안 보임.
-        this.streamingBuffers.clear();
-        this.lastStreamedText.clear();
-
-        // 프로세스 종료 (SIGTERM)
-        previousProcess.kill("SIGTERM");
-
-        // 프로세스가 완전히 종료될 때까지 최대 2초 대기
-        await new Promise<void>((resolve) => {
-          const timeout = setTimeout(() => {
-            // 타임아웃 시 강제 종료
-            if (!previousProcess.killed) {
-              previousProcess.kill("SIGKILL");
-            }
-            resolve();
-          }, 2000);
-
-          previousProcess.once("close", () => {
-            clearTimeout(timeout);
-            resolve();
-          });
-        });
-
-        this.log("Previous CLI process stopped");
-      }
-
       // Cursor CLI 실행
       // 스트리밍을 위해 --output-format stream-json과 --stream-partial-output 사용
-      // --force: 자동 실행 (승인 없이)
+      // Keep CLI permission checks enabled.
       const args: string[] = [];
 
       // 클라이언트에서 새 세션 시작 여부 결정
@@ -418,6 +359,8 @@ export class CLIHandler {
         this.wsServer.send(
           JSON.stringify({
             type: "agent_mode_selected",
+            clientId,
+            targetDeviceId: senderDeviceId,
             requestedMode: "auto",
             actualMode: selectedMode,
             displayName: modeDisplayName,
@@ -435,7 +378,6 @@ export class CLIHandler {
         "--output-format",
         "stream-json",
         "--stream-partial-output",
-        "--force",
         text
       );
 
@@ -470,7 +412,6 @@ export class CLIHandler {
       let stderr = "";
       let stdoutEnded = false;
       let stderrEnded = false;
-      let processClosed = false;
 
       // 현재 프롬프트의 clientId를 클로저로 저장 (checkAndProcessOutput에서 사용)
       const currentClientId = clientId;
@@ -513,12 +454,7 @@ export class CLIHandler {
         this.currentProcess.stdout.on("data", (data: Buffer | string) => {
           const chunk = typeof data === "string" ? data : data.toString();
           stdout += chunk;
-          this.log(
-            `CLI stdout chunk (${chunk.length} bytes): ${chunk.substring(
-              0,
-              200
-            )}${chunk.length > 200 ? "..." : ""}`
-          );
+          this.log(`CLI stdout chunk (${chunk.length} characters)`);
           // 청크 전송 비활성화: 로컬/릴레이 모두 최종 chat_response만 사용
         });
 
@@ -526,25 +462,7 @@ export class CLIHandler {
           this.log("CLI stdout stream ended");
           stdoutEnded = true;
 
-          // 스트리밍 완료 신호 전송
-          if (currentClientId && this.wsServer) {
-            const completeMessage = {
-              type: "chat_response_complete",
-              timestamp: new Date().toISOString(),
-              clientId: currentClientId,
-            };
-            this.wsServer.send(JSON.stringify(completeMessage));
-            this.log("✅ Streaming complete signal sent");
 
-            // 스트리밍 버퍼 정리
-            this.streamingBuffers.delete(currentClientId);
-            this.lastStreamedText.delete(currentClientId);
-          }
-
-          // 프로세스가 종료된 후에만 처리 (중복 방지)
-          if (processClosed) {
-            this.checkAndProcessOutput(stdout, stderr, currentClientId);
-          }
         });
 
         this.currentProcess.stdout.on("error", (error) => {
@@ -562,21 +480,12 @@ export class CLIHandler {
         this.currentProcess.stderr.on("data", (data: Buffer | string) => {
           const chunk = typeof data === "string" ? data : data.toString();
           stderr += chunk;
-          this.logError(
-            `CLI stderr chunk (${chunk.length} bytes): ${chunk.substring(
-              0,
-              200
-            )}${chunk.length > 200 ? "..." : ""}`
-          );
+          this.log(`CLI stderr chunk (${chunk.length} characters)`);
         });
 
         this.currentProcess.stderr.on("end", () => {
           this.log("CLI stderr stream ended");
           stderrEnded = true;
-          // 프로세스가 종료된 후에만 처리 (중복 방지)
-          if (processClosed) {
-            this.checkAndProcessOutput(stdout, stderr, currentClientId);
-          }
         });
 
         this.currentProcess.stderr.on("error", (error) => {
@@ -586,20 +495,11 @@ export class CLIHandler {
         this.logError("⚠️ CLI process stderr is null");
       }
 
-      // 프로세스 에러 처리
-      this.currentProcess.on("error", (error) => {
-        this.logError("CLI process spawn error", error);
-        this.currentProcess = null;
-
-        if (this.wsServer) {
-          this.wsServer.send(
-            JSON.stringify({
-              type: "error",
-              message: `CLI execution failed: ${error.message}`,
-              timestamp: new Date().toISOString(),
-            })
-          );
-        }
+      let processFailed = false;
+      this.currentProcess.on("error", () => {
+        processFailed = true;
+        this.logError("CLI process spawn failed");
+        this.sendOutputError(currentClientId, "CLI_SPAWN_FAILED", "The CLI could not start.");
       });
 
       // 프로세스 종료 처리
@@ -612,7 +512,6 @@ export class CLIHandler {
         );
         this.log(`stdout ended: ${stdoutEnded}, stderr ended: ${stderrEnded}`);
 
-        processClosed = true;
 
         if (stdout.length === 0 && stderr.length === 0) {
           this.logError("⚠️ No output received from CLI process");
@@ -623,29 +522,26 @@ export class CLIHandler {
 
         // 프로세스가 종료되었으므로 출력 처리 (한 번만)
         // 스트림이 아직 끝나지 않았어도 프로세스가 종료되었으므로 처리
-        this.checkAndProcessOutput(stdout, stderr, currentClientId);
-
-        this.currentProcess = null;
-      });
-
-      this.currentProcess.on("error", (error) => {
-        this.logError("CLI process error", error);
-        this.currentProcess = null;
-
-        if (this.wsServer) {
-          this.wsServer.send(
-            JSON.stringify({
-              type: "error",
-              message: `CLI execution failed: ${error.message}`,
-              timestamp: new Date().toISOString(),
-            })
-          );
+        if (!processFailed) {
+          if (code !== 0) {
+            this.sendOutputError(currentClientId, "CLI_EXECUTION_FAILED", "The CLI did not complete successfully.");
+          } else {
+            this.checkAndProcessOutput(stdout, stderr, currentClientId);
+          }
         }
+        if (currentClientId) {
+          this.streamingBuffers.delete(currentClientId);
+          this.lastStreamedText.delete(currentClientId);
+        }
+        this.currentSenderDeviceId = null;
+        this.currentProcess = null;
       });
+
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : "Unknown error";
-      this.logError(`Error in sendPrompt: ${errorMsg}`);
-      throw new Error(`Failed to send CLI prompt: ${errorMsg}`);
+      // Only the install hint is safe and useful to show remotely; everything else stays generic.
+      const notInstalled = error instanceof Error && error.message === CLI_NOT_INSTALLED;
+      this.logError(notInstalled ? CLI_NOT_INSTALLED : "CLI prompt failed");
+      throw new Error(notInstalled ? CLI_NOT_INSTALLED : "Failed to send CLI prompt");
     }
   }
 
@@ -653,6 +549,15 @@ export class CLIHandler {
    * CLI 출력 처리 및 WebSocket으로 전송
    * @param clientId 클라이언트 ID (세션 격리용, 선택사항)
    */
+  private sendOutputError(clientId: string | undefined, code: string, message: string): void {
+    if (!clientId || !this.wsServer) return;
+    this.wsServer.send(JSON.stringify({
+      type: "error", code, message, clientId, source: "cli",
+      targetDeviceId: this.currentSenderDeviceId || undefined,
+      timestamp: new Date().toISOString(),
+    }));
+  }
+
   private checkAndProcessOutput(
     stdout: string,
     stderr: string,
@@ -673,14 +578,12 @@ export class CLIHandler {
 
     // 일반 텍스트 출력 처리 (JSON 형식 사용 안 함, 스트리밍용)
     try {
-      if (stdout.length > 0) {
-        this.log(`CLI stdout content: ${stdout.substring(0, 500)}`);
-      }
 
       // stream-json 형식: 여러 JSON 라인이 있을 수 있음
       // 각 라인을 파싱하여 result 타입의 최종 결과 추출
       let responseText = "";
       let extractedSessionId: string | null = null;
+      let structuredOutput = false;
 
       // 각 라인을 파싱하여 result 타입 찾기
       const lines = stdout.split("\n").filter((line) => line.trim().length > 0);
@@ -688,6 +591,7 @@ export class CLIHandler {
       for (const line of lines) {
         try {
           const jsonData = JSON.parse(line.trim());
+          structuredOutput = true;
 
           // session_id 추출
           const sessionId =
@@ -719,15 +623,12 @@ export class CLIHandler {
       }
 
       // 여전히 없으면 전체 stdout 사용 (하위 호환성)
-      if (!responseText) {
+      if (!responseText && !structuredOutput) {
         responseText = stdout.trim();
       }
-      // CLI 에러 시 stderr를 사용자에게 전달 (응답이 비어 있을 때)
-      if (!responseText && stderr.trim()) {
-        responseText = `[CLI Error]\n${stderr.trim()}`;
-        this.log(
-          `Using stderr as response (CLI failed): ${stderr.substring(0, 100)}`
-        );
+      if (!responseText) {
+        this.sendOutputError(clientId, "CLI_NO_RESULT", "The CLI returned no result.");
+        return;
       }
 
       // session_id 저장 (JSON에서 추출한 경우)
@@ -744,18 +645,6 @@ export class CLIHandler {
       }
 
       this.log(`Extracted response text length: ${responseText.length}`);
-      if (!responseText && clientId === "relay-client") {
-        this.log(
-          `⚠️ Relay mode: no responseText (stdout length: ${stdout.length}, stderr length: ${stderr.length}) - sending fallback message`
-        );
-        responseText =
-          stdout.length > 0
-            ? stdout.trim().substring(0, 2000) || "[CLI output was empty.]"
-            : stderr.length > 0
-            ? `[CLI stderr]\n${stderr.trim().substring(0, 1000)}`
-            : "[Response was empty. The CLI may not have returned any output.]";
-      }
-
       // 대화 히스토리 저장 (응답 수신 시)
       const currentSessionId =
         extractedSessionId ||
@@ -801,12 +690,7 @@ export class CLIHandler {
           targetDeviceId: this.currentSenderDeviceId || undefined, // 유니캐스트 응답용
         };
 
-        this.log(
-          `Sending chat_response: ${JSON.stringify(responseMessage).substring(
-            0,
-            200
-          )}`
-        );
+        this.log(`Sending chat_response (${responseText.length} characters)`);
         if (currentSessionId) {
           this.log(
             `   Session ID: ${currentSessionId}, Client ID: ${
@@ -827,28 +711,8 @@ export class CLIHandler {
         );
       }
     } catch (error) {
-      // 에러 발생 시 전체 출력을 텍스트로 전송
-      const errorMsg = error instanceof Error ? error.message : "Unknown error";
-      this.logError(`Output processing error: ${errorMsg}`);
-      this.logError(`stdout: ${stdout.substring(0, 500)}`);
-
-      if (this.wsServer) {
-        const responseMessage = {
-          type: "chat_response",
-          text: stdout || stderr || "CLI finished",
-          timestamp: new Date().toISOString(),
-          source: "cli",
-          targetDeviceId: this.currentSenderDeviceId || undefined, // 유니캐스트 응답용
-        };
-
-        this.log(
-          `Sending chat_response (fallback): ${JSON.stringify(
-            responseMessage
-          ).substring(0, 200)}`
-        );
-        this.wsServer.send(JSON.stringify(responseMessage));
-        this.log("✅ Chat response sent to WebSocket (fallback)");
-      }
+      this.logError("Output processing failed");
+      this.sendOutputError(clientId, "CLI_OUTPUT_INVALID", "The CLI result could not be processed.");
     } finally {
       this.processingOutput = false;
       this.currentSenderDeviceId = null; // 응답 완료 후 초기화
@@ -995,7 +859,7 @@ export class CLIHandler {
       } catch (error) {
         const errorMsg =
           error instanceof Error ? error.message : "Unknown error";
-        this.logError(`Error stopping CLI process: ${errorMsg}`);
+        this.logError("Stopping CLI failed");
         return { success: false };
       }
     }
@@ -1084,15 +948,6 @@ export class CLIHandler {
       if (entry.clientId === "relay-client" && this.getRelaySessionId) {
         const rid = this.getRelaySessionId();
         if (rid) newEntry.relaySessionId = rid;
-      }
-
-      // 디버깅: agentMode 저장 확인
-      if (newEntry.userMessage) {
-        this.log(
-          `💾 Creating new entry - agentMode: ${
-            newEntry.agentMode || "undefined"
-          }, userMessage: ${newEntry.userMessage.substring(0, 30)}...`
-        );
       }
 
       // pending sessionId를 실제 sessionId로 업데이트

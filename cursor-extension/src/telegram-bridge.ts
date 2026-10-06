@@ -6,6 +6,7 @@
  *   "enabled": true,
  *   "botToken": "...",
  *   "allowedUserIds": [123456789],
+ *   "allowedChatIds": [123456789],
  *   "apiId": 12345678,
  *   "apiHash": "...",
  *   "transport": "auto"
@@ -20,6 +21,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
+import { CLI_NOT_INSTALLED } from "./cli-handler";
 import { CommandHandler } from "./command-handler";
 import { CommandRouter } from "./command-router";
 import {
@@ -34,6 +36,7 @@ export interface TelegramSecrets {
   enabled?: boolean;
   botToken: string;
   allowedUserIds: number[];
+  allowedChatIds: number[];
   apiId?: number;
   apiHash?: string;
   /** auto | botapi | mtproto */
@@ -60,67 +63,91 @@ const DEFAULT_SECRETS_PATH = path.join(
 
 const TG_TEXT_LIMIT = 3900;
 const HELP_TEXT = [
-  "Cursor Remote — Telegram control",
+  "Cursor Remote",
   "",
-  "Chat & prompts",
-  "/ask <text>     Send prompt (or just type text)",
-  "/new [text]     New CLI session (+ optional prompt)",
-  "/stop           Stop current agent run",
-  "/mode [m]       agent | ask | plan | debug | auto",
-  "/backend [b]    cli | cdp",
+  "Everyday",
+  "/sessions        Every agent chat in every Cursor window",
+  "/use_2           Tap to pick session 2; then just type to prompt it",
+  "/to 2 <text>     Prompt session 2 without switching",
+  "/last            Full latest reply of the selected session (/last_2 for another)",
+  "/state           What the selected session is doing (/state_2)",
   "",
-  "Sessions & history",
-  "/sessions       List IDE Agent sessions (CDP)",
-  "/use <n|id>     Select session by number or id",
-  "/history [n]    List agent history (default 20)",
-  "/open <n|id>    Open a history chat",
-  "/state          Current agent state / messages",
-  "/plan           Current plan (if any)",
-  "/messages [n]   Recent CLI chat messages",
-  "/chats          Alias for /messages",
+  "More",
+  "/history · /open_3   Past chats; open one in Cursor",
+  "/new [text]      Fresh Cursor CLI chat",
+  "/mode [m]        agent | ask | plan | debug | auto",
+  "/backend [b]     cdp (Cursor windows) | cli (Cursor CLI)",
+  "/plan · /messages · /file · /save",
+  "/sync [on|off]   Send replies here automatically (default on)",
+  "/status · /whoami",
   "",
-  "Approvals & files",
-  "/approve        Approve pending CDP action",
-  "/reject         Reject pending CDP action",
-  "/file           Active editor path + preview",
-  "/save           Save active file",
-  "",
-  "Sync & system",
-  "/sync [on|off]  Live-mirror agent replies here (default on)",
-  "/status         Server + Telegram + mode",
-  "/whoami         Your Telegram user id",
-  "/help           This list",
-  "",
-  "Tips: /sessions then /use 1 · /history then /open 2",
-  "With /sync on, replies stream here automatically.",
-  "If Bot API is blocked, MTProto (telegcli path) is used automatically.",
+  "Replies arrive when the agent pauses. Approve, reject and stop stay in Cursor for safety.",
 ].join("\n");
 
 const BOT_COMMANDS = [
-  { command: "help", description: "All commands" },
-  { command: "ask", description: "Send prompt to Cursor" },
-  { command: "new", description: "New CLI session" },
-  { command: "stop", description: "Stop current run" },
-  { command: "sessions", description: "List agent sessions" },
-  { command: "use", description: "Select session: /use 1" },
-  { command: "history", description: "List agent history" },
-  { command: "open", description: "Open history chat" },
-  { command: "state", description: "Current agent state" },
-  { command: "plan", description: "Show plan" },
-  { command: "messages", description: "Recent chat messages" },
-  { command: "mode", description: "Set mode: agent|ask|plan|…" },
-  { command: "backend", description: "cli or cdp" },
-  { command: "approve", description: "Approve pending action" },
-  { command: "reject", description: "Reject pending action" },
-  { command: "file", description: "Active file" },
-  { command: "save", description: "Save active file" },
-  { command: "sync", description: "Live sync on/off" },
+  { command: "sessions", description: "List agent chats in all Cursor windows" },
+  { command: "last", description: "Full latest reply of the selected session" },
+  { command: "state", description: "What the selected session is doing" },
+  { command: "to", description: "Prompt a session: /to 2 text" },
+  { command: "use", description: "Select a session: /use 2" },
+  { command: "history", description: "Past agent chats" },
+  { command: "open", description: "Open a past chat in Cursor: /open 3" },
+  { command: "new", description: "New Cursor CLI chat" },
+  { command: "ask", description: "Send a prompt" },
+  { command: "mode", description: "agent | ask | plan | debug | auto" },
+  { command: "backend", description: "cdp (Cursor windows) or cli" },
+  { command: "plan", description: "Current plan" },
+  { command: "messages", description: "Recent CLI chat messages" },
+  { command: "file", description: "Active file in Cursor" },
+  { command: "save", description: "Save the active file" },
+  { command: "sync", description: "Auto-send replies on/off" },
   { command: "status", description: "Connection status" },
-  { command: "whoami", description: "Your Telegram id" },
+  { command: "help", description: "All commands" },
 ];
 
 export function defaultTelegramSecretsPath(): string {
   return DEFAULT_SECRETS_PATH;
+}
+
+export const TELEGRAM_LOCKED_PREFIX = "Telegram bot already running in another Cursor window";
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e: any) {
+    return e?.code === "EPERM";
+  }
+}
+
+/**
+ * One bot token must have exactly one poller, otherwise every Cursor window answers.
+ * Returns the pid of the live owner when another process holds the lock.
+ */
+export function acquireTelegramLock(lockPath: string, pid: number = process.pid): { ok: true } | { ok: false; ownerPid: number } {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = fs.openSync(lockPath, "wx", 0o600);
+      fs.writeSync(fd, String(pid));
+      fs.closeSync(fd);
+      return { ok: true };
+    } catch (e: any) {
+      if (e?.code !== "EEXIST") return { ok: false, ownerPid: -1 };
+      const owner = parseInt(fs.readFileSync(lockPath, "utf8").trim(), 10);
+      if (owner === pid) return { ok: true };
+      if (Number.isFinite(owner) && owner > 0 && pidAlive(owner)) return { ok: false, ownerPid: owner };
+      try { fs.unlinkSync(lockPath); } catch { /* raced with another window */ }
+    }
+  }
+  return { ok: false, ownerPid: -1 };
+}
+
+export function releaseTelegramLock(lockPath: string, pid: number = process.pid): void {
+  try {
+    if (parseInt(fs.readFileSync(lockPath, "utf8").trim(), 10) === pid) fs.unlinkSync(lockPath);
+  } catch {
+    /* already gone */
+  }
 }
 
 export function loadTelegramSecrets(
@@ -173,6 +200,7 @@ export function loadTelegramSecrets(
         enabled: parsed.enabled !== false,
         botToken: parsed.botToken.trim(),
         allowedUserIds: ids,
+        allowedChatIds: Array.isArray(parsed.allowedChatIds) ? parsed.allowedChatIds.filter(Number.isSafeInteger) : [],
         apiId,
         apiHash,
         transport: String(parsed.transport || "auto").toLowerCase(),
@@ -201,6 +229,7 @@ export function ensureTelegramSecretsTemplate(secretsPath?: string): string {
         enabled: true,
         botToken: "PASTE_BOT_TOKEN_FROM_BOTFATHER",
         allowedUserIds: [] as number[],
+        allowedChatIds: [] as number[],
         apiId: 0,
         apiHash: "PASTE_API_HASH_FROM_my.telegram.org",
         transport: "auto",
@@ -240,7 +269,12 @@ function stripBotCommand(text: string): { cmd: string; args: string } {
   if (!m) {
     return { cmd: "", args: text };
   }
-  return { cmd: m[1].toLowerCase(), args: (m[2] || "").trim() };
+  const cmd = m[1].toLowerCase();
+  const args = (m[2] || "").trim();
+  // Telegram only makes space-free commands tappable, so lists offer /use_2 for "/use 2".
+  const tap = cmd.match(/^(use|state|last|open)_(\d+)$/);
+  if (tap) return { cmd: tap[1], args: tap[2] };
+  return { cmd, args };
 }
 
 function truncate(s: string, max: number): string {
@@ -260,8 +294,13 @@ export class TelegramBridge {
   private abort: AbortController | null = null;
   private offset = 0;
   private secretsPath: string;
+  private lockPath = "";
   private token = "";
   private allowed = new Set<number>();
+  private allowedChats = new Set<number>();
+  private rateWindow = 0;
+  private rateCount = 0;
+  private userRates = new Map<number, number>();
   private userState = new Map<number, TgUserState>();
   /** Telegram chats waiting for an agent reply */
   private pendingByChat = new Map<number, { userId: number; startedAt: number }>();
@@ -271,6 +310,10 @@ export class TelegramBridge {
   private outboundDispose: (() => void) | null = null;
   private pollPromise: Promise<void> | null = null;
   private mtprotoChild: ChildProcessWithoutNullStreams | null = null;
+  private mtprotoRestartTimer: NodeJS.Timeout | null = null;
+  private mtprotoRestarts = 0;
+  /** Bumped by stop() so an in-flight reconnect can tell it was cancelled. */
+  private stopCount = 0;
   private mtprotoStdoutBuf = "";
 
   constructor(
@@ -323,6 +366,14 @@ export class TelegramBridge {
     if (this.running) {
       return { ok: true };
     }
+    const result = await this.startUnlocked(secretsPath);
+    if (!result.ok && this.lockPath && !result.error?.startsWith(TELEGRAM_LOCKED_PREFIX)) {
+      releaseTelegramLock(this.lockPath);
+    }
+    return result;
+  }
+
+  private async startUnlocked(secretsPath?: string): Promise<{ ok: boolean; error?: string }> {
 
     const cfg = vscode.workspace.getConfiguration("cursorRemote");
     this.secretsPath =
@@ -343,14 +394,24 @@ export class TelegramBridge {
         error: "Telegram disabled in secrets file (enabled: false)",
       };
     }
-    if (loaded.secrets.allowedUserIds.length === 0) {
-      this.log(
-        "allowedUserIds empty — send any message to learn your id, then add it"
-      );
+    if (!loaded.secrets.allowedUserIds.length || !loaded.secrets.allowedChatIds.length) {
+      return { ok: false, error: "Telegram requires allowedUserIds and allowedChatIds" };
+    }
+
+    this.lockPath = path.join(path.dirname(this.secretsPath), "telegram.lock");
+    const lock = acquireTelegramLock(this.lockPath);
+    if (!lock.ok) {
+      return {
+        ok: false,
+        error: lock.ownerPid > 0
+          ? `${TELEGRAM_LOCKED_PREFIX} (pid ${lock.ownerPid})`
+          : `Could not create ${this.lockPath}; check that folder's permissions`,
+      };
     }
 
     this.token = loaded.secrets.botToken;
     this.allowed = new Set(loaded.secrets.allowedUserIds);
+    this.allowedChats = new Set(loaded.secrets.allowedChatIds);
     const transport = (loaded.secrets.transport || "auto").toLowerCase();
 
     // Prefer Bot HTTP API unless blocked / forced to mtproto
@@ -510,6 +571,8 @@ export class TelegramBridge {
             }
           } else if (msg.type === "ready") {
             clearTimeout(readyTimer);
+            this.mtprotoRestarts = 0;
+            child.stdin.write(JSON.stringify({ type: "set_commands", commands: BOT_COMMANDS }) + "\n");
             this.log(
               `Started (MTProto) as @${msg.username || "bot"} id=${msg.id} — bypasses api.telegram.org`
             );
@@ -527,10 +590,14 @@ export class TelegramBridge {
 
       child.on("exit", (code) => {
         this.log(`MTProto bridge exited code=${code}`);
-        this.mtprotoChild = null;
-        if (this.running && this.mode === "mtproto") {
+        if (this.mtprotoChild === child) this.mtprotoChild = null;
+        // Exited after it was ready and nobody called stop(): reconnect instead of going silent.
+        if (settled && this.running && this.mode === "mtproto") {
           this.running = false;
           this.mode = null;
+          this.outboundDispose?.();
+          this.outboundDispose = null;
+          this.scheduleMtprotoRestart(secrets);
         }
         if (!settled) {
           clearTimeout(readyTimer);
@@ -543,6 +610,22 @@ export class TelegramBridge {
     });
   }
 
+  private scheduleMtprotoRestart(secrets: TelegramSecrets) {
+    const delay = Math.min(60_000, 5_000 * 2 ** this.mtprotoRestarts++);
+    this.log(`MTProto bridge stopped unexpectedly — reconnecting in ${delay / 1000}s`);
+    const stops = this.stopCount;
+    this.mtprotoRestartTimer = setTimeout(async () => {
+      this.mtprotoRestartTimer = null;
+      const result = await this.startMtproto(secrets);
+      if (stops !== this.stopCount) {
+        if (result.ok) await this.stop();
+        return;
+      }
+      // Keep the lock and keep trying: the usual cause is a temporary network drop.
+      if (!result.ok) this.scheduleMtprotoRestart(secrets);
+    }, delay);
+  }
+
   private async handleMtprotoMessage(msg: {
     chat_id: number;
     user_id: number;
@@ -551,7 +634,7 @@ export class TelegramBridge {
     // Reuse the same auth + dispatch path as Bot API updates
     await this.handleUpdate({
       message: {
-        chat: { id: msg.chat_id },
+        chat: { id: msg.chat_id, type: msg.chat_id === msg.user_id && msg.chat_id > 0 ? "private" : "group" },
         from: { id: msg.user_id },
         text: msg.text,
       },
@@ -559,7 +642,12 @@ export class TelegramBridge {
   }
 
   async stop(): Promise<void> {
+    this.stopCount++;
     this.running = false;
+    if (this.mtprotoRestartTimer) clearTimeout(this.mtprotoRestartTimer);
+    this.mtprotoRestartTimer = null;
+    this.mtprotoRestarts = 0;
+    if (this.lockPath) releaseTelegramLock(this.lockPath);
     this.abort?.abort();
     this.abort = null;
     this.outboundDispose?.();
@@ -667,32 +755,32 @@ export class TelegramBridge {
     }
   }
 
-  private resolveSyncTargets(): number[] {
-    const ids = new Set<number>();
-    if (this.lastSyncChatId != null) {
-      ids.add(this.lastSyncChatId);
-    }
-    for (const [, s] of this.userState) {
-      if (s.sync && s.chatId) {
-        ids.add(s.chatId);
-      }
-    }
-    for (const chatId of this.pendingByChat.keys()) {
-      ids.add(chatId);
-    }
-    return [...ids];
+  private sessionTitle(chatId: number, sessionId: unknown): string | null {
+    if (typeof sessionId !== "string") return null;
+    const state = [...this.userState.values()].find((s) => s.chatId === chatId);
+    const title = state?.sessionsCache.find((s) => s.id === sessionId)?.title;
+    return title ? truncate(title, 60) : null;
+  }
+
+  private resolveSyncTargets(msg: any): number[] {
+    // Unattributed/global events are never routed to Telegram.
+    return [...this.userState.entries()]
+      .filter(([userId, state]) => state.sync && this.allowed.has(userId) &&
+        this.allowedChats.has(state.chatId) &&
+        msg.clientId === `telegram:${state.chatId}:${userId}`)
+      .map(([, state]) => state.chatId);
   }
 
   private handleOutbound(raw: string) {
     try {
       const msg = JSON.parse(raw);
-      const targets = this.resolveSyncTargets();
+      const targets = this.resolveSyncTargets(msg);
       if (!targets.length) {
         return;
       }
 
       if (msg.type === "chat_response_chunk" && typeof msg.text === "string") {
-        for (const chatId of this.pendingByChat.keys()) {
+        for (const chatId of targets) {
           const prev = this.chunkByChat.get(chatId) || "";
           this.chunkByChat.set(chatId, prev + msg.text);
         }
@@ -706,15 +794,28 @@ export class TelegramBridge {
           this.chunkByChat.delete(chatId);
           this.pendingByChat.delete(chatId);
           const body = text || buffered;
-          if (body) {
-            void this.sendText(chatId, `🤖 ${body}`);
-          }
+          const title = this.sessionTitle(chatId, msg.sessionId);
+          void this.sendText(
+            chatId,
+            body
+              ? `🤖 ${title ? `${title}\n\n` : ""}${body}`
+              : "The agent finished without a reply I could read. Try /last or check Cursor."
+          );
+        }
+        return;
+      }
+
+      if (msg.type === "error" && typeof msg.message === "string") {
+        for (const chatId of targets) {
+          this.pendingByChat.delete(chatId);
+          this.chunkByChat.delete(chatId);
+          void this.sendText(chatId, `❌ ${msg.message} Check the Cursor Remote log in Cursor for details.`);
         }
         return;
       }
 
       if (msg.type === "chat_response_complete") {
-        for (const chatId of [...this.pendingByChat.keys()]) {
+        for (const chatId of targets) {
           const buffered = (this.chunkByChat.get(chatId) || "").trim();
           this.chunkByChat.delete(chatId);
           this.pendingByChat.delete(chatId);
@@ -736,7 +837,7 @@ export class TelegramBridge {
             for (const chatId of targets) {
               void this.sendText(
                 chatId,
-                `⚠️ Approval needed\n${truncate(String(title), 500)}\n\n/approve  or  /reject`
+                `⚠️ Approval needed\n${truncate(String(title), 500)}\n\nReview this request in Cursor locally.`
               );
             }
           }
@@ -745,8 +846,15 @@ export class TelegramBridge {
       }
 
       if (msg.type === "command_result" && msg.success === false) {
-        const err = msg.error_message || msg.error || "Command failed";
-        for (const chatId of this.pendingByChat.keys()) {
+        const err =
+          msg.command_type === "agent_prompt"
+            ? "Couldn't send to that session (window closed or composer not found). Run /sessions and try again."
+            : msg.command_type === "cli_prompt"
+              ? msg.error_message === CLI_NOT_INSTALLED
+                ? `${CLI_NOT_INSTALLED}, or pick a Cursor window with /sessions.`
+                : "The Cursor CLI prompt failed. Check the Cursor Remote log in Cursor."
+              : "Command failed. Check the Cursor Remote log in Cursor.";
+        for (const chatId of targets) {
           void this.sendText(chatId, `❌ ${err}`);
           this.pendingByChat.delete(chatId);
           this.chunkByChat.delete(chatId);
@@ -821,30 +929,20 @@ export class TelegramBridge {
       return;
     }
 
-    const { cmd } = stripBotCommand(text);
-    const isBootstrap =
-      this.allowed.size === 0 &&
-      (!cmd || cmd === "whoami" || cmd === "start" || cmd === "help");
+    // Authorization precedes parsing, session lookup, and any response.
+    if (!Number.isSafeInteger(userId) || !Number.isSafeInteger(chatId) ||
+        message.chat.type !== "private" || chatId !== userId ||
+        !this.allowed.has(userId) || !this.allowedChats.has(chatId)) return;
 
-    const allowed = this.allowed.size === 0 ? isBootstrap : this.allowed.has(userId);
-
-    if (!allowed) {
-      if (this.allowed.size === 0) {
-        await this.sendText(
-          chatId,
-          `Your Telegram user id: ${userId}\n\nAdd it to allowedUserIds in:\n${this.secretsPath}\n\nThen: Cursor Remote → Restart Telegram Bot`
-        );
-      } else {
-        this.log(`Ignored unauthorized user ${userId}`);
-      }
-      return;
+    if (Date.now() - this.rateWindow >= 60_000) {
+      this.rateWindow = Date.now();
+      this.rateCount = 0;
+      this.userRates.clear();
     }
-
-    if (this.allowed.size === 0) {
-      await this.sendText(
-        chatId,
-        `Your Telegram user id: ${userId}\n\nAdd it to allowedUserIds in:\n${this.secretsPath}\n\nThen restart the Telegram bot.`
-      );
+    const count = (this.userRates.get(userId) || 0) + 1;
+    this.userRates.set(userId, count);
+    if (++this.rateCount > 180 || count > 30) {
+      if (count === 31) await this.sendText(chatId, "Too many messages — wait a minute, then try again.");
       return;
     }
 
@@ -854,9 +952,8 @@ export class TelegramBridge {
     try {
       await this.dispatch(userId, chatId, state, text);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      this.log(`command error: ${msg}`);
-      await this.sendText(chatId, `❌ ${msg}`);
+      this.log("Telegram command failed");
+      await this.sendText(chatId, "Command failed. Check local diagnostics.");
     }
   }
 
@@ -867,6 +964,15 @@ export class TelegramBridge {
     text: string
   ): Promise<void> {
     const { cmd, args } = stripBotCommand(text);
+    if (["approve", "reject", "stop"].includes(cmd || "")) {
+      await this.sendText(chatId, "This action is disabled remotely until exact request and ownership checks are available. Use Cursor locally.");
+      return;
+    }
+    if ((cmd === "plan" || ((cmd === "state" || cmd === "last") && !args)) && !state.sessionId) {
+      await this.sendText(chatId, "Select a session with /sessions and /use first.");
+      return;
+    }
+
 
     if (!cmd) {
       await this.sendPrompt(userId, chatId, state, text, false);
@@ -889,7 +995,7 @@ export class TelegramBridge {
       case "status": {
         const port = this.wsServer.getActualPort();
         const cdp = await this.commandHandler.getCdpStatus();
-        const sessionInfo = await this.commandHandler.getSessionInfo("telegram");
+        const sessionInfo = await this.commandHandler.getSessionInfo(`telegram:${chatId}:${userId}`);
         await this.sendText(
           chatId,
           [
@@ -915,6 +1021,11 @@ export class TelegramBridge {
         if (v === "on" || v === "1" || v === "true") state.sync = true;
         else if (v === "off" || v === "0" || v === "false") state.sync = false;
         else state.sync = !state.sync;
+        if (!state.sync) {
+          this.pendingByChat.delete(chatId);
+          this.chunkByChat.delete(chatId);
+          if (this.lastSyncChatId === chatId) this.lastSyncChatId = null;
+        }
         await this.sendText(
           chatId,
           `Live sync ${state.sync ? "ON — agent replies come here" : "OFF"}`
@@ -968,7 +1079,7 @@ export class TelegramBridge {
       case "stop":
         await this.commandRouter.handleCommand({
           type: "stop_prompt",
-          clientId: "telegram",
+          clientId: `telegram:${chatId}:${userId}`,
         });
         this.pendingByChat.delete(chatId);
         this.chunkByChat.delete(chatId);
@@ -988,27 +1099,23 @@ export class TelegramBridge {
         return;
 
       case "sessions": {
-        await this.commandHandler.refreshCdpTargets();
-        const sessions = await this.commandHandler.listCdpSessions();
-        state.sessionsCache = sessions.map((s: any) => ({
-          id: String(s.id),
-          title: String(s.title || s.id),
-          state: s.state ? String(s.state) : undefined,
-        }));
-        if (!state.sessionsCache.length) {
+        const sessions = await this.loadSessions(state);
+        if (!sessions.length) {
           await this.sendText(
             chatId,
-            "No CDP sessions.\nEnable CDP (Cursor with --remote-debugging-port=9222) or use /backend cli + /ask"
+            "No Cursor windows found.\nCursor must run with --remote-debugging-port=9222 and cursorRemote.enableCdp on. Or use /new to chat through the Cursor CLI."
           );
           return;
         }
-        const lines = state.sessionsCache.map(
-          (s, i) =>
-            `${i + 1}. ${s.title}${s.state ? ` [${s.state}]` : ""}\n   id: ${s.id}`
-        );
+        const lines = sessions.map((s: any, i: number) => {
+          const n = i + 1;
+          const marker = state.sessionId === String(s.id) ? " ◀ selected" : "";
+          const last = s.latestMessage ? `\n   ${truncate(String(s.latestMessage), 100)}` : "";
+          return `${n}. ${s.title || s.id}${s.state ? ` [${s.state}]` : ""}${marker}${last}\n   /use_${n} · /last_${n} · /state_${n}`;
+        });
         await this.sendText(
           chatId,
-          `Sessions (${state.sessionsCache.length}):\n\n${lines.join("\n\n")}\n\nSelect: /use 1`
+          `Sessions (${sessions.length}):\n\n${lines.join("\n\n")}\n\nTap /use_N, then just type. One-off: /to N <text>`
         );
         return;
       }
@@ -1018,32 +1125,24 @@ export class TelegramBridge {
           await this.sendText(chatId, "Usage: /use <number|id>");
           return;
         }
-        if (!state.sessionsCache.length) {
-          await this.commandHandler.refreshCdpTargets();
-          const sessions = await this.commandHandler.listCdpSessions();
-          state.sessionsCache = sessions.map((s: any) => ({
-            id: String(s.id),
-            title: String(s.title || s.id),
-            state: s.state ? String(s.state) : undefined,
-          }));
-        }
-        const id = this.resolveIndexOrId(args, state.sessionsCache);
-        if (!id) {
-          await this.sendText(chatId, "Not found. Run /sessions first.");
-          return;
-        }
-        const ok = this.commandHandler.selectCdpSession(id);
-        if (!ok) {
-          await this.sendText(chatId, `Could not select session ${id}`);
-          return;
-        }
-        state.sessionId = id;
-        state.backend = "cdp";
+        const id = await this.selectSession(chatId, state, args);
+        if (!id) return;
         const st = await this.commandHandler.getAgentState(id);
         await this.sendText(
           chatId,
-          `Selected: ${st?.title || id}\nState: ${st?.state || "?"}\nBackend: cdp\n\nSend a prompt or /state`
+          `Selected: ${st?.title || id}${st?.state ? ` [${st.state}]` : ""}\n\nNow just type to prompt it. /last shows its latest reply.`
         );
+        return;
+      }
+
+      case "to": {
+        const m = args.match(/^(\S+)\s+([\s\S]+)$/);
+        if (!m) {
+          await this.sendText(chatId, "Usage: /to <number|id> <prompt>\nExample: /to 2 run the tests");
+          return;
+        }
+        if (!(await this.selectSession(chatId, state, m[1]))) return;
+        await this.sendPrompt(userId, chatId, state, m[2], false);
         return;
       }
 
@@ -1107,7 +1206,23 @@ export class TelegramBridge {
         return;
       }
 
+      case "last": {
+        if (args && !(await this.selectSession(chatId, state, args))) return;
+        if (!state.sessionId) {
+          await this.sendText(chatId, "Select a session first: /sessions");
+          return;
+        }
+        const st = await this.commandHandler.getAgentState(state.sessionId);
+        const reply = [...(st?.messages || [])].reverse().find((m: any) => m.role === "assistant" && String(m.text || "").trim());
+        await this.sendText(
+          chatId,
+          reply ? `🤖 ${truncate(String(st?.title || ""), 60)}\n\n${String(reply.text).trim()}` : "No reply in that session yet."
+        );
+        return;
+      }
+
       case "state": {
+        if (args && !(await this.selectSession(chatId, state, args))) return;
         const st = await this.commandHandler.getAgentState(state.sessionId);
         if (!st) {
           await this.sendText(
@@ -1167,7 +1282,7 @@ export class TelegramBridge {
       case "chats": {
         const limit = Math.min(40, Math.max(1, Number(args) || 15));
         const history = await this.commandHandler.getChatHistory(
-          "telegram",
+          `telegram:${chatId}:${userId}`,
           undefined,
           undefined,
           limit
@@ -1254,6 +1369,30 @@ export class TelegramBridge {
     }
   }
 
+  private async loadSessions(state: TgUserState): Promise<any[]> {
+    await this.commandHandler.refreshCdpTargets();
+    const sessions = await this.commandHandler.listCdpSessions();
+    state.sessionsCache = sessions.map((s: any) => ({
+      id: String(s.id),
+      title: String(s.title || s.id),
+      state: s.state ? String(s.state) : undefined,
+    }));
+    return sessions;
+  }
+
+  /** Resolve /use-style argument, select it for this user, and report failures to the chat. */
+  private async selectSession(chatId: number, state: TgUserState, arg: string): Promise<string | null> {
+    if (!state.sessionsCache.length) await this.loadSessions(state);
+    const id = this.resolveIndexOrId(arg, state.sessionsCache);
+    if (!id || !this.commandHandler.selectCdpSession(id)) {
+      await this.sendText(chatId, `No session matches “${truncate(arg, 40)}”. Run /sessions for the current list.`);
+      return null;
+    }
+    state.sessionId = id;
+    state.backend = "cdp";
+    return id;
+  }
+
   private async sendPrompt(
     userId: number,
     chatId: number,
@@ -1267,24 +1406,36 @@ export class TelegramBridge {
       return;
     }
 
+    if (state.backend === "cdp" && !newSession && !state.sessionId) {
+      await this.sendText(chatId, "Select a session with /sessions and /use first.");
+      return;
+    }
     this.pendingByChat.set(chatId, { userId, startedAt: Date.now() });
     this.chunkByChat.set(chatId, "");
     this.lastSyncChatId = chatId;
 
+    const type =
+      state.backend === "cdp" && !newSession ? "agent_prompt" : "cli_prompt";
+    const target =
+      type === "agent_prompt"
+        ? state.sessionsCache.find((s) => s.id === state.sessionId)?.title || "selected session"
+        : null;
+
     await this.sendText(
       chatId,
       newSession
-        ? `🆕 New session · ${state.agentMode} · working…`
-        : `⏳ ${state.backend}/${state.agentMode} · working…`
+        ? `🆕 New CLI session · ${state.agentMode} · working…`
+        : !state.sync
+          ? `Sent${target ? ` to “${truncate(target, 60)}”` : ""}. Auto-replies are off: use /last, or /sync on.`
+          : target
+            ? `⏳ Sent to “${truncate(target, 60)}” — the reply will appear here.`
+            : `⏳ CLI · ${state.agentMode} · working…`
     );
-
-    const type =
-      state.backend === "cdp" && !newSession ? "agent_prompt" : "cli_prompt";
 
     await this.commandRouter.handleCommand({
       type,
       text,
-      clientId: "telegram",
+      clientId: `telegram:${chatId}:${userId}`,
       newSession,
       agentMode: state.agentMode,
       sessionId: state.sessionId,

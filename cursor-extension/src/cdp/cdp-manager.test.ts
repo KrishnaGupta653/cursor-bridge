@@ -106,6 +106,87 @@ describe("CdpManager status & lifecycle", () => {
   });
 });
 
+describe("CdpManager reply delivery", () => {
+  type Msg = { id: string; role: string; text: string };
+  function setup(initial: Msg[]) {
+    const broadcasts: Record<string, unknown>[] = [];
+    const view = { messages: initial, state: "IDLE" };
+    const fakeSession = {
+      id: "s1",
+      connected: true,
+      getSnapshot: () => ({ messages: view.messages, state: view.state }),
+      refresh: async () => ({ snapshot: { messages: view.messages, state: view.state } }),
+      sendPrompt: async () => ({ ok: true }),
+      detach: async () => undefined,
+    };
+    const manager = new CdpManager({
+      host: "127.0.0.1",
+      port: 9222,
+      enabled: true,
+      pollIntervalMs: 60_000,
+      log: () => undefined,
+      logError: () => undefined,
+      broadcast: (p) => broadcasts.push(p),
+    });
+    const internals = manager as unknown as {
+      sessions: Map<string, unknown>;
+      connected: boolean;
+      pollOnce: () => Promise<void>;
+    };
+    internals.sessions.set("s1", fakeSession);
+    internals.connected = true;
+    const replies = () => broadcasts.filter((b) => b.type === "chat_response");
+    return { manager, view, poll: () => internals.pollOnce(), replies };
+  }
+
+  it("delivers only the new assistant reply to the sender once it settles", async () => {
+    const { manager, view, poll, replies } = setup([{ id: "old", role: "assistant", text: "earlier answer" }]);
+    const sent = await manager.sendAgentPrompt("hi", "s1", { clientId: "tg-1", targetDeviceId: "dev" });
+    assert.equal(sent.ok, true);
+
+    view.state = "RUNNING";
+    view.messages = [...view.messages, { id: "new", role: "assistant", text: "Hello" }];
+    for (let i = 0; i < 4; i++) await poll();
+    assert.equal(replies().length, 0, "must not deliver while the agent is still running");
+
+    view.state = "IDLE";
+    view.messages = [view.messages[0], { id: "new", role: "assistant", text: "Hello there" }];
+    await poll();
+    await poll();
+    await poll();
+    assert.equal(replies().length, 1);
+    const reply = replies()[0];
+    assert.equal(reply.clientId, "tg-1");
+    assert.equal(reply.targetDeviceId, "dev");
+    assert.equal(reply.text, "Hello there");
+
+    await poll();
+    assert.equal(replies().length, 1, "a reply is delivered exactly once");
+    await manager.stop();
+  });
+
+  it("tells the previous sender when a newer prompt takes over the session", async () => {
+    const { manager, replies } = setup([]);
+    await manager.sendAgentPrompt("one", "s1", { clientId: "a" });
+    await manager.sendAgentPrompt("two", "s1", { clientId: "b" });
+    assert.equal(replies().length, 1);
+    assert.equal(replies()[0].clientId, "a");
+    assert.match(String(replies()[0].text), /newer sender/);
+    await manager.stop();
+  });
+
+  it("reports a closed session instead of waiting forever", async () => {
+    const { manager, poll, replies } = setup([]);
+    await manager.sendAgentPrompt("hi", "s1", { clientId: "a" });
+    const internals = manager as unknown as { sessions: Map<string, { connected: boolean }> };
+    internals.sessions.get("s1")!.connected = false;
+    await poll();
+    assert.equal(replies().length, 1);
+    assert.match(String(replies()[0].text), /closed/);
+    await manager.stop();
+  });
+});
+
 describe("CdpTargetInfo shape", () => {
   it("supports multiple window descriptors", () => {
     const windows: CdpTargetInfo[] = [

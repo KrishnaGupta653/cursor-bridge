@@ -76,12 +76,3 @@ export interface ExtensionContext {
   commandHandler: CommandHandler;
   statusBarItem: vscode.StatusBarItem;
 }
-
-export interface ChatDocumentMonitor {
-  interval: NodeJS.Timeout | null;
-  lastContent: string;
-  currentUri: vscode.Uri | null;
-  isProcessing: boolean;
-  lastProcessedHash: string;
-  debounceTimer: NodeJS.Timeout | null;
-}

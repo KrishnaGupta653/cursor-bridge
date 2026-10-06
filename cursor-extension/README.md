@@ -1,5 +1,10 @@
 # Cursor Remote 📱
 
+> Phase 2 containment is in progress. Local WebSocket now requires v2 pairing;
+> remote shell, stop and approval actions are disabled. Read the
+> [security migration guide](../SECURITY_MIGRATION.md) before following older examples.
+> Relay capabilities are implemented; full runtime validation remains outstanding.
+
 [![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)](https://github.com/jaloveeye/cursor-remote)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -20,12 +25,11 @@ Cursor Remote is an extension that allows you to remotely control Cursor AI from
 - 📱 **Mobile Control**: Control Cursor AI from your smartphone or tablet
 - ⚡ **Real-time Communication**: WebSocket-based bidirectional real-time communication
 - 🤖 **CLI Mode**: AI interaction through Cursor CLI (`agent`)
-- 🔄 **Auto Start**: Automatically start server when Cursor launches
-- ⚙️ **Configurable**: Customize ports and auto-start options
+- 🔄 **Auto Start**: The server starts in every Cursor window (8766, then 8767… for more windows)
+- 🔐 **One-time pairing**: Devices pair with a single-use code that expires in 5 minutes
 - 💬 **AI Chat**: Real-time conversation with Cursor AI from mobile
-- 📝 **Code Editing**: Write and edit code from your mobile device
-- 🌍 **Relay Mode**: Connect from anywhere via relay server (no same network required)
-- 🔐 **Session Security**: Optional PIN protection for relay sessions
+- ✈️ **Telegram**: Prompt any Cursor window's agent chat from a Telegram bot
+- 🌍 **Relay / Tunnel**: Connect from other networks via relay server or Cloudflare Tunnel
 
 ### Features
 
@@ -86,21 +90,18 @@ agent login
 
 #### 3. Start Server
 
-The server starts automatically when the extension is installed. You can check the connection status in the status bar.
-
-**Manual Start:**
-
-- Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`) → `Cursor Remote: Start Cursor Remote Server`
+The server starts automatically. The status bar shows `Remote :8766` when ready and `Remote · 1 device` when a device is connected. **Click it for every action** (pair, Telegram, tunnel, relay, log).
 
 #### 4. Connect Mobile App
 
-**Local Mode (Same Network):**
-Connect from the mobile app using the PC's IP address.
+**Local Mode (Same Wi-Fi):**
+1. Serve the Web app on port 8080 (in this repo: `scripts/start-cursor-remote-stack.sh`) and open `http://<computer IP>:8080` on the phone.
+2. Status bar → **Pair a device**. The code is copied and the box shows the host and port to enter.
+3. In the app: Local → host, port → Connect → paste the code. The box closes when the phone is paired.
 
 **Relay Mode (Different Networks):**
-1. Extension prompts for a **6-character Session ID** on first launch
-2. Enter the same Session ID in the mobile app to connect
-3. PC and mobile can be on completely different networks
+1. Status bar → **Connect to relay…** and enter a 6-character session ID.
+2. When it connects, click **Pair relay device** and enter that code in the mobile app.
 
 See the [project README](https://github.com/jaloveeye/cursor-remote) for details.
 
@@ -110,7 +111,7 @@ Relay mode allows you to connect from anywhere without being on the same network
 
 #### How It Works
 
-1. **Session ID**: On first launch, the extension prompts for a 6-character alphanumeric Session ID
+1. **Session ID**: Choose a 6-character alphanumeric Session ID via the status bar → Connect to relay…
 2. **Session Persistence**: The Session ID is saved and reused automatically (valid for 24 hours)
 3. **Mobile Connection**: Enter the same Session ID in the mobile app to connect
 4. **Heartbeat**: Extension sends heartbeat every 30 seconds; session is released after 2 minutes of inactivity
@@ -119,9 +120,10 @@ Relay mode allows you to connect from anywhere without being on the same network
 
 | Command | Description |
 |---------|-------------|
-| `Cursor Remote: 세션 ID로 릴레이 연결` | Connect to a different session immediately |
-| `Cursor Remote: 릴레이 세션 ID 설정` | Change saved Session ID (used on next launch) |
-| `Cursor Remote: 릴레이 서버 상태 확인` | Check relay server status |
+| `Cursor Remote: Connect to Relay by Session ID` | Connect to a different session immediately |
+| `Cursor Remote: Set Relay Session ID` | Change the saved Session ID (used on next connect) |
+| `Cursor Remote: Check Relay Server Status` | Check relay server status (results in the log) |
+| `Cursor Remote: Pair Relay Client` | Create a one-time code for the mobile app |
 
 #### Session Conflict
 
@@ -235,7 +237,7 @@ Cursor Remote는 모바일 기기에서 Cursor AI를 원격으로 제어할 수 
 - 💬 **AI 채팅**: 모바일에서 Cursor AI와 실시간 대화
 - 📝 **코드 편집**: 모바일에서 코드 작성 및 편집
 - 🌍 **릴레이 모드**: 같은 네트워크가 아니어도 릴레이 서버를 통해 연결
-- 🔐 **세션 보안**: 릴레이 세션에 PIN 보호 설정 가능 (선택)
+- 🔐 **일회용 페어링**: 5분 후 만료되는 일회용 코드로 기기 페어링
 
 ### 기능
 
@@ -300,7 +302,7 @@ Extension이 설치되면 자동으로 서버가 시작됩니다. 상태바에�
 
 **수동 시작:**
 
-- 명령 팔레트 (`Cmd+Shift+P` / `Ctrl+Shift+P`) → `Cursor Remote: Start Cursor Remote Server`
+- 명령 팔레트 (`Cmd+Shift+P` / `Ctrl+Shift+P`) → `Cursor Remote: Start Server`
 
 #### 4. 모바일 앱 연결
 

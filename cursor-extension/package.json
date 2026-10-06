@@ -55,7 +55,10 @@
         },
         "cursorRemote.agentBackend": {
           "type": "string",
-          "enum": ["cli", "cdp"],
+          "enum": [
+            "cli",
+            "cdp"
+          ],
           "default": "cli",
           "description": "Default agent backend for prompts: cli (Cursor CLI) or cdp (existing IDE Agent via CDP)."
         },
@@ -76,7 +79,11 @@
         },
         "cursorRemote.cloudflareTunnelProtocol": {
           "type": "string",
-          "enum": ["http2", "quic", "auto"],
+          "enum": [
+            "http2",
+            "quic",
+            "auto"
+          ],
           "default": "http2",
           "description": "Cloudflare Tunnel transport. Use http2 on corporate networks (Zscaler) where QUIC often times out."
         },
@@ -89,73 +96,120 @@
           "type": "boolean",
           "default": true,
           "description": "Auto-start Telegram bot on activation when secrets file exists and enabled is true."
+        },
+        "cursorRemote.allowedWebSocketOrigins": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "http://localhost:8080",
+            "http://127.0.0.1:8080"
+          ],
+          "markdownDescription": "Exact browser origins (scheme, host and port) allowed to connect, e.g. `http://192.168.1.34:8080`. No wildcards. **Cursor Remote: Pair Client** offers to add this computer's current Web app origin for you. Changes apply immediately."
         }
       }
     },
     "commands": [
       {
         "command": "cursorRemote.start",
-        "title": "Start Cursor Remote Server"
+        "title": "Start Server",
+        "category": "Cursor Remote"
       },
       {
         "command": "cursorRemote.stop",
-        "title": "Stop Cursor Remote Server"
+        "title": "Stop Server",
+        "category": "Cursor Remote"
       },
       {
         "command": "cursorRemote.toggle",
-        "title": "Toggle Cursor Remote Server"
+        "title": "Toggle Server",
+        "category": "Cursor Remote"
       },
       {
         "command": "cursorRemote.showConnections",
-        "title": "Cursor Remote: Show Connection Info"
+        "title": "Show Connection Info",
+        "category": "Cursor Remote"
       },
       {
         "command": "cursorRemote.statusBarClick",
-        "title": "Cursor Remote: Connect to Relay (Status Bar)"
+        "title": "Quick Actions",
+        "category": "Cursor Remote"
       },
       {
         "command": "cursorRemote.checkRelayServer",
-        "title": "Cursor Remote: Check Relay Server Status"
+        "title": "Check Relay Server Status",
+        "category": "Cursor Remote"
       },
       {
         "command": "cursorRemote.connectToRelaySessionById",
-        "title": "Cursor Remote: Connect to Relay by Session ID"
+        "title": "Connect to Relay by Session ID",
+        "category": "Cursor Remote"
       },
       {
         "command": "cursorRemote.setRelaySessionId",
-        "title": "Cursor Remote: Set Relay Session ID"
+        "title": "Set Relay Session ID",
+        "category": "Cursor Remote"
       },
       {
         "command": "cursorRemote.startCloudflareTunnel",
-        "title": "Cursor Remote: Start Cloudflare Tunnel"
+        "title": "Start Cloudflare Tunnel",
+        "category": "Cursor Remote"
       },
       {
         "command": "cursorRemote.stopCloudflareTunnel",
-        "title": "Cursor Remote: Stop Cloudflare Tunnel"
+        "title": "Stop Cloudflare Tunnel",
+        "category": "Cursor Remote"
       },
       {
         "command": "cursorRemote.copyCloudflareTunnelUrl",
-        "title": "Cursor Remote: Copy Cloudflare Tunnel URL"
+        "title": "Copy Cloudflare Tunnel URL",
+        "category": "Cursor Remote"
       },
       {
         "command": "cursorRemote.restartLocalServer",
-        "title": "Cursor Remote: Restart Local Server (auto port)"
+        "title": "Restart Server",
+        "category": "Cursor Remote"
       },
       {
         "command": "cursorRemote.openTelegramSecrets",
-        "title": "Cursor Remote: Open Telegram Secrets File"
+        "title": "Edit Telegram Settings",
+        "category": "Cursor Remote"
       },
       {
         "command": "cursorRemote.startTelegramBot",
-        "title": "Cursor Remote: Start Telegram Bot"
+        "title": "Start Telegram Bot",
+        "category": "Cursor Remote"
       },
       {
         "command": "cursorRemote.stopTelegramBot",
-        "title": "Cursor Remote: Stop Telegram Bot"
+        "title": "Stop Telegram Bot",
+        "category": "Cursor Remote"
       },
       {
         "command": "cursorRemote.restartTelegramBot",
-        "title": "Cursor Remote: Restart Telegram Bot"
+        "title": "Restart Telegram Bot",
+        "category": "Cursor Remote"
+      },
+      {
+        "command": "cursorRemote.pairClient",
+        "title": "Pair Client",
+        "category": "Cursor Remote"
+      },
+      {
+        "command": "cursorRemote.revokeClients",
+        "title": "Revoke All Paired Clients",
+        "category": "Cursor Remote"
+      },
+      {
+        "command": "cursorRemote.pairRelayClient",
+        "title": "Pair Relay Client",
+        "category": "Cursor Remote"
+      },
+      {
+        "command": "cursorRemote.revokeRelaySession",
+        "title": "Revoke Relay Session",
+        "category": "Cursor Remote"
       }
     ]
   },
@@ -163,7 +217,7 @@
     "vscode:prepublish": "npm run compile && npx esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/extension.js",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "test": "npm run compile && node --test out/cdp/*.test.js"
+    "test": "npm run compile && node --test out/cdp/*.test.js out/security/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

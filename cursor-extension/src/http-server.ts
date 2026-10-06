@@ -99,9 +99,8 @@ export class HttpServer {
         }
 
         if (availablePort !== httpPort) {
-            const warningMsg = `Port ${httpPort} is in use; using port ${availablePort} instead.`;
-            this.log(`⚠️ ${warningMsg}`);
-            vscode.window.showWarningMessage(`Cursor Remote: ${warningMsg}`);
+            // Expected with several Cursor windows open, so not worth a notification.
+            this.log(`Hooks port ${httpPort} is in use; using port ${availablePort} instead.`);
         }
 
         // Create HTTP server

@@ -1,8 +1,8 @@
+import * as os from "os";
 import * as vscode from "vscode";
 import { WebSocketServer } from "./websocket-server";
 import { CommandHandler } from "./command-handler";
 import { CommandRouter } from "./command-router";
-import { ChatCapture } from "./chat-capture";
 import { HttpServer } from "./http-server";
 import { RulesManager } from "./rules-manager";
 import { StatusBarManager } from "./status-bar";
@@ -15,12 +15,12 @@ import {
   defaultTelegramSecretsPath,
   ensureTelegramSecretsTemplate,
   loadTelegramSecrets,
+  TELEGRAM_LOCKED_PREFIX,
 } from "./telegram-bridge";
 
 let wsServer: WebSocketServer | null = null;
 let commandHandler: CommandHandler | null = null;
 let commandRouter: CommandRouter | null = null;
-let chatCapture: ChatCapture | null = null;
 let httpServer: HttpServer | null = null;
 let rulesManager: RulesManager | null = null;
 let statusBarManager: StatusBarManager | null = null;
@@ -31,9 +31,6 @@ let telegramBridge: TelegramBridge | null = null;
 let outputChannel: vscode.OutputChannel;
 /** 연결 정보 Webview 패널 (열려 있을 때만 갱신용) */
 let connectionsPanel: vscode.WebviewPanel | null = null;
-/** 패널 열린 동안 주기 갱신 타이머 (dispose 시 해제) */
-let connectionsPanelRefreshInterval: ReturnType<typeof setInterval> | null =
-  null;
 /** 릴레이 서버 저장소 라벨 (연결 정보 패널에서 표시, /api/store 조회 결과) */
 let lastRelayStoreLabel: string | null = null;
 
@@ -41,111 +38,112 @@ let lastRelayStoreLabel: string | null = null;
 function getConnectionsViewHtml(data: {
   serverRunning: boolean;
   serverPort: number | null;
+  lanAddress: string | null;
+  originAllowed: boolean;
   relaySessionId: string | null;
   relayStoreLabel: string | null;
   relayServerUrl: string | null;
   localClientIds: string[];
   tunnelWssUrl: string | null;
+  telegramRunning: boolean;
 }): string {
-  const {
-    serverRunning,
-    serverPort,
-    relaySessionId,
-    relayStoreLabel,
-    relayServerUrl,
-    localClientIds,
-    tunnelWssUrl,
-  } = data;
-  const relayStoreLine =
-    relayStoreLabel != null
-      ? `<p class="relay-meta"><strong>Store:</strong> ${escapeHtml(relayStoreLabel)}</p>`
-      : "";
-  const relayUrlLine =
-    relayServerUrl != null
-      ? `<p class="relay-meta"><strong>Server:</strong> <code>${escapeHtml(relayServerUrl)}</code></p>`
-      : "";
-  const relaySection =
-    relaySessionId != null
-      ? `
-    <section class="section">
-      <h2>📡 Relay</h2>
-      <p class="status connected">Connected via relay server</p>
-      <p class="session-id"><strong>Session ID:</strong> <code>${escapeHtml(
-        relaySessionId
-      )}</code></p>
-      ${relayStoreLine}
-      ${relayUrlLine}
-    </section>`
-      : `
-    <section class="section">
-      <h2>📡 Relay</h2>
-      <p class="status disconnected">Not connected</p>
-      ${relayStoreLine}
-      ${relayUrlLine}
-    </section>`;
+  const e = escapeHtml;
+  const status = (ok: boolean, text: string) =>
+    `<p class="status ${ok ? "ok" : "off"}"><span aria-hidden="true">${ok ? "●" : "○"}</span> ${e(text)}</p>`;
+  const row = (label: string, value: string) =>
+    `<div class="row"><dt>${e(label)}</dt><dd><code>${e(value)}</code></dd></div>`;
+  const hint = (text: string) => `<p class="hint">${text}</p>`;
 
-  const localSection =
-    localClientIds.length > 0
-      ? `
-    <section class="section">
-      <h2>🖥️ Local clients (${localClientIds.length})</h2>
-      <ul>${localClientIds
-        .map((id) => `<li><code>${escapeHtml(id)}</code></li>`)
-        .join("")}</ul>
-    </section>`
-      : `
-    <section class="section">
-      <h2>🖥️ Local clients</h2>
-      <p class="status disconnected">No connections</p>
-    </section>`;
+  const host = data.lanAddress || "this computer's IP";
+  const phone = data.serverRunning
+    ? `${status(true, `Listening on port ${data.serverPort ?? "?"}`)}
+      <dl>
+        ${row("Web app", `http://${host}:8080`)}
+        ${row("Local host", host)}
+        ${row("Local port", String(data.serverPort ?? "?"))}
+      </dl>
+      ${data.originAllowed ? "" : hint(`<strong>Blocked origin:</strong> <code>http://${e(host)}:8080</code> is not in <code>cursorRemote.allowedWebSocketOrigins</code>. Run <em>Cursor Remote: Pair Client</em> and choose “Allow it”.`)}
+      ${hint("The Web app is served separately on port 8080 (repo: <code>scripts/start-cursor-remote-stack.sh</code>). Open it on the phone, then run <em>Cursor Remote: Pair Client</em> and paste the code. Both devices must be on the same Wi-Fi.")}`
+    : `${status(false, "Server stopped")}${hint("Run <em>Cursor Remote: Start Server</em>.")}`;
 
-  const tunnelSection =
-    tunnelWssUrl != null
-      ? `
-    <section class="section">
-      <h2>☁️ Cloudflare Tunnel</h2>
-      <p class="status connected">Running</p>
-      <p class="session-id"><strong>Phone URL:</strong> <code>${escapeHtml(
-        tunnelWssUrl
-      )}</code></p>
-      <p class="relay-meta">In the app: Tunnel mode → paste this URL → Connect</p>
-    </section>`
-      : `
-    <section class="section">
-      <h2>☁️ Cloudflare Tunnel</h2>
-      <p class="status disconnected">Not running</p>
-      <p class="relay-meta">Command Palette → “Start Cloudflare Tunnel”</p>
-    </section>`;
+  const clients = data.localClientIds.length
+    ? `${status(true, `${data.localClientIds.length} paired device(s) connected`)}<ul>${data.localClientIds
+        .map((id) => `<li><code>${e(id)}</code></li>`)
+        .join("")}</ul>`
+    : status(false, "No devices connected");
+
+  const relayMeta = [
+    data.relayStoreLabel != null ? row("Store", data.relayStoreLabel) : "",
+    data.relayServerUrl != null ? row("Server", data.relayServerUrl) : "",
+  ].join("");
+  const relay = data.relaySessionId
+    ? `${status(true, "Connected")}<dl>${row("Session ID", data.relaySessionId)}${relayMeta}</dl>`
+    : `${status(false, "Not connected")}<dl>${relayMeta}</dl>${hint("For phones on other networks: click the status bar item → Connect to Relay.")}`;
+
+  const tunnel = data.tunnelWssUrl
+    ? `${status(true, "Running")}<dl>${row("Phone URL", data.tunnelWssUrl)}</dl>${hint("In the app: Tunnel → paste this URL → Connect.")}`
+    : `${status(false, "Not running")}${hint("Run <em>Cursor Remote: Start Cloudflare Tunnel</em> for access from other networks.")}`;
+
+  const telegram = data.telegramRunning
+    ? `${status(true, "Bot running in this window")}${hint("Message your bot <code>/help</code>.")}`
+    : `${status(false, "Not running in this window")}${hint("Only one window runs the bot. Run <em>Cursor Remote: Start Telegram Bot</em> if none does.")}`;
+
+  const section = (icon: string, title: string, body: string) => {
+    const id = `h-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+    return `<section aria-labelledby="${id}"><h2 id="${id}"><span aria-hidden="true">${icon}</span> ${e(title)}</h2>${body}</section>`;
+  };
 
   return `<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body { font-family: var(--vscode-font-family); padding: 1rem; color: var(--vscode-foreground); }
-    h1 { font-size: 1.2rem; margin-bottom: 1rem; }
-    h2 { font-size: 1rem; margin: 1rem 0 0.5rem; color: var(--vscode-descriptionForeground); }
-    .section { margin-bottom: 1.25rem; }
-    .status.connected { color: var(--vscode-testing-iconPassed); }
-    .status.disconnected { color: var(--vscode-descriptionForeground); }
-    code { background: var(--vscode-textBlockQuote-background); padding: 0.2em 0.4em; border-radius: 4px; }
+    body { font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); padding: 0 1.25rem 1.5rem; color: var(--vscode-foreground); max-width: 44rem; line-height: 1.5; }
+    h1 { font-size: 1.3em; font-weight: 600; margin: 1.25rem 0 0.5rem; }
+    h2 { font-size: 1em; font-weight: 600; margin: 0 0 0.35rem; }
+    section { padding: 0.9rem 0; border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border)); }
+    .status { margin: 0 0 0.4rem; }
+    .status.ok span { color: var(--vscode-testing-iconPassed); }
+    .status.off { color: var(--vscode-descriptionForeground); }
+    dl { margin: 0.25rem 0; }
+    .row { display: flex; gap: 0.75rem; align-items: baseline; margin: 0.15rem 0; }
+    dt { min-width: 7rem; color: var(--vscode-descriptionForeground); }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    code { font-family: var(--vscode-editor-font-family); background: var(--vscode-textCodeBlock-background); padding: 0.1em 0.35em; border-radius: 3px; user-select: all; }
     ul { margin: 0.25rem 0; padding-left: 1.25rem; }
-    .relay-meta { font-size: 0.9em; color: var(--vscode-descriptionForeground); margin-top: 0.25rem; }
+    .hint { margin: 0.35rem 0 0; color: var(--vscode-descriptionForeground); }
+    @media (max-width: 420px) { .row { flex-direction: column; gap: 0; } }
   </style>
 </head>
 <body>
-  <h1>Cursor Remote - Connection Info</h1>
-  <section class="section">
-    <h2>🔌 Server</h2>
-    <p class="status ${serverRunning ? "connected" : "disconnected"}">
-      ${serverRunning ? `Running on port ${serverPort ?? "-"}` : "Stopped"}
-    </p>
-  </section>
-  ${relaySection}
-  ${tunnelSection}
-  ${localSection}
+  <h1>Cursor Remote</h1>
+  ${section("📱", "Connect your phone", phone)}
+  ${section("🖥️", "Paired devices", clients)}
+  ${section("✈️", "Telegram", telegram)}
+  ${section("☁️", "Cloudflare Tunnel", tunnel)}
+  ${section("📡", "Relay", relay)}
 </body>
 </html>`;
+}
+
+/** This computer's LAN IPv4 (Wi-Fi first), used to tell the user what to type on the phone. */
+function lanAddress(): string | null {
+  const ifaces = os.networkInterfaces();
+  const ordered = [...Object.keys(ifaces).filter((n) => n === "en0"), ...Object.keys(ifaces).filter((n) => n !== "en0")];
+  for (const name of ordered) {
+    for (const a of ifaces[name] || []) {
+      if (a.family === "IPv4" && !a.internal && !a.address.startsWith("169.254.")) return a.address;
+    }
+  }
+  return null;
+}
+
+function allowedOrigins(): string[] {
+  return vscode.workspace
+    .getConfiguration("cursorRemote")
+    .get<string[]>("allowedWebSocketOrigins", ["http://localhost:8080", "http://127.0.0.1:8080"]);
 }
 
 function escapeHtml(s: string): string {
@@ -159,73 +157,102 @@ function escapeHtml(s: string): string {
 /** 연결 정보가 바뀌었을 때 열려 있는 패널 내용 갱신 */
 function updateConnectionsView() {
   if (!connectionsPanel) return;
-  const serverStatus = wsServer
-    ? wsServer.getConnectionStatus()
-    : {
-        isRunning: false,
-        clientCount: 0,
-        port: null as number | null,
-      };
-  const relaySessionId =
-    relayClient?.isConnectedToSession() === true
-      ? relayClient.getSessionId()
-      : null;
-  const localClientIds = wsServer ? wsServer.getClientIds() : [];
+  const lan = lanAddress();
   connectionsPanel.webview.html = getConnectionsViewHtml({
-    serverRunning: serverStatus.isRunning,
-    serverPort: serverStatus.port,
-    relaySessionId,
+    serverRunning: wsServer?.isRunning() ?? false,
+    serverPort: wsServer?.getActualPort() ?? null,
+    lanAddress: lan,
+    originAllowed: !lan || allowedOrigins().includes(`http://${lan}:8080`),
+    relaySessionId: relayClient?.isConnectedToSession() ? relayClient.getSessionId() : null,
     relayStoreLabel: lastRelayStoreLabel,
     relayServerUrl: CONFIG.RELAY_SERVER_URL,
-    localClientIds,
+    localClientIds: wsServer ? wsServer.getClientIds() : [],
     tunnelWssUrl: cloudflareTunnel?.getWssUrl() ?? null,
+    telegramRunning: telegramBridge?.isRunning() ?? false,
   });
 }
 
 export async function activate(context: vscode.ExtensionContext) {
-  // Output channel creation
+  // Never force the panel open: every window activates this extension. Errors offer "Show Log".
   outputChannel = vscode.window.createOutputChannel("Cursor Remote");
   context.subscriptions.push(outputChannel);
-  outputChannel.show(true);
-
-  // 로그를 클라이언트에 전송하는 헬퍼 함수
-  const sendLogToClients = (
-    level: "info" | "warn" | "error",
-    message: string,
-    error?: any
-  ) => {
-    if (wsServer) {
-      const logData = {
-        level,
-        message,
-        timestamp: new Date().toISOString(),
-        source: "extension",
-        ...(error && {
-          error: error instanceof Error ? error.message : String(error),
-        }),
-      };
-      wsServer.send(
-        JSON.stringify({
-          type: "log",
-          ...logData,
-        })
-      );
-    }
-  };
-
-  outputChannel.appendLine("Cursor Remote extension is now active!");
   outputChannel.appendLine(
-    `[${new Date().toLocaleTimeString()}] 🔄 Extension activation started`
+    `[${new Date().toLocaleTimeString()}] Cursor Remote activating…`
   );
-  console.log("Cursor Remote extension is now active!");
-  sendLogToClients("info", "Cursor Remote extension is now active!");
 
   // Status bar manager
   statusBarManager = new StatusBarManager(context);
+  statusBarManager.setTelegramStatus(() => telegramBridge?.isRunning() ?? false);
 
   // WebSocket server initialization
   wsServer = new WebSocketServer(CONFIG.WEBSOCKET_PORT, outputChannel);
   statusBarManager.setWebSocketServer(wsServer);
+  context.subscriptions.push(
+    vscode.commands.registerCommand("cursorRemote.pairClient", async () => {
+      const server = wsServer!;
+      if (!server.isRunning() && !(await server.ensureListening())) {
+        vscode.window.showErrorMessage("Cursor Remote: the local server is not running, so nothing can pair.", "Show Log")
+          .then((pick) => pick && outputChannel.show(true));
+        return;
+      }
+      const lan = lanAddress();
+      const webOrigin = lan ? `http://${lan}:8080` : null;
+      if (webOrigin && !allowedOrigins().includes(webOrigin)) {
+        const pick = await vscode.window.showWarningMessage(
+          `Phones opening the Web app at ${webOrigin} will be rejected: that origin is not allowed yet.`,
+          "Allow it",
+          "Continue anyway"
+        );
+        if (!pick) return;
+        if (pick === "Allow it") {
+          await vscode.workspace.getConfiguration("cursorRemote").update(
+            "allowedWebSocketOrigins",
+            [...allowedOrigins(), webOrigin],
+            vscode.ConfigurationTarget.Global
+          );
+        }
+      }
+      const secret = server.auth.beginPairing();
+      await vscode.env.clipboard.writeText(secret);
+      const port = server.getActualPort() ?? CONFIG.WEBSOCKET_PORT;
+      const box = vscode.window.createInputBox();
+      box.title = "Pair a device — code copied to clipboard (single use, expires in 5 minutes)";
+      box.prompt = lan
+        ? `In the Web app: Local → host ${lan}, port ${port} → Connect → paste this code. Never share it.`
+        : `In the Web app: Local → this computer's IP, port ${port} → Connect → paste this code. Never share it.`;
+      box.value = secret;
+      box.ignoreFocusOut = true;
+      let paired = false;
+      const stopWatching = server.onClientChange((connected) => {
+        // A reconnecting, already-paired device must not count; only a consumed code does.
+        if (!connected || server.auth.isPairingPending()) return;
+        paired = true;
+        box.hide();
+      });
+      const expiry = setTimeout(() => {
+        box.hide();
+        if (!paired) vscode.window.showInformationMessage("Cursor Remote: pairing code expired. Run Pair Client again when the phone is ready.");
+      }, 5 * 60_000);
+      box.onDidAccept(() => box.hide());
+      box.onDidHide(() => {
+        stopWatching();
+        clearTimeout(expiry);
+        box.dispose();
+        if (paired) vscode.window.showInformationMessage("Cursor Remote: device paired.");
+      });
+      box.show();
+    }),
+    vscode.commands.registerCommand("cursorRemote.revokeClients", async () => {
+      const pick = await vscode.window.showWarningMessage(
+        "Sign out every paired device? Each one will need a new pairing code.",
+        { modal: true },
+        "Revoke all"
+      );
+      if (pick !== "Revoke all") return;
+      wsServer!.auth.revokeAll();
+      vscode.window.showInformationMessage("Cursor Remote: all paired devices were signed out.");
+    }),
+  );
 
   // CLI mode is always enabled (IDE mode is deprecated)
   const useCLIMode = true;
@@ -299,11 +326,10 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   };
 
-  await startOrRefreshCdp("activate");
-
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(async (e) => {
-      if (!e.affectsConfiguration("cursorRemote")) return;
+      const cdpKeys = ["enableCdp", "cdpHost", "cdpPort"];
+      if (!cdpKeys.some((k) => e.affectsConfiguration(`cursorRemote.${k}`))) return;
       try {
         await startOrRefreshCdp("settings-change");
       } catch (error) {
@@ -316,25 +342,12 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // HTTP server for hooks
+  // HTTP server for hooks; started together with the WS server at the end of activation.
   httpServer = new HttpServer(outputChannel, wsServer);
-  await httpServer.start().catch((error) => {
-    const errorMsg = error instanceof Error ? error.message : "Unknown error";
-    outputChannel.appendLine(
-      `[${new Date().toLocaleTimeString()}] ❌ Failed to start HTTP server: ${errorMsg}`
-    );
-    vscode.window.showErrorMessage(
-      `Cursor Remote: HTTP server start failed - ${errorMsg}`
-    );
-  });
 
   // Rules manager (CHAT_SUMMARY hook 제거됨 - stdout 응답만 사용)
   // rulesManager는 hooks.json 관리를 위해 유지하지만, CHAT_SUMMARY 감시는 제거
   rulesManager = new RulesManager(outputChannel, httpServer);
-
-  // Chat capture
-  chatCapture = new ChatCapture(outputChannel, wsServer);
-  chatCapture.setup(context);
 
   // WebSocket message handler
   wsServer.onMessage((message: string) => {
@@ -403,98 +416,53 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   });
 
-  // Register commands
-  const startCommand = vscode.commands.registerCommand(
-    "cursorRemote.start",
-    () => {
-      if (wsServer && !wsServer.isRunning()) {
-        wsServer
-          .start()
-          .then(() => {
-            if (statusBarManager) {
-              statusBarManager.update(false);
-            }
-            updateConnectionsView();
-            vscode.window.showInformationMessage(
-              `Cursor Remote server started on port ${CONFIG.WEBSOCKET_PORT}`
-            );
-          })
-          .catch((error) => {
-            const errorMsg =
-              error instanceof Error ? error.message : "Unknown error";
-            outputChannel.appendLine(
-              `[${new Date().toLocaleTimeString()}] ❌ Failed to start WebSocket server: ${errorMsg}`
-            );
-            vscode.window.showErrorMessage(
-              `Cursor Remote: Server start failed - ${errorMsg}`
-            );
-            if (statusBarManager) {
-              statusBarManager.update(false);
-            }
-            updateConnectionsView();
-          });
-      } else {
-        vscode.window.showInformationMessage(
-          "Cursor Remote server is already running"
-        );
-      }
+  const startServer = async () => {
+    if (!wsServer) return;
+    if (wsServer.isRunning()) {
+      vscode.window.showInformationMessage(
+        `Cursor Remote: server already running on port ${wsServer.getActualPort()}.`
+      );
+      return;
     }
-  );
+    try {
+      await wsServer.start();
+      vscode.window.showInformationMessage(
+        `Cursor Remote: server running on port ${wsServer.getActualPort()}.`
+      );
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : "Unknown error";
+      outputChannel.appendLine(
+        `[${new Date().toLocaleTimeString()}] ❌ Failed to start WebSocket server: ${errorMsg}`
+      );
+      // "All ports busy" is already reported by the server itself.
+      if (!errorMsg.startsWith("All ports")) {
+        vscode.window
+          .showErrorMessage(`Cursor Remote: server failed to start — ${errorMsg}`, "Show Log")
+          .then((pick) => pick && outputChannel.show(true));
+      }
+    } finally {
+      statusBarManager?.refresh();
+      updateConnectionsView();
+    }
+  };
 
-  const stopCommand = vscode.commands.registerCommand(
-    "cursorRemote.stop",
-    () => {
-      if (wsServer && wsServer.isRunning()) {
-        wsServer.stop();
-        if (statusBarManager) {
-          statusBarManager.update(false);
-        }
-        updateConnectionsView();
-        vscode.window.showInformationMessage("Cursor Remote server stopped");
-      } else {
-        vscode.window.showInformationMessage(
-          "Cursor Remote server is not running"
-        );
-      }
+  const stopServer = () => {
+    if (!wsServer?.isRunning()) {
+      vscode.window.showInformationMessage("Cursor Remote: server is not running.");
+      return;
     }
-  );
+    wsServer.stop();
+    statusBarManager?.refresh();
+    updateConnectionsView();
+    vscode.window.showInformationMessage(
+      "Cursor Remote: server stopped. Paired devices were signed out."
+    );
+  };
 
-  const toggleCommand = vscode.commands.registerCommand(
-    "cursorRemote.toggle",
-    () => {
-      if (wsServer) {
-        if (wsServer.isRunning()) {
-          wsServer.stop();
-          if (statusBarManager) {
-            statusBarManager.update(false);
-          }
-          updateConnectionsView();
-        } else {
-          wsServer
-            .start()
-            .then(() => {
-              if (statusBarManager) {
-                statusBarManager.update(false);
-              }
-              updateConnectionsView();
-            })
-            .catch((error) => {
-              const errorMsg =
-                error instanceof Error ? error.message : "Unknown error";
-              outputChannel.appendLine(
-                `[${new Date().toLocaleTimeString()}] ❌ Failed to start WebSocket server: ${errorMsg}`
-              );
-              vscode.window.showErrorMessage(
-                `Cursor Remote: Server start failed - ${errorMsg}`
-              );
-              if (statusBarManager) {
-                statusBarManager.update(false);
-              }
-              updateConnectionsView();
-            });
-        }
-      }
-    }
+  const startCommand = vscode.commands.registerCommand("cursorRemote.start", startServer);
+  const stopCommand = vscode.commands.registerCommand("cursorRemote.stop", stopServer);
+  const toggleCommand = vscode.commands.registerCommand("cursorRemote.toggle", () =>
+    wsServer?.isRunning() ? stopServer() : startServer()
   );
 
   /** 연결 정보 뷰 (상태바 클릭 시 표시 - Git Graph처럼) */
@@ -535,21 +503,7 @@ export async function activate(context: vscode.ExtensionContext) {
         },
       });
       if (!sid) return;
-      const pin = await vscode.window.showInputBox({
-        title: "Cursor Remote: PIN (optional)",
-        prompt:
-          "If this session has a PIN, enter the 4–6 digit PIN. Leave blank if none was set.",
-        placeHolder: "1234",
-        password: true,
-        validateInput: (v) => {
-          const t = (v ?? "").trim();
-          if (!t) return null;
-          if (!/^\d{4,6}$/.test(t)) return "Must be 4–6 digits";
-          return null;
-        },
-      });
-      const pinToUse = pin != null && pin.trim() ? pin.trim() : undefined;
-      await relayClient.connectToSessionById(sid, pinToUse);
+      await relayClient.connectToSessionById(sid);
       outputChannel.show();
     }
   );
@@ -595,7 +549,7 @@ export async function activate(context: vscode.ExtensionContext) {
       const doc = await vscode.workspace.openTextDocument(filePath);
       await vscode.window.showTextDocument(doc);
       vscode.window.showInformationMessage(
-        "Paste BotFather token and your Telegram user id into allowedUserIds, save, then Start Telegram Bot."
+        "Fill in botToken (from BotFather) and your numeric Telegram id in both allowedUserIds and allowedChatIds, set enabled to true, save, then run Start Telegram Bot."
       );
     }
   );
@@ -620,22 +574,29 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.window.showInformationMessage("Telegram bot already running.");
         return;
       }
-      const result = await telegramBridge.start();
+      const result = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Window, title: "Starting Telegram bot…" },
+        () => telegramBridge!.start()
+      );
+      statusBarManager?.refresh();
+      updateConnectionsView();
       if (!result.ok) {
-        outputChannel.show(true);
+        const locked = result.error?.startsWith(TELEGRAM_LOCKED_PREFIX);
         const pick = await vscode.window.showErrorMessage(
-          `Telegram bot failed: ${result.error}`,
-          "Open secrets file"
+          locked
+            ? `Cursor Remote: ${result.error}. That window already answers your bot.`
+            : `Cursor Remote: Telegram bot failed — ${result.error}`,
+          ...(locked ? [] : ["Open Telegram settings", "Show Log"])
         );
-        if (pick === "Open secrets file") {
-          await vscode.commands.executeCommand(
-            "cursorRemote.openTelegramSecrets"
-          );
+        if (pick === "Open Telegram settings") {
+          await vscode.commands.executeCommand("cursorRemote.openTelegramSecrets");
+        } else if (pick === "Show Log") {
+          outputChannel.show(true);
         }
         return;
       }
       vscode.window.showInformationMessage(
-        "Cursor Remote: Telegram bot started. Message your bot with /help"
+        "Cursor Remote: Telegram bot started. Message your bot /help."
       );
     }
   );
@@ -648,6 +609,8 @@ export async function activate(context: vscode.ExtensionContext) {
         return;
       }
       await telegramBridge.stop();
+      statusBarManager?.refresh();
+      updateConnectionsView();
       vscode.window.showInformationMessage(
         "Cursor Remote: Telegram bot stopped."
       );
@@ -774,132 +737,124 @@ export async function activate(context: vscode.ExtensionContext) {
 
   const showConnectionsCommand = vscode.commands.registerCommand(
     "cursorRemote.showConnections",
-    async () => {
-      const serverStatus = wsServer
-        ? wsServer.getConnectionStatus()
-        : {
-            isRunning: false,
-            clientCount: 0,
-            port: null as number | null,
-          };
-      const relaySessionId =
-        relayClient?.isConnectedToSession() === true
-          ? relayClient.getSessionId()
-          : null;
-      const localClientIds = wsServer ? wsServer.getClientIds() : [];
-
-      // 릴레이 서버 저장소 정보 조회 (Supabase / Upstash Redis)
-      try {
-        const res = await fetch(`${CONFIG.RELAY_SERVER_URL}/api/store`);
-        const json = (await res.json()) as {
-          success?: boolean;
-          data?: { storeLabel?: string };
-        };
-        if (json?.success && json?.data?.storeLabel) {
-          lastRelayStoreLabel = json.data.storeLabel;
-        }
-      } catch {
-        lastRelayStoreLabel = null;
+    () => {
+      if (connectionsPanel) {
+        connectionsPanel.reveal();
+        updateConnectionsView();
+        return;
       }
-
-      const html = getConnectionsViewHtml({
-        serverRunning: serverStatus.isRunning,
-        serverPort: serverStatus.port,
-        relaySessionId,
-        relayStoreLabel: lastRelayStoreLabel,
-        relayServerUrl: CONFIG.RELAY_SERVER_URL,
-        localClientIds,
-        tunnelWssUrl: cloudflareTunnel?.getWssUrl() ?? null,
-      });
-
       const panel = vscode.window.createWebviewPanel(
         "cursorRemote.connections",
-        "Cursor Remote - Connection Info",
-        vscode.ViewColumn.One,
+        "Cursor Remote — Connection Info",
+        vscode.ViewColumn.Active,
         { enableScripts: false }
       );
-      panel.webview.html = html;
       connectionsPanel = panel;
       panel.onDidDispose(() => {
         connectionsPanel = null;
       });
+      updateConnectionsView();
+
+      // Relay store label is informational only: render first, never block on the network.
+      if (relayClient?.isConnectedToSession()) {
+        fetch(`${CONFIG.RELAY_SERVER_URL}/api/store`, { signal: AbortSignal.timeout(3000) })
+          .then((res) => res.json() as Promise<{ success?: boolean; data?: { storeLabel?: string } }>)
+          .then((json) => {
+            lastRelayStoreLabel = json?.success && json.data?.storeLabel ? json.data.storeLabel : null;
+            updateConnectionsView();
+          })
+          .catch(() => undefined);
+      }
     }
   );
 
-  /** 상태줄 클릭: 릴레이 비활성 시 세션 ID·PIN 입력 후 연결, 활성 시 연결 정보 패널 */
+  /** Status bar click: one menu for every common action, instead of hunting the palette. */
   const statusBarClickCommand = vscode.commands.registerCommand(
     "cursorRemote.statusBarClick",
     async () => {
-      const relayConnected =
-        relayClient != null && relayClient.isConnectedToSession();
-      if (relayConnected) {
-        vscode.commands.executeCommand("cursorRemote.showConnections");
-        return;
-      }
-      if (!relayClient) {
-        outputChannel.appendLine(
-          `[${new Date().toLocaleTimeString()}] [Relay] ⚠️ Relay client not initialized`
-        );
-        outputChannel.show();
-        return;
-      }
-      const sid = await vscode.window.showInputBox({
-        title: "Cursor Remote: Relay Session ID",
-        prompt:
-          "Enter a 6-character session ID to connect (enter the same ID on mobile to pair)",
-        placeHolder: "3ZUESK",
-        value: context.globalState.get<string>("cursorRemote.sessionId") ?? "",
-        validateInput: (value) => {
-          const v = (value ?? "").trim().toUpperCase();
-          if (!v) return "Please enter a session ID.";
-          if (!/^[A-Z0-9]{6}$/.test(v)) return "Must be 6 alphanumeric characters (e.g. 3ZUESK)";
-          return null;
-        },
+      const running = wsServer?.isRunning() ?? false;
+      const tgRunning = telegramBridge?.isRunning() ?? false;
+      const relayConnected = relayClient?.isConnectedToSession() ?? false;
+      const tunnelUrl = cloudflareTunnel?.getWssUrl() ?? null;
+      const lan = lanAddress();
+      type Action = vscode.QuickPickItem & { run?: () => unknown };
+      const cmd = (id: string) => () => vscode.commands.executeCommand(id);
+      const items: Action[] = [
+        { label: "Same Wi-Fi", kind: vscode.QuickPickItemKind.Separator },
+        running
+          ? { label: "$(device-mobile) Pair a device", description: `port ${wsServer?.getActualPort()}`, detail: "Shows a one-time code and where to enter it", run: cmd("cursorRemote.pairClient") }
+          : { label: "$(play) Start server", run: cmd("cursorRemote.start") },
+        ...(running && lan
+          ? [{ label: "$(copy) Copy phone address", description: `${lan}:${wsServer?.getActualPort()}`, run: async () => {
+              await vscode.env.clipboard.writeText(`${lan}:${wsServer?.getActualPort()}`);
+              vscode.window.setStatusBarMessage("Cursor Remote: address copied", 3000);
+            } }]
+          : []),
+        { label: "$(info) Connection info", description: "Address, devices, Telegram, tunnel, relay", run: cmd("cursorRemote.showConnections") },
+        { label: "Telegram", kind: vscode.QuickPickItemKind.Separator },
+        tgRunning
+          ? { label: "$(debug-stop) Stop Telegram bot", run: cmd("cursorRemote.stopTelegramBot") }
+          : { label: "$(comment-discussion) Start Telegram bot", run: cmd("cursorRemote.startTelegramBot") },
+        { label: "$(gear) Edit Telegram settings", run: cmd("cursorRemote.openTelegramSecrets") },
+        { label: "Other networks", kind: vscode.QuickPickItemKind.Separator },
+        ...(tunnelUrl
+          ? [
+              { label: "$(copy) Copy tunnel URL", description: tunnelUrl, run: cmd("cursorRemote.copyCloudflareTunnelUrl") },
+              { label: "$(debug-stop) Stop Cloudflare tunnel", run: cmd("cursorRemote.stopCloudflareTunnel") },
+            ]
+          : [{ label: "$(cloud-upload) Start Cloudflare tunnel", run: cmd("cursorRemote.startCloudflareTunnel") }]),
+        relayConnected
+          ? { label: "$(key) Pair relay device", description: `session ${relayClient?.getSessionId()}`, run: cmd("cursorRemote.pairRelayClient") }
+          : { label: "$(plug) Connect to relay…", run: () => connectRelayFlow() },
+        { label: "Troubleshooting", kind: vscode.QuickPickItemKind.Separator },
+        { label: "$(output) Show log", run: () => outputChannel.show(true) },
+        { label: "$(debug-restart) Restart server", description: "Signs out paired devices", run: cmd("cursorRemote.restartLocalServer") },
+        ...(running ? [{ label: "$(debug-stop) Stop server", run: cmd("cursorRemote.stop") }] : []),
+      ];
+      const picked = await vscode.window.showQuickPick(items, {
+        title: "Cursor Remote",
+        placeHolder: running ? `Server on port ${wsServer?.getActualPort()} — choose an action` : "Server stopped — choose an action",
       });
-      if (!sid) return;
-      const sidTrimmed = sid.trim().toUpperCase();
-      await context.globalState.update("cursorRemote.sessionId", sidTrimmed);
-
-      const pin = await vscode.window.showInputBox({
-        title: "Cursor Remote: PIN (optional)",
-        prompt:
-          "Set a 4–6 digit PIN so mobile clients must know it to connect. Leave blank for no PIN.",
-        placeHolder: "1234",
-        password: true,
-        validateInput: (v) => {
-          const t = (v ?? "").trim();
-          if (!t) return null;
-          if (!/^\d{4,6}$/.test(t)) return "Must be 4–6 digits";
-          return null;
-        },
-      });
-      const pinToUse = pin != null && pin.trim() ? pin.trim() : undefined;
-      try {
-        await relayClient.start(sidTrimmed, pinToUse);
-        outputChannel.appendLine(
-          `[${new Date().toLocaleTimeString()}] ✅ Relay connected - Session: ${sidTrimmed}${
-            pinToUse ? " (PIN set)" : ""
-          }`
-        );
-        outputChannel.show();
-        if (statusBarManager) statusBarManager.refresh();
-        updateConnectionsView();
-        vscode.window.showInformationMessage(
-          `Cursor Remote: Connected to session ${sidTrimmed}.`
-        );
-      } catch (error) {
-        const errorMsg =
-          error instanceof Error ? error.message : "Unknown error";
-        outputChannel.appendLine(
-          `[${new Date().toLocaleTimeString()}] ⚠️ Relay connection failed: ${errorMsg}`
-        );
-        outputChannel.show();
-        vscode.window.showErrorMessage(
-          `Cursor Remote: Relay connection failed - ${errorMsg}`
-        );
-      }
+      await picked?.run?.();
     }
   );
+
+  const connectRelayFlow = async () => {
+    if (!relayClient) return;
+    const sid = await vscode.window.showInputBox({
+      title: "Cursor Remote: Connect to Relay",
+      prompt: "6-character session ID (the phone joins the same ID). Afterwards run Pair Relay Client.",
+      placeHolder: "3ZUESK",
+      value: context.globalState.get<string>("cursorRemote.sessionId") ?? "",
+      validateInput: (value) => {
+        const v = (value ?? "").trim().toUpperCase();
+        if (!v) return "Enter a session ID.";
+        if (!/^[A-Z0-9]{6}$/.test(v)) return "Use 6 letters or digits, e.g. 3ZUESK";
+        return null;
+      },
+    });
+    if (!sid) return;
+    const sidTrimmed = sid.trim().toUpperCase();
+    await context.globalState.update("cursorRemote.sessionId", sidTrimmed);
+    try {
+      await relayClient.start(sidTrimmed);
+      statusBarManager?.refresh();
+      updateConnectionsView();
+      vscode.window.showInformationMessage(
+        `Cursor Remote: waiting for relay session ${sidTrimmed}. You'll be notified when it connects; then run Pair Relay Client.`
+      );
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : "Unknown error";
+      outputChannel.appendLine(
+        `[${new Date().toLocaleTimeString()}] ⚠️ Relay connection failed: ${errorMsg}`
+      );
+      const pick = await vscode.window.showErrorMessage(
+        `Cursor Remote: relay connection failed — ${errorMsg}`,
+        "Show Log"
+      );
+      if (pick) outputChannel.show(true);
+    }
+  };
 
   context.subscriptions.push(
     startCommand,
@@ -920,27 +875,29 @@ export async function activate(context: vscode.ExtensionContext) {
     statusBarClickCommand
   );
 
-  // Initialize relay client
-  outputChannel.appendLine(
-    `[${new Date().toLocaleTimeString()}] 🔄 Creating RelayClient instance...`
+  relayClient = new RelayClient(CONFIG.RELAY_SERVER_URL, outputChannel, context.secrets);
+  context.subscriptions.push(
+    vscode.commands.registerCommand("cursorRemote.pairRelayClient", async () => {
+      try {
+        const code = await relayClient!.createMobilePairingCode();
+        await vscode.env.clipboard.writeText(code);
+        await vscode.window.showInputBox({ title: "Relay pairing code — copied to clipboard, single use, expires in 5 minutes",
+          value: code, ignoreFocusOut: true,
+          prompt: "Copy into the mobile relay pairing dialog. Keep this code private." });
+      } catch { vscode.window.showErrorMessage("Connect to an authenticated relay session before pairing."); }
+    }),
+    vscode.commands.registerCommand("cursorRemote.revokeRelaySession", async () => {
+      const pick = await vscode.window.showWarningMessage(
+        "Revoke this relay session? Relay devices will need to pair again.",
+        { modal: true },
+        "Revoke"
+      );
+      if (pick !== "Revoke") return;
+      try { await relayClient!.disconnectSession(); vscode.window.showInformationMessage("Relay session credentials revoked."); }
+      catch { vscode.window.showErrorMessage("Relay disconnect failed; inspect local connection status."); }
+    }),
   );
-  outputChannel.appendLine(
-    `[${new Date().toLocaleTimeString()}] 🔄 Relay Server URL: ${
-      CONFIG.RELAY_SERVER_URL
-    }`
-  );
-  relayClient = new RelayClient(CONFIG.RELAY_SERVER_URL, outputChannel);
-  outputChannel.appendLine(
-    `[${new Date().toLocaleTimeString()}] ✅ RelayClient instance created`
-  );
-
-  // Set relay client in WebSocket server for automatic message forwarding
-  if (wsServer && relayClient) {
-    wsServer.setRelayClient(relayClient);
-    outputChannel.appendLine(
-      `[${new Date().toLocaleTimeString()}] ✅ Relay client set in WebSocket server`
-    );
-  }
+  wsServer.setRelayClient(relayClient);
   // 릴레이 모드일 때 챗 히스토리 저장 시 relaySessionId 포함하도록 getter 설정
   if (commandHandler) {
     commandHandler.setGetRelaySessionId(
@@ -957,11 +914,14 @@ export async function activate(context: vscode.ExtensionContext) {
       if (sessionId) {
         context.globalState.update("cursorRemote.sessionId", sessionId);
       }
-      vscode.window.showInformationMessage(
-        sessionId != null
-          ? `Cursor Remote: Extension connected to session ${sessionId} via the relay server.`
-          : "Cursor Remote: Extension connected to the relay server."
-      );
+      void vscode.window
+        .showInformationMessage(
+          sessionId != null
+            ? `Cursor Remote: connected to relay session ${sessionId}. Pair the phone to finish.`
+            : "Cursor Remote: connected to the relay server. Pair the phone to finish.",
+          "Pair relay device"
+        )
+        .then((pick) => pick && vscode.commands.executeCommand("cursorRemote.pairRelayClient"));
     });
     // 복수 세션 발견 시 사용자가 선택할 수 있도록 QuickPick 표시
     relayClient.setOnSessionsDiscovered(async (sessions) => {
@@ -985,112 +945,71 @@ export async function activate(context: vscode.ExtensionContext) {
     statusBarManager.show();
   }
 
-  // Set up message forwarding: Relay Server -> Extension WebSocket
+  // Relay Server -> command handlers. Messages are marked as relay so they are not echoed back.
   relayClient.setOnMessage((message: string) => {
-    outputChannel.appendLine(
-      `[${new Date().toLocaleTimeString()}] === RELAY: message received (length: ${
-        message.length
-      }) ===`
-    );
-    // Mark message as from relay to prevent loop
+    let relayMessage: string;
     try {
       const parsed = JSON.parse(message);
       parsed.source = "relay";
-      // clientId가 없으면 'relay'로 설정
-      if (!parsed.clientId) {
-        parsed.clientId = "relay-client";
-      }
-      const relayMessage = JSON.stringify(parsed);
-
-      outputChannel.appendLine(
-        `[${new Date().toLocaleTimeString()}] 📥 Message from relay, forwarding to command handler... (type: ${
-          parsed.type
-        })`
-      );
-      outputChannel.appendLine(
-        `[${new Date().toLocaleTimeString()}] 📋 Relay message: ${relayMessage.substring(
-          0,
-          300
-        )}`
-      );
-
-      // Directly trigger the message handlers to process the command
-      // This is the same handler that processes WebSocket client messages
-      if (wsServer) {
-        outputChannel.appendLine(
-          `[${new Date().toLocaleTimeString()}] 🔄 Calling triggerMessageHandlers...`
-        );
-        wsServer.triggerMessageHandlers(relayMessage);
-        outputChannel.appendLine(
-          `[${new Date().toLocaleTimeString()}] ✅ triggerMessageHandlers called`
-        );
-      } else {
-        outputChannel.appendLine(
-          `[${new Date().toLocaleTimeString()}] ⚠️ WebSocket server is null - cannot process relay message`
-        );
-      }
-    } catch (error) {
-      // If message is not JSON, send as-is but mark source
-      const relayMessage = JSON.stringify({
-        type: "message",
-        data: message,
-        source: "relay",
-        clientId: "relay-client",
-      });
-      outputChannel.appendLine(
-        `[${new Date().toLocaleTimeString()}] 📥 Message from relay (non-JSON), forwarding to command handler...`
-      );
-      if (wsServer) {
-        wsServer.triggerMessageHandlers(relayMessage);
-      } else {
-        outputChannel.appendLine(
-          `[${new Date().toLocaleTimeString()}] ⚠️ WebSocket server is null - cannot process relay message`
-        );
-      }
+      if (!parsed.clientId) parsed.clientId = "relay-client";
+      relayMessage = JSON.stringify(parsed);
+    } catch {
+      relayMessage = JSON.stringify({ type: "message", data: message, source: "relay", clientId: "relay-client" });
     }
+    wsServer?.triggerMessageHandlers(relayMessage);
   });
 
-  // Auto start WebSocket server only (릴레이는 상태줄 클릭 시 세션 ID·PIN 입력 후 연결)
-  wsServer
-    .start()
-    .then(async () => {
-      if (statusBarManager) {
-        statusBarManager.update(false); // Client not connected yet
-      }
-      updateConnectionsView();
+  // Start servers without blocking activation: commands and the status bar are already live.
+  const serversReady = (async () => {
+    await wsServer!.releaseOrphanedPorts();
+    // Hooks port 8768 lies inside the WS fallback range; binding it first keeps ports deterministic.
+    await httpServer!.start().catch((error) => {
       outputChannel.appendLine(
-        `[${new Date().toLocaleTimeString()}] [Relay] Relay inactive. Click the 'Cursor Remote' status bar item → enter Session ID and PIN to connect`
+        `[${new Date().toLocaleTimeString()}] ❌ Failed to start hooks server: ${error instanceof Error ? error.message : error}`
       );
-    })
-    .catch((error) => {
-      const errorMsg = error instanceof Error ? error.message : "Unknown error";
-      outputChannel.appendLine(
-        `[${new Date().toLocaleTimeString()}] ❌ Failed to start WebSocket server: ${errorMsg}`
-      );
-      vscode.window.showErrorMessage(
-        `Cursor Remote: Server start failed - ${errorMsg}`
-      );
-      if (statusBarManager) {
-        statusBarManager.update(false);
-      }
     });
+    await wsServer!.start({ preferFreePreferredPort: false }).catch((error) => {
+      outputChannel.appendLine(
+        `[${new Date().toLocaleTimeString()}] ❌ Failed to start WebSocket server: ${error instanceof Error ? error.message : error}`
+      );
+    });
+    statusBarManager?.refresh();
+    updateConnectionsView();
+  })();
+  // Session control (CDP) is optional and slow to attach; never delay the servers for it.
+  void serversReady.then(() =>
+    startOrRefreshCdp("activate").catch((e) =>
+      outputChannel.appendLine(`[CDP] Start failed: ${e instanceof Error ? e.message : String(e)}`)
+    )
+  );
 
   // Keep :8766 alive — if the listener dies, live chat sync to phone breaks.
   const wsWatchdog = setInterval(() => {
+    // Orphaned extension host (Cursor quit without killing it): release ports and the Telegram bot.
+    if (process.platform !== "win32" && process.ppid === 1) {
+      clearInterval(wsWatchdog);
+      deactivate();
+      setTimeout(() => process.kill(process.pid, "SIGTERM"), 1000);
+      return;
+    }
     if (!wsServer) return;
-    void wsServer.ensureListening().then((ok) => {
-      if (ok && statusBarManager) {
-        // refresh port display if recovered
-        statusBarManager.refresh();
-      }
-    });
+    void wsServer.ensureListening({ onlyIfWanted: true }).then(() => statusBarManager?.refresh());
   }, 5000);
   context.subscriptions.push({
     dispose: () => clearInterval(wsWatchdog),
   });
 
-  if (statusBarManager) {
-    statusBarManager.show();
+  if (!context.globalState.get<boolean>("cursorRemote.welcomed")) {
+    void context.globalState.update("cursorRemote.welcomed", true);
+    void serversReady.then(async () => {
+      const pick = await vscode.window.showInformationMessage(
+        "Cursor Remote is running. Click “Remote” in the status bar any time for every action — start by pairing your phone.",
+        "Pair a device",
+        "Quick Actions"
+      );
+      if (pick === "Pair a device") await vscode.commands.executeCommand("cursorRemote.pairClient");
+      else if (pick === "Quick Actions") await vscode.commands.executeCommand("cursorRemote.statusBarClick");
+    });
   }
 
   // Auto-start Telegram bot when secrets file exists and enabled
@@ -1109,12 +1028,31 @@ export async function activate(context: vscode.ExtensionContext) {
         wsServer,
         context.extensionPath
       );
-      void telegramBridge.start(secretsPath).then((result) => {
-        if (!result.ok) {
-          outputChannel.appendLine(
-            `[${new Date().toLocaleTimeString()}] [Telegram] Auto-start skipped: ${result.error}`
-          );
-        }
+      const bridge = telegramBridge;
+      let lockNoticeShown = false;
+      const tryStart = () =>
+        bridge.start(secretsPath).then((result) => {
+          statusBarManager?.refresh();
+          updateConnectionsView();
+          if (result.ok) return true;
+          const locked = result.error?.startsWith(TELEGRAM_LOCKED_PREFIX);
+          if (!locked || !lockNoticeShown) {
+            outputChannel.appendLine(
+              `[${new Date().toLocaleTimeString()}] [Telegram] Auto-start skipped: ${result.error}${
+                locked ? " — this window takes over when that one closes" : ""
+              }`
+            );
+          }
+          if (locked) lockNoticeShown = true;
+          return !locked;
+        });
+      void tryStart().then((done) => {
+        if (done) return;
+        const retry = setInterval(() => {
+          if (telegramBridge !== bridge) return clearInterval(retry);
+          void tryStart().then((ok) => ok && clearInterval(retry));
+        }, 30_000);
+        context.subscriptions.push({ dispose: () => clearInterval(retry) });
       });
     }
   }
@@ -1139,11 +1077,6 @@ export function deactivate() {
   if (relayClient) {
     relayClient.stop();
     relayClient = null;
-  }
-
-  if (chatCapture) {
-    chatCapture.dispose();
-    chatCapture = null;
   }
 
   if (httpServer) {

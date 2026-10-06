@@ -154,11 +154,32 @@ async def main() -> None:
                 text = msg.get("text") or ""
                 if chat_id is None or not text:
                     continue
-                # Telegram hard limit ~4096
+                # Telegram hard limit ~4096. A failed send must not take the whole bot down.
                 chunk = text
                 while chunk:
                     part, chunk = chunk[:3900], chunk[3900:]
-                    await client.send_message(int(chat_id), part)
+                    try:
+                        await client.send_message(int(chat_id), part)
+                    except Exception as e:  # noqa: BLE001
+                        wait = getattr(e, "seconds", None)
+                        if isinstance(wait, int) and 0 < wait <= 60:
+                            await asyncio.sleep(wait)
+                            chunk = part + chunk
+                            continue
+                        emit({"type": "log", "message": f"send failed: {type(e).__name__}"})
+                        break
+            elif mtype == "set_commands":
+                try:
+                    from telethon.tl.functions.bots import SetBotCommandsRequest
+                    from telethon.tl.types import BotCommand, BotCommandScopeDefault
+
+                    commands = [
+                        BotCommand(command=str(c["command"]), description=str(c["description"]))
+                        for c in msg.get("commands") or []
+                    ]
+                    await client(SetBotCommandsRequest(scope=BotCommandScopeDefault(), lang_code="", commands=commands))
+                except Exception as e:  # noqa: BLE001
+                    emit({"type": "log", "message": f"set_commands failed: {type(e).__name__}"})
             else:
                 emit({"type": "log", "message": f"ignored stdin type={mtype}"})
     finally:

@@ -401,10 +401,13 @@ export class CloudflareTunnelManager {
       this.restartTimer = null;
       if (this.intentionalStop || this.isRunning()) return;
       void this.spawnAndWaitForUrl()
-        .then((url) => {
-          vscode.window.showInformationMessage(
-            `Cursor Remote: Tunnel restarted → ${url}`
+        .then(async (url) => {
+          // Quick tunnels get a new URL on restart, so the phone needs the new one.
+          const pick = await vscode.window.showInformationMessage(
+            `Cursor Remote: tunnel restarted with a new URL: ${url}`,
+            "Copy URL"
           );
+          if (pick) await vscode.env.clipboard.writeText(url);
         })
         .catch((e) => {
           this.log(

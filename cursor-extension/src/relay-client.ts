@@ -7,6 +7,7 @@ import * as vscode from "vscode";
 import * as https from "https";
 import * as http from "http";
 import { URL } from "url";
+import { randomUUID } from "crypto";
 
 export interface RelayMessage {
   type: string;
@@ -43,6 +44,11 @@ export class RelayClient {
   private targetPin: string | null = null;
   /** 409 PC_IN_USE 시 재시도 안 함 */
   private pcInUse: boolean = false;
+  private capabilityToken: string | null = null;
+  private connecting = false;
+  private connectAttempts = 0;
+  private nextConnectAt = 0;
+  private polling = false;
   private lastSessionDiscoveryTime: number = 0;
   private lastPollHeartbeatTime: number = 0;
   private lastNoSessionHeartbeatTime: number = 0; // 세션 없을 때 폴링 동작 확인용
@@ -53,9 +59,9 @@ export class RelayClient {
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private readonly HEARTBEAT_INTERVAL_MS = 30 * 1000; // 30초마다 heartbeat
 
-  constructor(relayServerUrl: string, outputChannel: vscode.OutputChannel) {
+  constructor(relayServerUrl: string, outputChannel: vscode.OutputChannel, private secrets?: vscode.SecretStorage) {
     this.relayServerUrl = relayServerUrl;
-    this.deviceId = `pc-${Date.now()}`;
+    this.deviceId = `pc-${randomUUID()}`;
     this.outputChannel = outputChannel;
   }
 
@@ -117,6 +123,9 @@ export class RelayClient {
       this.sessionId = null;
       this.isConnected = false;
     }
+    this.pcInUse = false;
+    this.connectAttempts = 0;
+    this.nextConnectAt = 0;
     this.targetPin =
       pin != null && typeof pin === "string" && pin.trim() ? pin.trim() : null;
     await this.connectToSession(trimmed, this.targetPin ?? undefined);
@@ -136,6 +145,10 @@ export class RelayClient {
     this.targetPin =
       pin != null && typeof pin === "string" && pin.trim() ? pin.trim() : null;
     this.pcInUse = false;
+    this.connectAttempts = 0;
+    this.nextConnectAt = 0;
+    this.sessionId = null;
+    this.isConnected = false;
     this.log("Starting relay client...");
     this.log(`Relay Server: ${this.relayServerUrl}`);
     this.log(`Device ID: ${this.deviceId}`);
@@ -198,9 +211,12 @@ export class RelayClient {
       clearInterval(this.pollInterval);
     }
     this.pollInterval = setInterval(() => {
-      this.pollMessages().catch((err) => {
-        this.logError("pollMessages threw", err);
-      });
+      // A slow relay must not stack requests.
+      if (this.polling) return;
+      this.polling = true;
+      this.pollMessages()
+        .catch((err) => this.logError("pollMessages threw", err))
+        .finally(() => { this.polling = false; });
     }, this.POLL_INTERVAL);
     this.log(
       "⏱️ Poll interval started (every 2s) - waiting for session discovery / messages"
@@ -252,11 +268,9 @@ export class RelayClient {
       return;
     }
 
-    // If session exists, poll for messages
-    if (!this.sessionId || !this.isConnected) {
-      this.log(
-        `⚠️ Polling skipped: sessionId=${this.sessionId}, isConnected=${this.isConnected}`
-      );
+    // A failed request drops isConnected; re-authenticate with the saved credential (with backoff).
+    if (!this.isConnected) {
+      await this.connectToSession(this.sessionId);
       return;
     }
 
@@ -306,13 +320,17 @@ export class RelayClient {
         if (this.onMessageCallback) {
           // 페이로드: msg.data가 있으면 그대로, 없으면 전체 msg (하위 호환)
           // 0.3.3 동작: 유니캐스트 없이 브로드캐스트만 사용
-          const payload =
-            msg.data !== undefined && msg.data !== null ? msg.data : msg;
-          const messageStr =
-            typeof payload === "string" ? payload : JSON.stringify(payload);
-          this.log(
-            `📤 Calling onMessageCallback with: ${messageStr.substring(0, 200)}`
-          );
+          const rawPayload = msg.data !== undefined && msg.data !== null ? msg.data : msg;
+          const payload = typeof rawPayload === "string" ? JSON.parse(rawPayload) : rawPayload;
+          if (!payload || typeof payload !== "object" || Array.isArray(payload)) continue;
+          if (!Number.isSafeInteger(payload.deadline) || payload.deadline <= Date.now()) {
+            this.logError("Expired or unversioned relay command rejected");
+            continue;
+          }
+          payload.clientId = `relay:${this.sessionId}:${msg.senderDeviceId || "unknown"}`;
+          payload.senderDeviceId = msg.senderDeviceId;
+          payload.source = "relay";
+          const messageStr = JSON.stringify(payload);
           this.onMessageCallback(messageStr);
           this.log(`✅ onMessageCallback completed`);
         } else {
@@ -418,76 +436,75 @@ export class RelayClient {
    * Connect to a relay session (404/409 구분을 위해 statusCode 사용)
    * pin: PC가 설정하면 모바일은 이 PIN을 알아야만 접속 가능 (세션 ID만으로 타인 접속 방지)
    */
-  private async connectToSession(sid: string, pin?: string): Promise<void> {
-    this.log(`🔗 Connecting to session ${sid}...`);
+  private credentialKey(sid: string): string {
+    return `cursorRemote.relay.v2:${this.relayServerUrl}:${sid}`;
+  }
 
+  async createMobilePairingCode(): Promise<string> {
+    if (!this.isConnected || !this.sessionId) throw new Error("Connect the extension to a relay session first");
+    const result = await this.httpRequestWithStatus(`${this.relayServerUrl}/api/pair`, "POST", { sessionId: this.sessionId });
+    if (result.statusCode !== 200 || typeof result.body?.data?.pairingCode !== "string") throw new Error("Unable to create relay pairing code");
+    return result.body.data.pairingCode;
+  }
+
+  async disconnectSession(): Promise<void> {
+    if (!this.sessionId || !this.capabilityToken) return;
+    const sid = this.sessionId;
+    const result = await this.httpRequestWithStatus(`${this.relayServerUrl}/api/disconnect`, "POST", { sessionId: sid });
+    if (result.statusCode !== 200) throw new Error("Relay disconnect failed; credentials may already be revoked");
+    await this.secrets?.delete(this.credentialKey(sid));
+    this.capabilityToken = null;
+    this.stop();
+  }
+
+  private async connectToSession(sid: string, _pin?: string): Promise<void> {
+    if (this.connecting || this.pcInUse || Date.now() < this.nextConnectAt) return;
+    this.connecting = true;
+    // Temporary failures retry with backoff (4s … 60s); explicit rejections below stop for good.
+    const retryLater = () => {
+      this.connectAttempts++;
+      this.nextConnectAt = Date.now() + Math.min(60_000, 2_000 * 2 ** this.connectAttempts);
+    };
     try {
-      const body: Record<string, string> = {
-        sessionId: sid,
-        deviceId: this.deviceId,
-        deviceType: "pc",
-      };
-      if (pin != null && pin.trim()) {
-        body.pin = pin.trim();
+      this.capabilityToken = null;
+      const saved = await this.secrets?.get(this.credentialKey(sid));
+      if (saved) {
+        const credential = JSON.parse(saved);
+        this.capabilityToken = credential.token;
+        this.deviceId = credential.deviceId;
       }
-      const result = await this.httpRequestWithStatus(
-        `${this.relayServerUrl}/api/connect`,
-        "POST",
-        body
-      );
-
-      if (result.statusCode === 409) {
-        this.pcInUse = true;
-        const msg =
-          (result.body as any)?.error ?? "Session already in use by another PC";
-        this.logError(
-          "Session ID already in use (another PC is connected)",
-          msg
-        );
-        this.log(
-          "💡 Close the other PC window, or create a new session on mobile and enter that session ID."
-        );
+      const endpoint = this.capabilityToken ? "connect" : "session";
+      const result = await this.httpRequestWithStatus(`${this.relayServerUrl}/api/${endpoint}`, "POST", {
+        sessionId: sid, deviceId: this.deviceId, deviceType: "pc",
+      });
+      const data = result.body?.data;
+      if (![200, 201].includes(result.statusCode) || !result.body?.success || result.body.protocolVersion !== 2) {
+        this.isConnected = false;
+        if ([400, 401, 403, 409].includes(result.statusCode)) this.pcInUse = true;
+        else retryLater();
+        this.logError(`Relay connection rejected (HTTP ${result.statusCode}). Existing or legacy sessions require their saved credential or a new session ID.`);
         return;
       }
-
-      if (result.statusCode === 404) {
-        this.log(
-          "Session not found. Create and connect the session on mobile first, then connect with the same session ID."
-        );
-        return;
-      }
-
-      if (
-        result.statusCode >= 200 &&
-        result.statusCode < 300 &&
-        result.body?.success
-      ) {
-        this.sessionId = sid;
-        this.isConnected = true;
-        this.startHeartbeat();
-        this.log(
-          `✅ Extension connected to session ${this.sessionId} via the relay server.`
-        );
-        this.log(`💡 Connect from mobile using session ID ${this.sessionId}.`);
-        if (this.onSessionConnectedCallback) {
-          this.onSessionConnectedCallback();
-        }
+      if (typeof data?.token === "string") this.capabilityToken = data.token;
+      if (!this.capabilityToken) throw new Error("Relay did not provide a v2 credential");
+      await this.secrets?.store(this.credentialKey(sid), JSON.stringify({ token: this.capabilityToken, deviceId: this.deviceId }));
+      const reconnected = this.sessionId === sid;
+      this.sessionId = sid;
+      this.isConnected = true;
+      this.connectAttempts = 0;
+      this.nextConnectAt = 0;
+      this.startHeartbeat();
+      if (reconnected) {
+        this.log(`Relay session ${sid} reconnected.`);
       } else {
-        const errMsg =
-          (result.body as any)?.error ??
-          (typeof result.body === "object" && result.body !== null
-            ? JSON.stringify(result.body)
-            : String(result.statusCode));
-        this.logError(`Failed to connect: ${errMsg}`);
-        if (result.statusCode >= 500 && result.body) {
-          this.logError(
-            `[Relay] Server 500 response: ${JSON.stringify(result.body)}`
-          );
-        }
+        this.log(`Authenticated relay session ${sid}. Use Cursor Remote: Pair Relay Client for mobile access.`);
+        this.onSessionConnectedCallback?.();
       }
-    } catch (error) {
-      this.logError("Error connecting to session", error);
-    }
+    } catch {
+      this.isConnected = false;
+      retryLater();
+      this.logError("Relay connection failed");
+    } finally { this.connecting = false; }
   }
 
   /**
@@ -601,6 +618,9 @@ export class RelayClient {
     return new Promise((resolve, reject) => {
       const urlObj = new URL(url);
       const isHttps = urlObj.protocol === "https:";
+      if (!isHttps && !["localhost", "127.0.0.1", "[::1]"].includes(urlObj.hostname)) {
+        resolve({ statusCode: 0, body: null }); return;
+      }
       const httpModule = isHttps ? https : http;
 
       const options = {
@@ -610,6 +630,7 @@ export class RelayClient {
         method: method,
         headers: {
           "Content-Type": "application/json",
+          ...(this.capabilityToken ? { Authorization: `Bearer ${this.capabilityToken}` } : {}),
         },
       };
 
@@ -636,6 +657,7 @@ export class RelayClient {
         });
       });
 
+      req.setTimeout(15_000, () => req.destroy(new Error("Relay request timeout")));
       req.on("error", (error) => {
         this.logError("Request error", error);
         resolve({ statusCode: 0, body: null });
@@ -651,59 +673,11 @@ export class RelayClient {
   /**
    * HTTP request helper (using Node.js http/https modules)
    */
-  private async httpRequest(
-    url: string,
-    method: "GET" | "POST" = "GET",
-    body?: any
-  ): Promise<any> {
-    return new Promise((resolve, reject) => {
-      const urlObj = new URL(url);
-      const isHttps = urlObj.protocol === "https:";
-      const httpModule = isHttps ? https : http;
-
-      const options = {
-        hostname: urlObj.hostname,
-        port: urlObj.port || (isHttps ? 443 : 80),
-        path: urlObj.pathname + urlObj.search,
-        method: method,
-        headers: {
-          "Content-Type": "application/json",
-        },
-      };
-
-      const req = httpModule.request(options, (res) => {
-        let data = "";
-
-        res.on("data", (chunk) => {
-          data += chunk;
-        });
-
-        res.on("end", () => {
-          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-            try {
-              const parsed = JSON.parse(data);
-              resolve(parsed);
-            } catch (error) {
-              this.logError("Failed to parse response", error);
-              resolve(null);
-            }
-          } else {
-            this.logError(`HTTP ${res.statusCode}: ${data}`);
-            resolve(null);
-          }
-        });
-      });
-
-      req.on("error", (error) => {
-        this.logError("Request error", error);
-        resolve(null);
-      });
-
-      if (body && method === "POST") {
-        req.write(JSON.stringify(body));
-      }
-
-      req.end();
-    });
+  private async httpRequest(url: string, method: "GET" | "POST" = "GET", body?: any): Promise<any> {
+    const result = await this.httpRequestWithStatus(url, method, body);
+    if (result.statusCode >= 200 && result.statusCode < 300) return result.body;
+    this.isConnected = false;
+    this.logError(`Relay request failed (HTTP ${result.statusCode}); reconnect required`);
+    return null;
   }
 }

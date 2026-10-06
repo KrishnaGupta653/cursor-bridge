@@ -385,7 +385,12 @@ export class CommandHandler {
       const sessionId =
         cdpSessionId ||
         (clientId && clientId.startsWith("cursor-") ? clientId : undefined);
-      const result = await this.cdpManager.sendAgentPrompt(text, sessionId);
+      if (!cdpSessionId) throw new Error("Explicit CDP sessionId required");
+      const result = await this.cdpManager.sendAgentPrompt(
+        text,
+        sessionId,
+        clientId ? { clientId, targetDeviceId: senderDeviceId } : undefined
+      );
       if (!result.ok) {
         throw new Error(result.error || "Failed to send prompt via CDP");
       }

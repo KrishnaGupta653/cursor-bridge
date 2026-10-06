@@ -6,6 +6,7 @@ import { CommandHandler } from "./command-handler";
 import { WebSocketServer } from "./websocket-server";
 import { CommandMessage, CommandResult } from "./types";
 import * as vscode from "vscode";
+import { remoteCommandError } from "./command-policy";
 
 export class CommandRouter {
   private commandHandler: CommandHandler;
@@ -69,6 +70,8 @@ export class CommandRouter {
 
     const startedAt = Date.now();
     try {
+      const policyError = remoteCommandError(command);
+      if (policyError) throw new Error(policyError);
       let result: CommandResult | null = null;
 
       switch (command.type) {
@@ -101,19 +104,19 @@ export class CommandRouter {
           break;
         case "cdp_status":
         case "get_cdp_status":
-          result = await this.handleCdpStatus();
+          result = await this.handleCdpStatus(command);
           break;
         case "cdp_targets":
         case "get_cdp_targets":
-          result = await this.handleCdpTargets();
+          result = await this.handleCdpTargets(command);
           break;
         case "get_sessions":
         case "sessions":
-          result = await this.handleGetSessions();
+          result = await this.handleGetSessions(command);
           break;
         case "get_agent_history":
         case "agent_history":
-          result = await this.handleGetAgentHistory();
+          result = await this.handleGetAgentHistory(command);
           break;
         case "open_agent_history":
           result = await this.handleOpenAgentHistory(command);
@@ -145,7 +148,7 @@ export class CommandRouter {
           this.log(errorMsg);
           console.warn("Unknown command type:", command.type);
           this.wsServer.send(
-            JSON.stringify({
+            this.serializeReply(command, {
               id: commandId,
               type: "command_result",
               success: false,
@@ -176,7 +179,7 @@ export class CommandRouter {
             : Date.now() - startedAt;
         this.log(`Command ${command.type} failed: ${fallbackError}`);
         this.wsServer.send(
-          JSON.stringify({
+          this.serializeReply(command, {
             id: commandId,
             type: "command_result",
             success: false,
@@ -204,7 +207,7 @@ export class CommandRouter {
       );
       this.log(successMsg);
       this.wsServer.send(
-        JSON.stringify({
+        this.serializeReply(command, {
           id: commandId,
           type: "command_result",
           success: true,
@@ -220,7 +223,7 @@ export class CommandRouter {
       this.logError("Error handling command", error);
       console.error("Error handling command:", error);
       this.wsServer.send(
-        JSON.stringify({
+        this.serializeReply(command, {
           id: commandId,
           type: "command_result",
           success: false,
@@ -325,7 +328,8 @@ export class CommandRouter {
           newSession,
           agentMode,
           command.senderDeviceId,
-          agentBackend
+          agentBackend,
+          command.sessionId
         );
         return {
           success: true,
@@ -437,30 +441,35 @@ export class CommandRouter {
     return result;
   }
 
-  private async handleCdpStatus(): Promise<CommandResult> {
+  private serializeReply(command: CommandMessage, payload: object): string {
+    return JSON.stringify({ ...payload, clientId: command.clientId,
+      targetDeviceId: command.senderDeviceId, correlationId: command.id });
+  }
+
+  private async handleCdpStatus(command: CommandMessage): Promise<CommandResult> {
     const status = await this.commandHandler.getCdpStatus();
-    this.wsServer.send(JSON.stringify(status));
+    this.wsServer.send(this.serializeReply(command, status));
     return { success: true, data: status };
   }
 
-  private async handleCdpTargets(): Promise<CommandResult> {
+  private async handleCdpTargets(command: CommandMessage): Promise<CommandResult> {
     const targets = await this.commandHandler.refreshCdpTargets();
-    this.wsServer.send(JSON.stringify({ type: "cdp_targets", targets }));
+    this.wsServer.send(this.serializeReply(command, { type: "cdp_targets", targets }));
     return { success: true, data: { targets } };
   }
 
-  private async handleGetSessions(): Promise<CommandResult> {
+  private async handleGetSessions(command: CommandMessage): Promise<CommandResult> {
     await this.commandHandler.refreshCdpTargets();
     const sessions = await this.commandHandler.listCdpSessions();
-    this.wsServer.send(JSON.stringify({ type: "sessions", sessions }));
+    this.wsServer.send(this.serializeReply(command, { type: "sessions", sessions }));
     const history = this.commandHandler.getCachedAgentHistory();
-    this.wsServer.send(JSON.stringify({ type: "agent_history", ...history }));
+    this.wsServer.send(this.serializeReply(command, { type: "agent_history", ...history }));
     return { success: true, data: { sessions, history } };
   }
 
-  private async handleGetAgentHistory(): Promise<CommandResult> {
+  private async handleGetAgentHistory(command: CommandMessage): Promise<CommandResult> {
     const history = await this.commandHandler.getAgentHistory();
-    this.wsServer.send(JSON.stringify({ type: "agent_history", ...history }));
+    this.wsServer.send(this.serializeReply(command, { type: "agent_history", ...history }));
     return { success: true, data: history };
   }
 
@@ -489,7 +498,7 @@ export class CommandRouter {
     const state = await this.commandHandler.getAgentState(sessionId);
     if (state) {
       this.wsServer.send(
-        JSON.stringify({
+        this.serializeReply(command, {
           type: "agent_state",
           sessionId: state.id,
           state: state.state,
@@ -524,7 +533,7 @@ export class CommandRouter {
       };
     }
     this.wsServer.send(
-      JSON.stringify({
+      this.serializeReply(command, {
         type: "agent_state",
         sessionId: state.id,
         state: state.state,
@@ -552,7 +561,7 @@ export class CommandRouter {
     const state = await this.commandHandler.getAgentState(command.sessionId);
     const plan = state?.plan || { title: "", steps: [], available: false };
     this.wsServer.send(
-      JSON.stringify({
+      this.serializeReply(command, {
         type: "agent_plan",
         sessionId: state?.id || command.sessionId || null,
         plan,
