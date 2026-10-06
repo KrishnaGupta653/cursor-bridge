@@ -480,6 +480,11 @@ export class RelayClient {
       const data = result.body?.data;
       if (![200, 201].includes(result.statusCode) || !result.body?.success || result.body.protocolVersion !== 2) {
         this.isConnected = false;
+        if (result.statusCode === 0) {
+          retryLater();
+          this.logError(`Could not reach the relay server ${this.relayServerUrl} (network, proxy or certificate problem); retrying.`);
+          return;
+        }
         if ([400, 401, 403, 409].includes(result.statusCode)) this.pcInUse = true;
         else retryLater();
         this.logError(`Relay connection rejected (HTTP ${result.statusCode}). Existing or legacy sessions require their saved credential or a new session ID.`);

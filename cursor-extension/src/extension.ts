@@ -146,6 +146,13 @@ function allowedOrigins(): string[] {
     .get<string[]>("allowedWebSocketOrigins", ["http://localhost:8080", "http://127.0.0.1:8080"]);
 }
 
+function relayServerUrl(): string {
+  const v = (vscode.workspace.getConfiguration("cursorRemote").get<string>("relayServerUrl") ?? "")
+    .trim()
+    .replace(/\/+$/, "");
+  return /^https:\/\/[^\s/]+/i.test(v) ? v : CONFIG.RELAY_SERVER_URL;
+}
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -165,7 +172,7 @@ function updateConnectionsView() {
     originAllowed: !lan || allowedOrigins().includes(`http://${lan}:8080`),
     relaySessionId: relayClient?.isConnectedToSession() ? relayClient.getSessionId() : null,
     relayStoreLabel: lastRelayStoreLabel,
-    relayServerUrl: CONFIG.RELAY_SERVER_URL,
+    relayServerUrl: relayServerUrl(),
     localClientIds: wsServer ? wsServer.getClientIds() : [],
     tunnelWssUrl: cloudflareTunnel?.getWssUrl() ?? null,
     telegramRunning: telegramBridge?.isRunning() ?? false,
@@ -493,7 +500,7 @@ export async function activate(context: vscode.ExtensionContext) {
       }
       const sid = await vscode.window.showInputBox({
         title: "Cursor Remote: Relay Session ID",
-        prompt: "Enter the 6-character session ID from the mobile app (e.g. 3ZUESK)",
+        prompt: "Make up a new 6-character ID to create a session, or reuse one you created before. Enter the same ID in the app.",
         placeHolder: "3ZUESK",
         validateInput: (value) => {
           const v = value?.trim().toUpperCase() ?? "";
@@ -757,7 +764,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
       // Relay store label is informational only: render first, never block on the network.
       if (relayClient?.isConnectedToSession()) {
-        fetch(`${CONFIG.RELAY_SERVER_URL}/api/store`, { signal: AbortSignal.timeout(3000) })
+        fetch(`${relayServerUrl()}/api/store`, { signal: AbortSignal.timeout(3000) })
           .then((res) => res.json() as Promise<{ success?: boolean; data?: { storeLabel?: string } }>)
           .then((json) => {
             lastRelayStoreLabel = json?.success && json.data?.storeLabel ? json.data.storeLabel : null;
@@ -875,7 +882,7 @@ export async function activate(context: vscode.ExtensionContext) {
     statusBarClickCommand
   );
 
-  relayClient = new RelayClient(CONFIG.RELAY_SERVER_URL, outputChannel, context.secrets);
+  relayClient = new RelayClient(relayServerUrl(), outputChannel, context.secrets);
   context.subscriptions.push(
     vscode.commands.registerCommand("cursorRemote.pairRelayClient", async () => {
       try {

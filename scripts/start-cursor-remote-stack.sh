@@ -113,7 +113,7 @@ if [[ "$NO_QUIT" -eq 0 ]]; then
   osascript -e 'quit app "Cursor"' >/dev/null 2>&1 || true
   # wait until old process is gone (max ~15s)
   for _ in $(seq 1 30); do
-    if ! ps -axo comm= | grep -q '/Cursor.app/Contents/MacOS/Cursor$'; then
+    if ! ps -axo comm= | grep '/Cursor.app/Contents/MacOS/Cursor$' >/dev/null; then
       break
     fi
     sleep 0.5

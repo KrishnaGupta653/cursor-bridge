@@ -15,7 +15,10 @@ import 'theme/app_theme.dart';
 import 'widgets/cr_ui.dart';
 
 // Relay server URL (public default; override requires rebuild)
-const String kRelayServerUrl = 'https://relay.jaloveeye.com';
+const String kRelayServerUrl = String.fromEnvironment(
+  'RELAY_URL',
+  defaultValue: 'https://relay.jaloveeye.com',
+);
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();

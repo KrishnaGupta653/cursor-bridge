@@ -23,7 +23,7 @@ section() { printf '\n%s\n' "$*"; }
 LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
 
 section "Cursor"
-if ps -axo comm= | grep -q '/Cursor.app/Contents/MacOS/Cursor$'; then pass "Cursor is running"; else fail "Cursor is not running (run ./scripts/start-cursor-remote-stack.sh)"; fi
+if ps -axo comm= | grep '/Cursor.app/Contents/MacOS/Cursor$' >/dev/null; then pass "Cursor is running"; else fail "Cursor is not running (run ./scripts/start-cursor-remote-stack.sh)"; fi
 EXT="$(ls -d "$HOME"/.cursor/extensions/jaloveeye.cursor-remote-extension-* 2>/dev/null | tail -1)"
 if [[ -n "$EXT" ]]; then
   pass "Extension installed: $(basename "$EXT") (built $(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$EXT/out/extension.js" 2>/dev/null || echo '?'))"
@@ -85,7 +85,7 @@ sys.exit(0 if sys.argv[2] in origins else 1)
 PY
     pass "Origin http://$LAN_IP:$WEB_PORT is allowed (phone on same Wi-Fi)"
   else
-    fail "Add \"http://$LAN_IP:$WEB_PORT\" to cursorRemote.allowedWebSocketOrigins, then Reload Window"
+    fail "Add \"http://$LAN_IP:$WEB_PORT\" to cursorRemote.allowedWebSocketOrigins (or run Pair Client → Allow it); applies immediately"
   fi
 else
   warn "No LAN IP found (Wi-Fi off?) — phone access unavailable"

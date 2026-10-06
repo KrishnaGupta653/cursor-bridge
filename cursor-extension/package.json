@@ -38,6 +38,11 @@
     "configuration": {
       "title": "Cursor Remote",
       "properties": {
+        "cursorRemote.relayServerUrl": {
+          "type": "string",
+          "default": "",
+          "description": "HTTPS address of your relay server (e.g. https://my-relay.vercel.app). Empty uses the built-in default. Reload the window after changing."
+        },
         "cursorRemote.enableCdp": {
           "type": "boolean",
           "default": false,

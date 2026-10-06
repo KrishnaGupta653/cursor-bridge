@@ -114,19 +114,7 @@ class _AgentSessionScreenState extends State<AgentSessionScreen>
         final body = Column(
           children: [
             if (pending != null)
-              _PermissionBanner(
-                request: pending,
-                onApprove: () => widget.sendCommand(
-                  'approve_action',
-                  sessionId: widget.sessionId,
-                  requestId: pending.id,
-                ),
-                onReject: () => widget.sendCommand(
-                  'reject_action',
-                  sessionId: widget.sessionId,
-                  requestId: pending.id,
-                ),
-              ),
+              _PermissionBanner(request: pending),
             Expanded(
               child: TabBarView(
                 controller: _tabs,
@@ -304,14 +292,8 @@ class _AgentSessionScreenState extends State<AgentSessionScreen>
 
 class _PermissionBanner extends StatelessWidget {
   final CdpPermissionRequest request;
-  final VoidCallback onApprove;
-  final VoidCallback onReject;
 
-  const _PermissionBanner({
-    required this.request,
-    required this.onApprove,
-    required this.onReject,
-  });
+  const _PermissionBanner({required this.request});
 
   @override
   Widget build(BuildContext context) {
@@ -347,30 +329,10 @@ class _PermissionBanner extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: onReject,
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: Colors.white,
-                        minimumSize: const Size.fromHeight(48),
-                      ),
-                      child: const Text('Reject'),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: FilledButton(
-                      onPressed: onApprove,
-                      style: FilledButton.styleFrom(
-                        backgroundColor: const Color(0xFF2E7D32),
-                        minimumSize: const Size.fromHeight(48),
-                      ),
-                      child: const Text('Approve'),
-                    ),
-                  ),
-                ],
+              const Text(
+                'Approve or reject it in Cursor on your computer — '
+                'remote approval is disabled for safety.',
+                style: TextStyle(color: Color(0xFFFFCC80), fontSize: 13),
               ),
             ],
           ),
