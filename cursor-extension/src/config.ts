@@ -10,7 +10,7 @@ export const CONFIG = {
   HTTP_PORT: 8768,
 
   // Relay server URL
-  RELAY_SERVER_URL: process.env.RELAY_SERVER_URL || "https://relay.jaloveeye.com",
+  RELAY_SERVER_URL: process.env.RELAY_SERVER_URL || "https://cursor-remote-rela.vercel.app",
 
   // CDP (Existing Cursor Agent) — localhost only
   ENABLE_CDP:
