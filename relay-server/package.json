@@ -10,7 +10,10 @@
     "deploy": "vercel --prod",
     "type-check": "tsc --noEmit",
     "validate:command-event": "node scripts/validate-command-event-example.mjs",
-    "test:command-policy": "node --experimental-strip-types scripts/test-command-policy.ts"
+    "test:command-policy": "node --experimental-strip-types scripts/test-command-policy.ts",
+    "test:security": "tsc --noEmit false --declaration false --outDir .test-dist && node --test test/security.test.mjs",
+    "test": "npm run test:command-policy && npm run test:security",
+    "test:redis": "tsc --noEmit false --declaration false --outDir .test-dist && node --test test/redis-integration.test.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

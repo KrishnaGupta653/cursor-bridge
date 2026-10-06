@@ -1,3 +1,5 @@
+import { SecurityError, type Principal } from "../lib/relay-security.js";
+import { withRelayAuth, relaySecurity, securityFailure } from "../lib/relay-auth.js";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import {
   sendMessage,
@@ -162,7 +164,7 @@ async function appendCommandResultEventIfMatched(
   await appendCommandEvent(sessionId, event);
 }
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+async function handler(req: VercelRequest, res: VercelResponse, principal: Principal) {
   // CORS 헤더 설정
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -262,6 +264,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // targetDeviceId 결정 (body에서 직접 전달받거나 data에서 추출)
     const targetDeviceId = providedTargetDeviceId || (data?.targetDeviceId as string | undefined);
+    if (targetDeviceId && (typeof targetDeviceId !== "string" ||
+        (deviceType === "pc" ? !session.mobileDeviceIds?.includes(targetDeviceId) : targetDeviceId !== session.pcDeviceId))) {
+      throw new SecurityError(403, "TARGET_MEMBERSHIP_REQUIRED");
+    }
 
     // 실행 결과(command_result)를 approval 흐름과 연결
     if (deviceType === "pc" && type === "command_result") {
@@ -274,7 +280,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // 정책 평가 (Day1: execute_command 기준 게이팅)
     const commandRaw = extractCommandRaw(type, data || {});
-    const policy = evaluateCommandPolicy({ messageType: type, commandRaw });
+    const policy = evaluateCommandPolicy({ messageType: type, commandRaw, data, deviceType });
     const approvalId =
       policy.decision === "approval_required" ? generateApprovalId() : undefined;
 
@@ -341,7 +347,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       } catch (error) {
         console.error("Failed to persist command event:", error);
       }
-      console.info("[command_event]", JSON.stringify(commandEvent));
+      console.info("[command_event]", commandEvent.event_id, policy.decision);
     }
 
     if (policy.decision === "deny") {
@@ -415,6 +421,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(403).json(response);
     }
 
+    if (principal.role === "mobile" && !await relaySecurity.claimCommand(principal, data.id, data.deadline)) {
+      return res.status(409).json({ success: false, errorCode: "DUPLICATE_COMMAND", error: "Command already accepted", timestamp: Date.now() });
+    }
+
     // 메시지 생성
     const message: RelayMessage = {
       id: generateMessageId(),
@@ -450,12 +460,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     return res.status(200).json(response);
   } catch (error) {
-    console.error("Send API error:", error);
+    if (error instanceof SecurityError) return securityFailure(res, error);
+    console.error("Send API operation failed");
     const response: ApiResponse = {
       success: false,
-      error: error instanceof Error ? error.message : "Internal server error",
+      error: "Relay operation failed",
       timestamp: Date.now(),
     };
     return res.status(500).json(response);
   }
 }
+
+export default withRelayAuth(handler);

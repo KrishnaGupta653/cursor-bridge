@@ -1,3 +1,4 @@
+import { withRelayAuth } from "../lib/relay-auth.js";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import {
   getSession,
@@ -70,7 +71,7 @@ function makeResolveEvent(args: {
   };
 }
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
@@ -193,3 +194,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(500).json(response);
   }
 }
+
+export default withRelayAuth(async (_req, res) => res.status(403).json({
+  success: false, errorCode: "REMOTE_APPROVAL_DISABLED", error: "Exact action-bound approvals are not yet available"
+}));

@@ -1,5 +1,13 @@
 # Cursor Remote Relay Server
 
+> **Protocol v2 migration:** all session data/control endpoints now require scoped
+> Bearer credentials. Create the session in Cursor, then use Pair Relay Client.
+> PIN-only connections and public discovery are disabled. Supabase users must
+> apply `supabase/security.sql`; Redis remains supported without a SQL migration.
+> Read [the migration guide](../SECURITY_MIGRATION.md#relay-protocol-v2).
+> Older API examples below describe the legacy protocol and are not sufficient
+> to authenticate with this version. Nothing has been deployed automatically.
+
 Vercel에 배포하여 사용하는 Cursor Remote 중계 서버입니다.
 
 로컬 네트워크 제한 없이 인터넷을 통해 모바일 앱과 PC를 연결할 수 있습니다.
@@ -47,7 +55,7 @@ Vercel에 배포하여 사용하는 Cursor Remote 중계 서버입니다.
 | `/api/command-approvals?sessionId=XXX` | GET | 대기 중인 커맨드 승인 요청 조회 |
 | `/api/resolve-command-approval` | POST | 승인 요청 approve/reject 처리 |
 
-**연결 끊김 판단**: PC는 주기적으로 `/api/heartbeat`를 호출해 `pcLastSeenAt`을 갱신한다. **2분간 heartbeat가 없으면** 해당 PC는 연결 끊김으로 간주하고, 같은 세션 ID로 다른 PC가 접속할 수 있다. "접속 끊을게요" API 없이도 안전하게 세션 해제가 가능하다.
+**Connection ownership (v2):** heartbeat staleness does not transfer ownership. Reconnect requires the saved capability. Use authenticated `/api/disconnect` to revoke credentials.
 
 ## 스토어 선택 (Supabase / Redis)
 

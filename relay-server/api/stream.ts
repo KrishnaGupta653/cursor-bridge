@@ -1,3 +1,4 @@
+import { withRelayAuth, authorize } from "../lib/relay-auth.js";
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { receiveMessages, getSession, getDeviceSession, hasMessages } from '../lib/store.js';
 import { DeviceType, RelayMessage } from '../lib/types.js';
@@ -7,7 +8,7 @@ function formatSSE(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-export default async function handler(
+async function handler(
   req: VercelRequest,
   res: VercelResponse
 ) {
@@ -81,7 +82,8 @@ export default async function handler(
   try {
     while (Date.now() - startTime < maxDuration) {
       // 메시지 확인 및 전송
-      const messages = await receiveMessages(sessionId, deviceType as DeviceType, 10);
+      await authorize(req);
+      const messages = await receiveMessages(sessionId, deviceType as DeviceType, 10, deviceId as string);
       
       if (messages.length > 0) {
         for (const message of messages) {
@@ -103,12 +105,14 @@ export default async function handler(
     }));
     
   } catch (error) {
-    console.error('Stream error:', error);
+    console.error("Relay operation failed");
     res.write(formatSSE('error', { 
-      message: error instanceof Error ? error.message : 'Stream error',
+      message: "Relay operation failed",
       timestamp: Date.now()
     }));
   } finally {
     res.end();
   }
 }
+
+export default withRelayAuth(handler);

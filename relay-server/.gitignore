@@ -24,3 +24,5 @@ Thumbs.db
 npm-debug.log*
 .vercel
 .env*.local
+
+.test-dist/

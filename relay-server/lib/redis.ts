@@ -528,3 +528,21 @@ export async function resolveCommandApproval(
 }
 
 export { redis };
+
+/** Atomic security operations; never use destructive queue helpers for credentials. */
+export async function securityOperation(action: string, key: string, value: unknown, ttl: number): Promise<any> {
+  const redisKey = `security:v2:${key}`;
+  const client = getRedis();
+  if (action === "get") return client.get(redisKey);
+  if (action === "put") return (await client.set(redisKey, value, { nx: true, ex: ttl })) === "OK";
+  if (action === "delete") { await client.del(redisKey); return null; }
+  if (action === "take") {
+    const value = await client.eval<[], string | null>(
+      "local v = redis.call('GET', KEYS[1]); redis.call('DEL', KEYS[1]); return v", [redisKey], []);
+    return typeof value === "string" ? JSON.parse(value) : value;
+  }
+  if (action === "increment") return client.eval<[number], number>(
+    "local n = redis.call('INCR', KEYS[1]); if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]); end; return n",
+    [redisKey], [ttl]);
+  throw new Error("Unsupported security operation");
+}

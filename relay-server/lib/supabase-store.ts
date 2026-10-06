@@ -525,3 +525,13 @@ export async function resolveCommandApproval(
   if (error) throw new Error(`resolveCommandApproval: ${error.message}`);
   return approval;
 }
+
+/** Requires supabase/security.sql; missing migration fails closed. */
+export async function securityOperation(action: string, key: string, value: unknown, ttl: number): Promise<any> {
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) throw new Error("Security store requires service-role configuration");
+  const { data, error } = await getClient().rpc("relay_security_operation", {
+    operation: action, record_key: key, record_value: value, ttl_seconds: ttl,
+  });
+  if (error) throw new Error("Security store unavailable");
+  return data;
+}

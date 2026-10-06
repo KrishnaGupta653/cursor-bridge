@@ -1,3 +1,4 @@
+import { withRelayAuth } from "../lib/relay-auth.js";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSession, updatePcLastSeen } from "../lib/store.js";
 import { ApiResponse } from "../lib/types.js";
@@ -8,7 +9,7 @@ import { ApiResponse } from "../lib/types.js";
  * - 2분간 heartbeat 없으면 연결 끊김으로 간주, 같은 세션 ID로 다른 PC 접속 허용
  * - "접속 끊을게요" API 없이도 안전하게 세션 해제 판단 가능
  */
-export default async function handler(
+async function handler(
   req: VercelRequest,
   res: VercelResponse
 ) {
@@ -84,13 +85,15 @@ export default async function handler(
     };
     return res.status(200).json(response);
   } catch (error) {
-    console.error("Heartbeat API error:", error);
+    console.error("Relay operation failed");
     const response: ApiResponse = {
       success: false,
       error:
-        error instanceof Error ? error.message : "Internal server error",
+        "Relay operation failed",
       timestamp: Date.now(),
     };
     return res.status(500).json(response);
   }
 }
+
+export default withRelayAuth(handler, "pc");

@@ -1,130 +1,34 @@
-import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { createSession, getSession } from '../lib/store.js';
-import { ApiResponse, Session } from '../lib/types.js';
+import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { createSession, getSession, joinSession } from "../lib/store.js";
+import { admission, authorize, body, cors, relaySecurity, securityFailure } from "../lib/relay-auth.js";
+import { newSessionId, SecurityError, validDeviceId, validSessionId } from "../lib/relay-security.js";
 
-type PublicSession = Omit<Session, "pcPinHash">;
-
-// 랜덤 세션 ID 생성 (6자리)
-function generateSessionId(): string {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 혼동되는 문자 제외
-  let result = '';
-  for (let i = 0; i < 6; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return result;
-}
-
-function toPublicSession(session: Session): PublicSession {
-  const { pcPinHash: _, ...safeSession } = session;
-  return safeSession;
-}
-
-export default async function handler(
-  req: VercelRequest,
-  res: VercelResponse
-) {
-  // CORS 헤더 설정
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Device-Id, X-Device-Type');
-  res.setHeader('Access-Control-Max-Age', '86400'); // 24시간
-  
-  // CORS preflight - OPTIONS 요청 처리
-  if (req.method === 'OPTIONS') {
-    res.writeHead(200, {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Device-Id, X-Device-Type',
-      'Access-Control-Max-Age': '86400',
-    });
-    return res.end();
-  }
-
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  cors(res);
+  if (req.method === "OPTIONS") return res.status(204).end();
   try {
-    // POST: 새 세션 생성
-    if (req.method === 'POST') {
-      try {
-        const sessionId = generateSessionId();
-        const session = await createSession(sessionId);
-        
-        const response: ApiResponse<PublicSession> = {
-          success: true,
-          data: toPublicSession(session),
-          timestamp: Date.now(),
-        };
-        
-        return res.status(201).json(response);
-      } catch (createError) {
-        console.error('Failed to create session:', createError);
-        const errorMessage = createError instanceof Error 
-          ? createError.message 
-          : 'Failed to create session';
-        const response: ApiResponse = {
-          success: false,
-          error: errorMessage,
-          timestamp: Date.now(),
-        };
-        return res.status(500).json(response);
-      }
+    if (req.method === "GET") {
+      const principal = await authorize(req);
+      const session = await getSession(principal.sessionId);
+      if (!session) throw new SecurityError(404, "SESSION_NOT_FOUND");
+      const { pcPinHash: _, ...safe } = session;
+      return res.status(200).json({ success: true, data: safe, timestamp: Date.now() });
     }
-    
-    // GET: 세션 조회
-    if (req.method === 'GET') {
-      const { sessionId } = req.query;
-      
-      if (!sessionId || typeof sessionId !== 'string') {
-        const response: ApiResponse = {
-          success: false,
-          error: 'sessionId is required',
-          timestamp: Date.now(),
-        };
-        return res.status(400).json(response);
-      }
-      
-      const session = await getSession(sessionId);
-      
-      if (!session) {
-        const response: ApiResponse = {
-          success: false,
-          error: 'Session not found',
-          timestamp: Date.now(),
-        };
-        return res.status(404).json(response);
-      }
-      
-      const response: ApiResponse<PublicSession> = {
-        success: true,
-        data: toPublicSession(session),
-        timestamp: Date.now(),
-      };
-      
-      return res.status(200).json(response);
-    }
-    
-    // Method not allowed
-    const response: ApiResponse = {
-      success: false,
-      error: 'Method not allowed',
-      timestamp: Date.now(),
-    };
-    return res.status(405).json(response);
-    
-  } catch (error) {
-    console.error('Session API error:', error);
-    const errorMessage = error instanceof Error 
-      ? `${error.name}: ${error.message}` 
-      : 'Internal server error';
-    
-    // Redis 연결 오류인지 확인
-    const isRedisError = errorMessage.includes('Redis') || errorMessage.includes('UPSTASH');
-    
-    const response: ApiResponse = {
-      success: false,
-      error: isRedisError 
-        ? 'Database connection error. Please check server configuration.'
-        : errorMessage,
-      timestamp: Date.now(),
-    };
-    return res.status(500).json(response);
-  }
+    if (req.method !== "POST") throw new SecurityError(405, "METHOD_NOT_ALLOWED");
+    await admission(req);
+    const input = body(req);
+    const sessionId = input.sessionId == null ? newSessionId() : String(input.sessionId).trim().toUpperCase();
+    if (!validSessionId(sessionId) || !validDeviceId(input.deviceId) || input.deviceType !== "pc") throw new SecurityError(400, "PC_DEVICE_AND_VALID_SESSION_REQUIRED");
+    // Reserve atomically before touching legacy session state. Never take over an existing session.
+    await relaySecurity.reserve(sessionId);
+    if (await getSession(sessionId)) throw new SecurityError(409, "LEGACY_SESSION_REQUIRES_NEW_ID");
+    await createSession(sessionId);
+    const session = await joinSession(sessionId, input.deviceId, "pc");
+    if (!session) throw new SecurityError(503, "SESSION_CREATION_FAILED");
+    const { token, principal } = await relaySecurity.issue(sessionId, input.deviceId, "pc");
+    const { pcPinHash: _, ...safe } = session;
+    return res.status(201).json({ success: true, protocolVersion: 2, data: {
+      ...safe, token, credentialExpiresAt: principal.expiresAt,
+    }, timestamp: Date.now() });
+  } catch (error) { return securityFailure(res, error); }
 }

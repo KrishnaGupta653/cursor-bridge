@@ -1,3 +1,4 @@
+import { withRelayAuth } from "../lib/relay-auth.js";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { ApiResponse } from "../lib/types.js";
 
@@ -5,7 +6,7 @@ import { ApiResponse } from "../lib/types.js";
  * 릴레이 서버가 사용 중인 저장소 정보 (Supabase / Upstash Redis)
  * GET /api/store → { store: "supabase" | "redis", storeLabel: "Supabase" | "Upstash Redis" }
  */
-export default async function handler(
+async function handler(
   req: VercelRequest,
   res: VercelResponse
 ) {
@@ -36,3 +37,5 @@ export default async function handler(
   };
   return res.status(200).json(response);
 }
+
+export default withRelayAuth(handler);

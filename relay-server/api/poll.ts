@@ -1,3 +1,4 @@
+import { withRelayAuth } from "../lib/relay-auth.js";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import {
   receiveMessages,
@@ -7,7 +8,7 @@ import {
 } from "../lib/store.js";
 import { ApiResponse, RelayMessage, DeviceType } from "../lib/types.js";
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+async function handler(req: VercelRequest, res: VercelResponse) {
   // CORS 헤더 설정
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -120,12 +121,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     return res.status(200).json(response);
   } catch (error) {
-    console.error("Poll API error:", error);
+    console.error("Relay operation failed");
     const response: ApiResponse = {
       success: false,
-      error: error instanceof Error ? error.message : "Internal server error",
+      error: "Relay operation failed",
       timestamp: Date.now(),
     };
     return res.status(500).json(response);
   }
 }
+
+export default withRelayAuth(handler);
