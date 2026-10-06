@@ -18,14 +18,14 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - name: Install root workspace deps
         run: npm ci
 
-      - name: Compile extension
-        run: npm --workspace cursor-extension run compile
+      - name: Test extension security and CDP
+        run: npm --workspace cursor-extension test
 
       - name: Build pc-server
         run: npm --workspace pc-server run build
@@ -40,7 +40,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: relay-server/package-lock.json
 
@@ -52,6 +52,17 @@ jobs:
         working-directory: relay-server
         run: npm run type-check
 
+      - name: Test relay policy and authentication
+        working-directory: relay-server
+        run: npm test
+
+      - name: Install isolated Redis test dependency
+        run: sudo apt-get update && sudo apt-get install -y redis-server
+
+      - name: Test relay Redis lifecycle
+        working-directory: relay-server
+        run: npm run test:redis
+
   mobile-analyze:
     name: Mobile Analyze
     runs-on: ubuntu-latest
@@ -62,7 +73,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.29.0"
+          flutter-version: "3.47.2"
           channel: stable
           cache: true
 
@@ -73,3 +84,11 @@ jobs:
       - name: Flutter analyze (errors only)
         working-directory: mobile-app
         run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: Flutter tests
+        working-directory: mobile-app
+        run: flutter test
+
+      - name: Flutter release web build
+        working-directory: mobile-app
+        run: flutter build web --release
