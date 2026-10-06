@@ -30,7 +30,7 @@ void main() {
     expect(find.text('Local'), findsOneWidget);
     expect(find.text('Tunnel'), findsOneWidget);
     expect(find.text('Relay'), findsOneWidget);
-    expect(find.text('Connect'), findsOneWidget);
+    expect(find.text('Connect with Session ID'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -48,7 +48,7 @@ void main() {
   testWidgets('Narrow phone layout has no overflow', (WidgetTester tester) async {
     await pumpApp(tester, size: const Size(360, 640));
 
-    expect(find.text('Connect'), findsOneWidget);
+    expect(find.text('Connect with Session ID'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }
