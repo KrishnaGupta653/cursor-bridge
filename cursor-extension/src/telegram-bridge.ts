@@ -17,6 +17,7 @@
  */
 
 import { ChildProcessWithoutNullStreams, spawn } from "child_process";
+import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -29,8 +30,10 @@ import {
   loadTelegcliApiCredentials,
   resolveMtprotoScript,
 } from "./telegram-mtproto";
-import { AgentMode } from "./types";
+import { AgentMode, CommandMessage } from "./types";
 import { WebSocketServer } from "./websocket-server";
+import { ChatWatcher } from "./chat-watcher";
+import { ComposerState } from "./cdp/agents-window";
 
 export interface TelegramSecrets {
   enabled?: boolean;
@@ -52,7 +55,22 @@ interface TgUserState {
   sessionId?: string;
   sessionsCache: Array<{ id: string; title: string; state?: string }>;
   historyCache: Array<{ id: string; title: string; group?: string }>;
+  /** Agents-window chat picked with /c_N or /newchat; plain text prompts it. */
+  agentChatId?: string;
+  chatsCache: Array<{ id: string; title: string; group: string }>;
 }
+
+/** A permission alert's short code, bound to one exact pending request. */
+interface ApprovalCode {
+  requestId: string;
+  chatId: string;
+  title: string;
+  command: string;
+  expiresAt: number;
+  armed?: { action: "approve" | "reject"; userId: number };
+}
+
+const APPROVAL_CODE_TTL_MS = 2 * 60 * 1000;
 
 const DEFAULT_SECRETS_PATH = path.join(
   os.homedir(),
@@ -72,6 +90,13 @@ const HELP_TEXT = [
   "/last            Full latest reply of the selected session (/last_2 for another)",
   "/state           What the selected session is doing (/state_2)",
   "",
+  "Agents window",
+  "/chats [search]  Chats grouped like Cursor's sidebar; tap /c_3, then just type",
+  "/newchat [text]  Start a new chat (optionally with a first prompt)",
+  "/model [name]    List models, or switch the open chat's model",
+  "/stop            Stop the agent",
+  "Approval alerts carry /approve_<code> and /reject_<code>. Each asks you to confirm, and the code expires after 2 minutes.",
+  "",
   "More",
   "/history · /open_3   Past chats; open one in Cursor",
   "/new [text]      Fresh Cursor CLI chat",
@@ -81,10 +106,14 @@ const HELP_TEXT = [
   "/sync [on|off]   Send replies here automatically (default on)",
   "/status · /whoami",
   "",
-  "Replies arrive when the agent pauses. Approve, reject and stop stay in Cursor for safety.",
+  "Replies arrive when the agent pauses.",
 ].join("\n");
 
 const BOT_COMMANDS = [
+  { command: "chats", description: "Agents-window chats grouped like the sidebar" },
+  { command: "newchat", description: "Start a new chat: /newchat text" },
+  { command: "model", description: "List or switch models: /model name" },
+  { command: "stop", description: "Stop the agent" },
   { command: "sessions", description: "List agent chats in all Cursor windows" },
   { command: "last", description: "Full latest reply of the selected session" },
   { command: "state", description: "What the selected session is doing" },
@@ -272,7 +301,7 @@ function stripBotCommand(text: string): { cmd: string; args: string } {
   const cmd = m[1].toLowerCase();
   const args = (m[2] || "").trim();
   // Telegram only makes space-free commands tappable, so lists offer /use_2 for "/use 2".
-  const tap = cmd.match(/^(use|state|last|open)_(\d+)$/);
+  const tap = cmd.match(/^(use|state|last|open|c)_(\d+)$/) || cmd.match(/^(approve|reject|confirm)_([a-f0-9]{6})$/);
   if (tap) return { cmd: tap[1], args: tap[2] };
   return { cmd, args };
 }
@@ -315,20 +344,93 @@ export class TelegramBridge {
   /** Bumped by stop() so an in-flight reconnect can tell it was cancelled. */
   private stopCount = 0;
   private mtprotoStdoutBuf = "";
+  private chatWatcher: ChatWatcher | null;
+  /** Replies to commands this bridge is running, keyed by correlation ID. */
+  private captures = new Map<string, any[]>();
+  private approvalCodes = new Map<string, ApprovalCode>();
+  private lastAlertRequestId = "";
 
   constructor(
     outputChannel: vscode.OutputChannel,
     commandRouter: CommandRouter,
     commandHandler: CommandHandler,
     wsServer: WebSocketServer,
-    extensionPath: string
+    extensionPath: string,
+    chatWatcher: ChatWatcher | null = null
   ) {
     this.outputChannel = outputChannel;
     this.commandRouter = commandRouter;
     this.commandHandler = commandHandler;
     this.wsServer = wsServer;
     this.extensionPath = extensionPath;
+    this.chatWatcher = chatWatcher;
     this.secretsPath = DEFAULT_SECRETS_PATH;
+  }
+
+  private subscribe(): () => void {
+    const offOutbound = this.wsServer.onOutbound((message) => this.handleOutbound(message));
+    const offObserve = this.chatWatcher?.observe((s) => this.onComposerState(s));
+    return () => {
+      offOutbound();
+      offObserve?.();
+      this.approvalCodes.clear();
+      this.lastAlertRequestId = "";
+    };
+  }
+
+  /** Run a command through the router (policy, remote-actions switch, audit) and collect its replies. */
+  private async call(
+    userId: number,
+    chatId: number,
+    command: Omit<CommandMessage, "id" | "clientId">
+  ): Promise<{ ok: boolean; error?: string; data?: any; replies: any[] }> {
+    const id = `tg-${crypto.randomBytes(8).toString("hex")}`;
+    const replies: any[] = [];
+    this.captures.set(id, replies);
+    try {
+      await this.commandRouter.handleCommand({ ...command, id, clientId: `telegram:${chatId}:${userId}` } as CommandMessage);
+    } finally {
+      this.captures.delete(id);
+    }
+    const result = replies.find((r) => r.type === "command_result");
+    return {
+      ok: result?.success === true,
+      error: result?.error_message || result?.error || (result ? undefined : "No response"),
+      data: result?.data,
+      replies,
+    };
+  }
+
+  /** Alert every allowed chat once per new pending request, with codes bound to that request. */
+  private onComposerState(s: ComposerState): void {
+    const now = Date.now();
+    for (const [code, a] of this.approvalCodes) if (a.expiresAt <= now) this.approvalCodes.delete(code);
+    const pending = s.pending;
+    if (!pending || !s.chatId) {
+      this.lastAlertRequestId = "";
+      return;
+    }
+    if (pending.id === this.lastAlertRequestId) return;
+    this.lastAlertRequestId = pending.id;
+    const targets = [...this.allowed].filter((userId) =>
+      this.allowedChats.has(userId) && this.userState.get(userId)?.sync !== false);
+    if (!targets.length) return;
+    let code = crypto.randomBytes(3).toString("hex");
+    while (this.approvalCodes.has(code)) code = crypto.randomBytes(3).toString("hex");
+    const request = pending.command || pending.detail || "Permission required";
+    this.approvalCodes.set(code, {
+      requestId: pending.id,
+      chatId: s.chatId,
+      title: s.title,
+      command: request,
+      expiresAt: now + APPROVAL_CODE_TTL_MS,
+    });
+    for (const chat of targets) {
+      void this.sendText(
+        chat,
+        `⚠️ Approval needed${s.title ? ` — ${truncate(s.title, 60)}` : ""}\n${truncate(request, 600)}\n\n/approve_${code} · /reject_${code}\nThe code expires in 2 minutes.`
+      );
+    }
   }
 
   isRunning(): boolean {
@@ -354,6 +456,7 @@ export class TelegramBridge {
         sync: true,
         sessionsCache: [],
         historyCache: [],
+        chatsCache: [],
       };
       this.userState.set(userId, s);
     } else {
@@ -421,9 +524,7 @@ export class TelegramBridge {
         this.running = true;
         this.mode = "botapi";
         this.abort = new AbortController();
-        this.outboundDispose = this.wsServer.onOutbound((message) => {
-          this.handleOutbound(message);
-        });
+        this.outboundDispose = this.subscribe();
         void this.api("setMyCommands", { commands: BOT_COMMANDS });
         this.log(
           `Started (Bot API) as @${me.result?.username || "bot"} — ${this.secretsPath}`
@@ -508,9 +609,7 @@ export class TelegramBridge {
     this.running = true;
     this.mode = "mtproto";
     this.abort = new AbortController();
-    this.outboundDispose = this.wsServer.onOutbound((message) => {
-      this.handleOutbound(message);
-    });
+    this.outboundDispose = this.subscribe();
 
     return await new Promise((resolve) => {
       let settled = false;
@@ -774,6 +873,11 @@ export class TelegramBridge {
   private handleOutbound(raw: string) {
     try {
       const msg = JSON.parse(raw);
+      const capture = typeof msg.correlationId === "string" ? this.captures.get(msg.correlationId) : undefined;
+      if (capture && msg.type !== "chat_response") {
+        capture.push(msg);
+        return;
+      }
       const targets = this.resolveSyncTargets(msg);
       if (!targets.length) {
         return;
@@ -789,6 +893,11 @@ export class TelegramBridge {
 
       if (msg.type === "chat_response" && typeof msg.text === "string") {
         const text = (msg.text as string).trim();
+        if (typeof msg.chatId === "string" && msg.chatId) {
+          const [, chat, user] = String(msg.clientId).split(":");
+          const state = this.userState.get(Number(user));
+          if (state && state.chatId === Number(chat) && !state.agentChatId) state.agentChatId = msg.chatId;
+        }
         for (const chatId of targets) {
           const buffered = (this.chunkByChat.get(chatId) || "").trim();
           this.chunkByChat.delete(chatId);
@@ -964,11 +1073,7 @@ export class TelegramBridge {
     text: string
   ): Promise<void> {
     const { cmd, args } = stripBotCommand(text);
-    if (["approve", "reject", "stop"].includes(cmd || "")) {
-      await this.sendText(chatId, "This action is disabled remotely until exact request and ownership checks are available. Use Cursor locally.");
-      return;
-    }
-    if ((cmd === "plan" || ((cmd === "state" || cmd === "last") && !args)) && !state.sessionId) {
+    if ((cmd === "plan" || ((cmd === "state" || (cmd === "last" && !state.agentChatId)) && !args)) && !state.sessionId) {
       await this.sendText(chatId, "Select a session with /sessions and /use first.");
       return;
     }
@@ -1076,15 +1181,142 @@ export class TelegramBridge {
         return;
       }
 
-      case "stop":
-        await this.commandRouter.handleCommand({
-          type: "stop_prompt",
-          clientId: `telegram:${chatId}:${userId}`,
-        });
+      case "stop": {
         this.pendingByChat.delete(chatId);
         this.chunkByChat.delete(chatId);
-        await this.sendText(chatId, "⏹ Stop requested.");
+        if (state.backend === "cli" && !state.agentChatId) {
+          await this.commandRouter.handleCommand({
+            type: "stop_prompt",
+            clientId: `telegram:${chatId}:${userId}`,
+          });
+          await this.sendText(chatId, "⏹ Stop requested.");
+          return;
+        }
+        const r = await this.call(userId, chatId, { type: "agent_stop", chatId: state.agentChatId });
+        await this.sendText(chatId, r.ok ? "⏹ Stopped the agent." : `❌ ${r.error}`);
         return;
+      }
+
+      case "chats": {
+        const r = await this.call(userId, chatId, { type: "list_chats", query: args || undefined, limit: 15 });
+        const list = r.replies.find((x) => x.type === "chats");
+        if (!r.ok || !list) {
+          await this.sendText(chatId, `❌ ${r.error || "Couldn't list chats"}`);
+          return;
+        }
+        const chats = (list.chats || []).slice(0, 60) as Array<{ id: string; title: string; group: string; pinned?: boolean; status?: string; unread?: boolean; active?: boolean }>;
+        state.chatsCache = chats.map((c) => ({ id: String(c.id), title: String(c.title || c.id), group: c.pinned ? "Pinned" : String(c.group || "Other") }));
+        if (!chats.length) {
+          await this.sendText(chatId, args ? `No chats match “${truncate(args, 40)}”.` : "No chats found on this Mac.");
+          return;
+        }
+        const order: string[] = [];
+        for (const c of state.chatsCache) if (!order.includes(c.group)) order.push(c.group);
+        const sections = order.map((group) => {
+          const rows = chats
+            .map((c, i) => ({ c, i }))
+            .filter(({ i }) => state.chatsCache[i].group === group)
+            .map(({ c, i }) => {
+              const mark = c.status === "running" ? " ⏳" : c.status === "waiting" ? " ⚠️" : c.unread ? " •" : "";
+              const here = state.agentChatId === c.id ? " ◀" : "";
+              return `${i + 1}. ${truncate(String(c.title || c.id), 70)}${mark}${here}  /c_${i + 1}`;
+            });
+          return `${group}\n${rows.join("\n")}`;
+        });
+        await this.sendText(chatId, `${sections.join("\n\n")}\n\nTap /c_N to open a chat, then just type. Search: /chats <text>`);
+        return;
+      }
+
+      case "c": {
+        const picked = state.chatsCache[Number(args) - 1];
+        if (!picked) {
+          await this.sendText(chatId, "Not in your list. Run /chats first.");
+          return;
+        }
+        const r = await this.call(userId, chatId, {
+          type: "open_chat",
+          chatId: picked.id,
+          group: picked.group === "Pinned" ? undefined : picked.group,
+        });
+        if (!r.ok) {
+          await this.sendText(chatId, `❌ ${r.error}`);
+          return;
+        }
+        state.agentChatId = picked.id;
+        state.backend = "cdp";
+        await this.sendText(chatId, `Opened “${truncate(picked.title, 60)}”.\nJust type to prompt it. /last · /model · /stop`);
+        return;
+      }
+
+      case "newchat": {
+        if (args) {
+          state.agentChatId = undefined;
+          await this.sendPrompt(userId, chatId, state, args, false, true);
+          return;
+        }
+        const r = await this.call(userId, chatId, { type: "new_chat" });
+        if (!r.ok) {
+          await this.sendText(chatId, `❌ ${r.error}`);
+          return;
+        }
+        state.agentChatId = r.data?.chatId || undefined;
+        state.backend = "cdp";
+        await this.sendText(chatId, "🆕 New chat ready in Cursor. Type your first prompt.");
+        return;
+      }
+
+      case "model": {
+        if (!args) {
+          const r = await this.call(userId, chatId, { type: "list_models" });
+          const models = r.replies.find((x) => x.type === "models")?.models as string[] | undefined;
+          const current = this.chatWatcher?.lastComposerState?.model;
+          await this.sendText(
+            chatId,
+            r.ok && models?.length
+              ? `${current ? `Current: ${current}\n\n` : ""}${models.map((m) => `• ${m}`).join("\n")}\n\nSwitch: /model <name>`
+              : `❌ ${r.error || "No models found"}`
+          );
+          return;
+        }
+        const r = await this.call(userId, chatId, { type: "set_model", model: args.slice(0, 80), chatId: state.agentChatId });
+        await this.sendText(chatId, r.ok ? `Model set to ${r.data?.model || args}` : `❌ ${r.error}`);
+        return;
+      }
+
+      case "approve":
+      case "reject": {
+        const entry = args ? this.approvalCodes.get(args) : undefined;
+        if (!entry || entry.expiresAt <= Date.now()) {
+          if (entry) this.approvalCodes.delete(args);
+          await this.sendText(chatId, "That code is unknown or expired. Use the code from the latest approval alert.");
+          return;
+        }
+        entry.armed = { action: cmd as "approve" | "reject", userId };
+        await this.sendText(
+          chatId,
+          `${cmd === "approve" ? "Approve" : "Reject"} this exact request${entry.title ? ` in “${truncate(entry.title, 60)}”` : ""}?\n${truncate(entry.command, 600)}\n\nTap /confirm_${args} to ${cmd}. Ignore this to cancel.`
+        );
+        return;
+      }
+
+      case "confirm": {
+        const entry = args ? this.approvalCodes.get(args) : undefined;
+        if (!entry || entry.expiresAt <= Date.now() || entry.armed?.userId !== userId) {
+          if (entry && entry.expiresAt <= Date.now()) this.approvalCodes.delete(args);
+          await this.sendText(chatId, "Nothing to confirm. Tap /approve_<code> or /reject_<code> from the alert first.");
+          return;
+        }
+        this.approvalCodes.delete(args);
+        const approve = entry.armed.action === "approve";
+        const r = await this.call(userId, chatId, {
+          type: approve ? "approve_action" : "reject_action",
+          chatId: entry.chatId,
+          requestId: entry.requestId,
+          confirmed: true,
+        });
+        await this.sendText(chatId, r.ok ? (approve ? "✅ Approved" : "🚫 Rejected") : `❌ ${r.error}`);
+        return;
+      }
 
       case "ask":
         if (!args) {
@@ -1207,6 +1439,17 @@ export class TelegramBridge {
       }
 
       case "last": {
+        if (!args && state.agentChatId) {
+          const r = await this.call(userId, chatId, { type: "get_chat", chatId: state.agentChatId, limit: 10 });
+          const page = r.replies.find((x) => x.type === "chat");
+          const reply = [...(page?.items || [])].reverse().find((m: any) => m.role === "assistant" && String(m.text || "").trim());
+          const title = page?.chat?.title || page?.composer?.title || "";
+          await this.sendText(
+            chatId,
+            reply ? `🤖 ${title ? `${truncate(title, 60)}\n\n` : ""}${String(reply.text).trim()}` : r.ok ? "No reply in that chat yet." : `❌ ${r.error}`
+          );
+          return;
+        }
         if (args && !(await this.selectSession(chatId, state, args))) return;
         if (!state.sessionId) {
           await this.sendText(chatId, "Select a session first: /sessions");
@@ -1278,8 +1521,7 @@ export class TelegramBridge {
         return;
       }
 
-      case "messages":
-      case "chats": {
+      case "messages": {
         const limit = Math.min(40, Math.max(1, Number(args) || 15));
         const history = await this.commandHandler.getChatHistory(
           `telegram:${chatId}:${userId}`,
@@ -1303,28 +1545,6 @@ export class TelegramBridge {
         await this.sendText(
           chatId,
           `Messages (last ${lines.length}):\n\n${lines.join("\n")}`
-        );
-        return;
-      }
-
-      case "approve": {
-        const result = await this.commandHandler.approveCdpAction(
-          state.sessionId
-        );
-        await this.sendText(
-          chatId,
-          result.ok ? "✅ Approved" : `❌ ${result.error || "Approve failed"}`
-        );
-        return;
-      }
-
-      case "reject": {
-        const result = await this.commandHandler.rejectCdpAction(
-          state.sessionId
-        );
-        await this.sendText(
-          chatId,
-          result.ok ? "🚫 Rejected" : `❌ ${result.error || "Reject failed"}`
         );
         return;
       }
@@ -1389,6 +1609,7 @@ export class TelegramBridge {
       return null;
     }
     state.sessionId = id;
+    state.agentChatId = undefined;
     state.backend = "cdp";
     return id;
   }
@@ -1398,11 +1619,32 @@ export class TelegramBridge {
     chatId: number,
     state: TgUserState,
     prompt: string,
-    newSession: boolean
+    newSession: boolean,
+    newAgentChat = false
   ): Promise<void> {
     const text = prompt.trim();
     if (!text) {
       await this.sendText(chatId, "Send a prompt, e.g. /ask fix the bug");
+      return;
+    }
+
+    if (newAgentChat || (state.agentChatId && !newSession)) {
+      this.pendingByChat.set(chatId, { userId, startedAt: Date.now() });
+      this.lastSyncChatId = chatId;
+      const r = await this.call(userId, chatId, newAgentChat
+        ? { type: "agent_prompt", text, newChat: true }
+        : { type: "agent_prompt", text, chatId: state.agentChatId });
+      if (!r.ok) {
+        this.pendingByChat.delete(chatId);
+        await this.sendText(chatId, `❌ ${r.error}`);
+        return;
+      }
+      await this.sendText(
+        chatId,
+        state.sync
+          ? `⏳ Sent${newAgentChat ? " to a new chat" : ""} — the reply will appear here.`
+          : "Sent. Auto-replies are off: use /last, or /sync on."
+      );
       return;
     }
 

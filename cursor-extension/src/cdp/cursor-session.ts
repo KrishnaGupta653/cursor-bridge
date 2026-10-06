@@ -359,6 +359,18 @@ export class CursorSession {
     return this.lastSnapshot;
   }
 
+  /** Raw access for the Agents-window controller; scripts are fixed, never client-supplied. */
+  async evaluate<T = unknown>(expression: string): Promise<T> {
+    if (!this.socket?.connected) throw new Error("CDP session not connected");
+    this.lastActivity = new Date().toISOString();
+    return this.socket.evaluate<T>(expression);
+  }
+
+  async send(method: "Input.insertText" | "Input.dispatchKeyEvent", params: Record<string, unknown>): Promise<unknown> {
+    if (!this.socket?.connected) throw new Error("CDP session not connected");
+    return this.socket.send(method, params);
+  }
+
   toListItem() {
     const snap = this.lastSnapshot;
     const latestMsg = snap?.messages?.length

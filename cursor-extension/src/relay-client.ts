@@ -48,12 +48,17 @@ export class RelayClient {
   private connecting = false;
   private connectAttempts = 0;
   private nextConnectAt = 0;
-  private polling = false;
+  /** Bumped on every (re)start and stop so only the newest poll loop reschedules itself. */
+  private pollGeneration = 0;
+  private lastActivityAt = 0;
   private lastSessionDiscoveryTime: number = 0;
   private lastPollHeartbeatTime: number = 0;
   private lastNoSessionHeartbeatTime: number = 0; // 세션 없을 때 폴링 동작 확인용
   private readonly SESSION_DISCOVERY_INTERVAL = 5000; // 5초마다 세션 탐지 (빠른 연결용)
-  private readonly POLL_INTERVAL = 2000; // 2초마다 폴링
+  private readonly POLL_INTERVAL = 2000; // 2초마다 폴링 (while the phone is active)
+  /** Each relay poll costs several Redis commands, so poll slowly once the phone goes quiet. */
+  private readonly IDLE_POLL_INTERVAL = 25_000;
+  private readonly ACTIVE_WINDOW_MS = 3 * 60 * 1000;
   private readonly POLL_HEARTBEAT_INTERVAL = 30000; // 30초마다 폴링 동작 로그
   /** 연결 유지용 heartbeat (2분 무heartbeat 시 서버가 연결 끊김으로 간주) */
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
@@ -128,7 +133,9 @@ export class RelayClient {
     this.nextConnectAt = 0;
     this.targetPin =
       pin != null && typeof pin === "string" && pin.trim() ? pin.trim() : null;
+    this.targetSessionId = trimmed;
     await this.connectToSession(trimmed, this.targetPin ?? undefined);
+    if (!this.pcInUse && !this.pollInterval) this.startPolling();
   }
 
   /**
@@ -165,8 +172,9 @@ export class RelayClient {
    */
   stop(): void {
     this.clearHeartbeat();
+    this.pollGeneration++;
     if (this.pollInterval) {
-      clearInterval(this.pollInterval);
+      clearTimeout(this.pollInterval);
       this.pollInterval = null;
     }
     this.isConnected = false;
@@ -208,19 +216,27 @@ export class RelayClient {
    */
   private startPolling(): void {
     if (this.pollInterval) {
-      clearInterval(this.pollInterval);
+      clearTimeout(this.pollInterval);
     }
-    this.pollInterval = setInterval(() => {
-      // A slow relay must not stack requests.
-      if (this.polling) return;
-      this.polling = true;
-      this.pollMessages()
-        .catch((err) => this.logError("pollMessages threw", err))
-        .finally(() => { this.polling = false; });
-    }, this.POLL_INTERVAL);
+    const generation = ++this.pollGeneration;
+    this.lastActivityAt = Date.now();
+    // One request at a time: the next poll is scheduled only after the previous one finishes.
+    const schedule = () => {
+      this.pollInterval = setTimeout(() => {
+        this.pollMessages()
+          .catch((err) => this.logError("pollMessages threw", err))
+          .finally(() => { if (generation === this.pollGeneration) schedule(); });
+      }, this.nextPollDelay());
+    };
+    schedule();
     this.log(
-      "⏱️ Poll interval started (every 2s) - waiting for session discovery / messages"
+      "⏱️ Polling started (every 2s while the phone is active, every 25s when idle)"
     );
+  }
+
+  /** Fast for a few minutes after the last phone message, then slow. */
+  nextPollDelay(now: number = Date.now()): number {
+    return now - this.lastActivityAt < this.ACTIVE_WINDOW_MS ? this.POLL_INTERVAL : this.IDLE_POLL_INTERVAL;
   }
 
   /**
@@ -299,6 +315,7 @@ export class RelayClient {
         : [];
 
       if (messages.length > 0) {
+        this.lastActivityAt = Date.now();
         this.log(`📥 Received ${messages.length} message(s) from relay`);
         this.log(
           `📋 Messages: ${JSON.stringify(

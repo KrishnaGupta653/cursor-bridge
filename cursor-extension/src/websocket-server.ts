@@ -55,6 +55,7 @@ export class WebSocketServer {
   private lastRestartError: string | null = null;
   private messageHandlers: ((message: string) => void)[] = [];
   private clientChangeHandlers: ((connected: boolean) => void)[] = [];
+  private clientClosedHandlers: ((clientId: string) => void)[] = [];
   private outboundHandlers: ((message: string) => void)[] = [];
   private clients: Set<WebSocketClient> = new Set();
   private outputChannel: vscode.OutputChannel | null = null;
@@ -210,6 +211,11 @@ export class WebSocketServer {
           );
           this.clients.delete(ws);
           this.notifyClientChange(this.clients.size > 0);
+          if ((ws as any).clientId) {
+            for (const handler of this.clientClosedHandlers) {
+              try { handler((ws as any).clientId); } catch { /* ignore */ }
+            }
+          }
         });
 
         ws.on("error", (error) => {
@@ -403,6 +409,11 @@ export class WebSocketServer {
     return () => {
       this.clientChangeHandlers = this.clientChangeHandlers.filter((h) => h !== handler);
     };
+  }
+
+  /** Called with the client ID of each authenticated local client that disconnects. */
+  onClientClosed(handler: (clientId: string) => void): void {
+    this.clientClosedHandlers.push(handler);
   }
 
   /**

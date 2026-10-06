@@ -8,6 +8,8 @@ import {
 } from "../lib/store.js";
 import { ApiResponse, RelayMessage, DeviceType } from "../lib/types.js";
 
+const PC_LAST_SEEN_REFRESH_MS = 30_000;
+
 async function handler(req: VercelRequest, res: VercelResponse) {
   // CORS 헤더 설정
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -96,7 +98,10 @@ async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // PC 폴링 시 생존 시각 갱신 (findSessionsWaitingForPC에서 stale 판단에 사용)
-    if (deviceType === "pc" && deviceId && typeof deviceId === "string") {
+    // The 30 s heartbeat also refreshes it, so a poll only writes when it has gone stale.
+    if (deviceType === "pc" && deviceId && typeof deviceId === "string" &&
+        session.pcDeviceId === deviceId &&
+        Date.now() - (session.pcLastSeenAt ?? 0) >= PC_LAST_SEEN_REFRESH_MS) {
       await updatePcLastSeen(sessionId, deviceId);
     }
 

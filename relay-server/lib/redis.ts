@@ -325,18 +325,10 @@ export async function receiveMessages(
     queueKey = REDIS_KEYS.messagesMobile2PC(sessionId);
   }
 
-  // RPOP으로 오래된 메시지부터 가져오기
-  const messages: RelayMessage[] = [];
-
-  for (let i = 0; i < limit; i++) {
-    const data = await redis.rpop<string>(queueKey);
-    if (!data) break;
-
-    const message = typeof data === "string" ? JSON.parse(data) : data;
-    messages.push(message);
-  }
-
-  return messages;
+  // RPOP으로 오래된 메시지부터 가져오기 (one command for the whole batch)
+  const batch = await getRedis().rpop<unknown[]>(queueKey, Math.max(1, limit));
+  if (!Array.isArray(batch)) return [];
+  return batch.map((data) => (typeof data === "string" ? JSON.parse(data) : data)) as RelayMessage[];
 }
 
 // 큐에 메시지가 있는지 확인

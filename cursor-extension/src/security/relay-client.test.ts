@@ -78,6 +78,7 @@ test("relay client recovers from a failed poll instead of going silent", async (
   try {
     await client.connectToSessionById("TEST34");
     assert.equal(connectedCallbacks, 1);
+    assert.ok((client as unknown as { pollInterval: unknown }).pollInterval, "connecting by ID starts receiving messages");
     await internals.pollMessages();
     assert.equal(client.isConnectedToSession(), false, "a failed poll drops the connection");
     internals.nextConnectAt = 0;

@@ -3,6 +3,7 @@
  * Android never talks to CDP directly; only allowlisted app APIs use this.
  */
 
+import { AgentsWindow } from "./agents-window";
 import { CdpHttpClient } from "./cdp-client";
 import { CursorSession } from "./cursor-session";
 import { rankTargets } from "./cursor-target";
@@ -59,6 +60,7 @@ export class CdpManager {
     count: 0,
   };
   private historySourceSessionId: string | null = null;
+  readonly agents = new AgentsWindow(() => this.agentsWindowSession());
 
   constructor(private options: CdpManagerOptions) {
     this.http = new CdpHttpClient({
@@ -264,6 +266,14 @@ export class CdpManager {
       ...this.history,
       sourceSessionId: this.historySourceSessionId || undefined,
     };
+  }
+
+  /** Only the dedicated Agents window: actions must never land in an editor window by accident. */
+  private agentsWindowSession(): CursorSession | null {
+    for (const s of this.sessions.values()) {
+      if (s.connected && /^cursor agents$/i.test(s.title.trim())) return s;
+    }
+    return null;
   }
 
   /** Prefer the "Cursor Agents" window for sidebar history scrape. */

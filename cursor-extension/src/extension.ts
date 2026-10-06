@@ -9,6 +9,9 @@ import { StatusBarManager } from "./status-bar";
 import { RelayClient } from "./relay-client";
 import { CONFIG } from "./config";
 import { CdpManager } from "./cdp/cdp-manager";
+import { ChatWatcher } from "./chat-watcher";
+import { TranscriptIndex } from "./transcripts/transcript-index";
+import { WorkspaceDiff } from "./transcripts/workspace-diff";
 import { CloudflareTunnelManager } from "./cloudflare-tunnel";
 import {
   TelegramBridge,
@@ -28,6 +31,7 @@ let relayClient: RelayClient | null = null;
 let cdpManager: CdpManager | null = null;
 let cloudflareTunnel: CloudflareTunnelManager | null = null;
 let telegramBridge: TelegramBridge | null = null;
+let chatWatcher: ChatWatcher | null = null;
 let outputChannel: vscode.OutputChannel;
 /** 연결 정보 Webview 패널 (열려 있을 때만 갱신용) */
 let connectionsPanel: vscode.WebviewPanel | null = null;
@@ -145,6 +149,8 @@ function allowedOrigins(): string[] {
     .getConfiguration("cursorRemote")
     .get<string[]>("allowedWebSocketOrigins", ["http://localhost:8080", "http://127.0.0.1:8080"]);
 }
+
+let pairingAfterConnect = false;
 
 function relayServerUrl(): string {
   const v = (vscode.workspace.getConfiguration("cursorRemote").get<string>("relayServerUrl") ?? "")
@@ -266,6 +272,26 @@ export async function activate(context: vscode.ExtensionContext) {
 
   commandHandler = new CommandHandler(outputChannel, wsServer, useCLIMode);
   commandRouter = new CommandRouter(commandHandler, wsServer, outputChannel);
+  const transcriptIndex = new TranscriptIndex();
+  chatWatcher = new ChatWatcher({
+    index: transcriptIndex,
+    composerState: async () =>
+      cdpManager?.agents.attached
+        ? cdpManager.agents.composerState()
+        : { ok: false as const, error: "Cursor Agents window is not attached" },
+    send: (payload) => wsServer?.send(JSON.stringify(payload)),
+    logError: (msg, err) =>
+      outputChannel.appendLine(`${msg}${err ? ` - ${err instanceof Error ? err.message : String(err)}` : ""}`),
+  });
+  commandRouter.setChatServices({
+    index: transcriptIndex,
+    diff: new WorkspaceDiff(),
+    watcher: chatWatcher,
+    agents: () => cdpManager?.agents ?? null,
+    remoteActionsEnabled: () =>
+      vscode.workspace.getConfiguration("cursorRemote").get<string>("remoteActions", "enabled") !== "disabled",
+  });
+  wsServer.onClientClosed((clientId) => chatWatcher?.forgetClient(clientId));
 
   outputChannel.appendLine(
     "[Cursor Remote] CLI mode is enabled - using Cursor CLI"
@@ -509,9 +535,10 @@ export async function activate(context: vscode.ExtensionContext) {
           return null;
         },
       });
-      if (!sid) return;
+      if (!sid) return undefined;
       await relayClient.connectToSessionById(sid);
       outputChannel.show();
+      return relayClient.isConnectedToSession();
     }
   );
 
@@ -574,7 +601,8 @@ export async function activate(context: vscode.ExtensionContext) {
           commandRouter,
           commandHandler,
           wsServer,
-          context.extensionPath
+          context.extensionPath,
+          chatWatcher
         );
       }
       if (telegramBridge.isRunning()) {
@@ -885,6 +913,18 @@ export async function activate(context: vscode.ExtensionContext) {
   relayClient = new RelayClient(relayServerUrl(), outputChannel, context.secrets);
   context.subscriptions.push(
     vscode.commands.registerCommand("cursorRemote.pairRelayClient", async () => {
+      if (!relayClient!.isConnectedToSession()) {
+        pairingAfterConnect = true;
+        const ok = await vscode.commands
+          .executeCommand<boolean | undefined>("cursorRemote.connectToRelaySessionById")
+          .then((v) => v, () => false);
+        pairingAfterConnect = false;
+        if (ok === undefined) return;
+        if (!ok) {
+          vscode.window.showErrorMessage("Could not connect to the relay session. Check the Cursor Remote output for the reason.");
+          return;
+        }
+      }
       try {
         const code = await relayClient!.createMobilePairingCode();
         await vscode.env.clipboard.writeText(code);
@@ -921,6 +961,7 @@ export async function activate(context: vscode.ExtensionContext) {
       if (sessionId) {
         context.globalState.update("cursorRemote.sessionId", sessionId);
       }
+      if (pairingAfterConnect) return;
       void vscode.window
         .showInformationMessage(
           sessionId != null
@@ -1033,7 +1074,8 @@ export async function activate(context: vscode.ExtensionContext) {
         commandRouter,
         commandHandler,
         wsServer,
-        context.extensionPath
+        context.extensionPath,
+        chatWatcher
       );
       const bridge = telegramBridge;
       let lockNoticeShown = false;
@@ -1074,6 +1116,11 @@ export function deactivate() {
   if (cloudflareTunnel) {
     void cloudflareTunnel.stop();
     cloudflareTunnel = null;
+  }
+
+  if (chatWatcher) {
+    chatWatcher.dispose();
+    chatWatcher = null;
   }
 
   if (cdpManager) {

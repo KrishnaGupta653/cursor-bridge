@@ -102,6 +102,15 @@
           "default": true,
           "description": "Auto-start Telegram bot on activation when secrets file exists and enabled is true."
         },
+        "cursorRemote.remoteActions": {
+          "type": "string",
+          "enum": [
+            "enabled",
+            "disabled"
+          ],
+          "default": "enabled",
+          "markdownDescription": "Lets paired phones and Telegram open chats, start new chats, switch model or mode, stop the agent, and approve or reject its requests. Approve and reject always need a confirm tap and only act on the exact request shown. Every action is written to the Cursor Remote output as an `[Audit]` line. Set to `disabled` to turn all of these off."
+        },
         "cursorRemote.allowedWebSocketOrigins": {
           "type": "array",
           "items": {
@@ -222,7 +231,7 @@
     "vscode:prepublish": "npm run compile && npx esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/extension.js",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "test": "npm run compile && node --test out/cdp/*.test.js out/security/*.test.js"
+    "test": "npm run compile && node --test out/cdp/*.test.js out/security/*.test.js out/transcripts/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

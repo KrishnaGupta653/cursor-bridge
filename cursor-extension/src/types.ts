@@ -31,6 +31,23 @@ export interface CommandMessage {
   requestId?: string;
   /** Agents sidebar history row id (CDP DOM scrape). */
   historyId?: string;
+  /** Agents-window chat ID (matches the transcript folder name). */
+  chatId?: string;
+  /** Sidebar group of chatId, used to expand it when the row is hidden. */
+  group?: string;
+  newChat?: boolean;
+  /** get_chat paging: return items with seq below this. */
+  before?: number;
+  /** watch_chat: number of items the client already has. */
+  fromTotal?: number;
+  query?: string;
+  offset?: number;
+  expand?: boolean;
+  path?: string;
+  model?: string;
+  mode?: string;
+  /** approve_action/reject_action: the user confirmed this exact request. */
+  confirmed?: boolean;
 }
 
 export interface CommandResult {

@@ -1,513 +1,125 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
-import '../models/cdp_models.dart';
-import '../services/cdp_session_store.dart';
+
+import '../models/chat_models.dart';
+import '../services/chat_store.dart';
 import '../theme/app_theme.dart';
+import '../widgets/chat_markdown.dart';
+import '../widgets/diff_viewer.dart';
 
-/// Cursor Agents–aligned chat tokens (shared [Cr] system).
-class _CursorChatTheme {
-  static const bg = Cr.bg;
-  static const panel = Cr.bgElevated;
-  static const userBubble = Cr.userBubble;
-  static const text = Cr.text;
-  static const muted = Cr.textSecondary;
-  static const faint = Cr.textFaint;
-  static const link = Cr.link;
-  static const border = Cr.border;
-  static const accent = Cr.accent;
+/// Modes the composer offers, as named in Cursor's Agents window.
+const kComposerModes = ['Agent', 'Ask', 'Plan'];
+
+/// Asks the user to confirm approving or rejecting exactly [request]; true confirms.
+Future<bool> confirmResolve(BuildContext context, PendingRequest request, {required bool approve}) async {
+  final verb = approve ? request.approveLabel : request.rejectLabel;
+  final result = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(approve ? 'Approve this request?' : 'Reject this request?'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            approve
+                ? 'Cursor will run this on your Mac:'
+                : 'Cursor will skip this and the agent continues without it:',
+            style: const TextStyle(color: Cr.textSecondary, fontSize: 13),
+          ),
+          const SizedBox(height: 10),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 220),
+            child: SingleChildScrollView(child: CodeBlock(request.shown)),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+        FilledButton(
+          style: approve ? null : FilledButton.styleFrom(backgroundColor: Cr.danger),
+          onPressed: () => Navigator.pop(context, true),
+          child: Text(verb),
+        ),
+      ],
+    ),
+  );
+  return result == true;
 }
 
-/// Session detail: Chat / Plan / Changes / Activity for one EXISTING Cursor Agent.
-class AgentSessionScreen extends StatefulWidget {
-  final String sessionId;
-  final CdpSessionStore store;
-  final Future<void> Function(String type,
-      {String? sessionId, String? text, String? requestId, String? historyId})
-      sendCommand;
-  final VoidCallback onRefresh;
-  /// When true, render as an embedded pane (no route AppBar back button).
-  final bool embedded;
-  /// Optional history row title when opened from Agents sidebar.
-  final String? historyTitle;
+/// One chat, Cursor-style: messages and work groups, files changed, permission card, composer.
+class AgentChatPane extends StatefulWidget {
+  final ChatStore store;
 
-  const AgentSessionScreen({
-    super.key,
-    required this.sessionId,
-    required this.store,
-    required this.sendCommand,
-    required this.onRefresh,
-    this.embedded = false,
-    this.historyTitle,
-  });
+  /// Opens the sidebar drawer on narrow screens; null hides the button.
+  final VoidCallback? onOpenSidebar;
+
+  const AgentChatPane({super.key, required this.store, this.onOpenSidebar});
 
   @override
-  State<AgentSessionScreen> createState() => _AgentSessionScreenState();
+  State<AgentChatPane> createState() => _AgentChatPaneState();
 }
 
-class _AgentSessionScreenState extends State<AgentSessionScreen>
-    with SingleTickerProviderStateMixin {
-  late final TabController _tabs;
-  final _input = TextEditingController();
+class _AgentChatPaneState extends State<AgentChatPane> {
   final _scroll = ScrollController();
-  bool _sending = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _tabs = TabController(length: 4, vsync: this);
-    widget.store.setFocusedSession(widget.sessionId);
-    widget.sendCommand('select_session', sessionId: widget.sessionId);
-    widget.sendCommand('get_agent_state', sessionId: widget.sessionId);
-  }
-
-  @override
-  void dispose() {
-    if (widget.store.focusedSessionId == widget.sessionId) {
-      widget.store.setFocusedSession(null);
-    }
-    _tabs.dispose();
-    _input.dispose();
-    _scroll.dispose();
-    super.dispose();
-  }
-
-  Future<void> _send() async {
-    final text = _input.text.trim();
-    if (text.isEmpty || _sending) return;
-    setState(() => _sending = true);
-    try {
-      await widget.sendCommand(
-        'agent_prompt',
-        sessionId: widget.sessionId,
-        text: text,
-      );
-      _input.clear();
-    } finally {
-      if (mounted) setState(() => _sending = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: widget.store,
-      builder: (context, _) {
-        final view = widget.store.sessions[widget.sessionId];
-        if (view == null) {
-          return Scaffold(
-            backgroundColor: const Color(0xFF1E1E1E),
-            appBar: AppBar(
-              backgroundColor: const Color(0xFF252526),
-              title: const Text('Session'),
-            ),
-            body: const Center(
-              child: Text('Session no longer available',
-                  style: TextStyle(color: Colors.white70)),
-            ),
-          );
-        }
-
-        final info = view.info;
-        final pending = view.pendingApproval;
-
-        final body = Column(
-          children: [
-            if (pending != null)
-              _PermissionBanner(request: pending),
-            Expanded(
-              child: TabBarView(
-                controller: _tabs,
-                children: [
-                  _ChatTab(
-                    messages: view.messages,
-                    notes: view.extractionNotes,
-                    controller: _scroll,
-                    agentRunning: info.state.toUpperCase() == 'RUNNING',
-                  ),
-                  _PlanTab(plan: view.plan),
-                  _ChangesTab(changes: view.fileChanges),
-                  _ActivityTab(activity: view.activity),
-                ],
-              ),
-            ),
-            _Composer(
-              controller: _input,
-              sending: _sending,
-              onSend: _send,
-            ),
-          ],
-        );
-
-        if (widget.embedded) {
-          return ColoredBox(
-            color: _CursorChatTheme.bg,
-            child: Column(
-              children: [
-                Material(
-                  color: _CursorChatTheme.panel,
-                  child: Column(
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 14, 8, 0),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                widget.historyTitle?.isNotEmpty == true
-                                    ? widget.historyTitle!
-                                    : info.displayName,
-                                style: const TextStyle(
-                                  color: _CursorChatTheme.text,
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w600,
-                                  letterSpacing: -0.2,
-                                ),
-                              ),
-                            ),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 8, vertical: 3),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF1A2332),
-                                borderRadius: BorderRadius.circular(999),
-                                border: Border.all(
-                                    color: const Color(0xFF2B4A6F)),
-                              ),
-                              child: const Text(
-                                'IDE',
-                                style: TextStyle(
-                                  color: Color(0xFF7EB6E8),
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w600,
-                                  letterSpacing: 0.4,
-                                ),
-                              ),
-                            ),
-                            IconButton(
-                              tooltip: 'Refresh',
-                              onPressed: () {
-                                widget.onRefresh();
-                                widget.sendCommand('get_agent_state',
-                                    sessionId: widget.sessionId);
-                              },
-                              icon: const Icon(Icons.refresh_rounded,
-                                  color: _CursorChatTheme.muted, size: 20),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 4, 20, 0),
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: Text(
-                            [
-                              info.stateLabel,
-                              if (info.model != null && info.model!.isNotEmpty)
-                                info.model!,
-                              if (info.workspace != null &&
-                                  info.workspace!.isNotEmpty &&
-                                  info.workspace != info.displayName)
-                                info.workspace!,
-                            ].join(' · '),
-                            style: const TextStyle(
-                              fontSize: 11,
-                              color: _CursorChatTheme.muted,
-                            ),
-                          ),
-                        ),
-                      ),
-                      TabBar(
-                        controller: _tabs,
-                        indicatorColor: const Color(0xFF4ADE80),
-                        indicatorSize: TabBarIndicatorSize.label,
-                        labelColor: _CursorChatTheme.text,
-                        unselectedLabelColor: _CursorChatTheme.muted,
-                        labelStyle: const TextStyle(
-                            fontSize: 13, fontWeight: FontWeight.w600),
-                        tabs: const [
-                          Tab(text: 'Chat'),
-                          Tab(text: 'Plan'),
-                          Tab(text: 'Changes'),
-                          Tab(text: 'Activity'),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-                Expanded(child: body),
-              ],
-            ),
-          );
-        }
-
-        return Scaffold(
-          backgroundColor: const Color(0xFF1E1E1E),
-          appBar: AppBar(
-            backgroundColor: const Color(0xFF252526),
-            foregroundColor: Colors.white,
-            title: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(info.displayName,
-                    style: const TextStyle(
-                        fontSize: 16, fontWeight: FontWeight.w700)),
-                Text(
-                  '${emojiForAgentState(info.state)} ${info.stateLabel}',
-                  style:
-                      const TextStyle(fontSize: 12, color: Color(0xFFBDBDBD)),
-                ),
-              ],
-            ),
-            actions: [
-              IconButton(
-                onPressed: () {
-                  widget.onRefresh();
-                  widget.sendCommand('get_agent_state',
-                      sessionId: widget.sessionId);
-                },
-                icon: const Icon(Icons.refresh),
-              ),
-            ],
-            bottom: TabBar(
-              controller: _tabs,
-              indicatorColor: const Color(0xFF80CBC4),
-              labelColor: Colors.white,
-              unselectedLabelColor: const Color(0xFF9E9E9E),
-              tabs: const [
-                Tab(text: 'Chat'),
-                Tab(text: 'Plan'),
-                Tab(text: 'Changes'),
-                Tab(text: 'Activity'),
-              ],
-            ),
-          ),
-          body: body,
-        );
-      },
-    );
-  }
-}
-
-class _PermissionBanner extends StatelessWidget {
-  final CdpPermissionRequest request;
-
-  const _PermissionBanner({required this.request});
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: const Color(0xFF3E2723),
-      child: SafeArea(
-        bottom: false,
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const Text(
-                '⚠️ Permission Required',
-                style: TextStyle(
-                  color: Color(0xFFFFCC80),
-                  fontWeight: FontWeight.w800,
-                  fontSize: 15,
-                ),
-              ),
-              const SizedBox(height: 6),
-              const Text(
-                'Agent wants to execute:',
-                style: TextStyle(color: Colors.white70, fontSize: 13),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                request.detail,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontFamily: 'monospace',
-                  fontSize: 13,
-                ),
-              ),
-              const SizedBox(height: 12),
-              const Text(
-                'Approve or reject it in Cursor on your computer — '
-                'remote approval is disabled for safety.',
-                style: TextStyle(color: Color(0xFFFFCC80), fontSize: 13),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _Composer extends StatelessWidget {
-  final TextEditingController controller;
-  final bool sending;
-  final VoidCallback onSend;
-
-  const _Composer({
-    required this.controller,
-    required this.sending,
-    required this.onSend,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      top: false,
-      child: Container(
-        color: _CursorChatTheme.bg,
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Container(
-              decoration: BoxDecoration(
-                color: const Color(0xFF1A1C22),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: _CursorChatTheme.border),
-              ),
-              padding: const EdgeInsets.fromLTRB(6, 4, 6, 4),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  IconButton(
-                    onPressed: null,
-                    tooltip: 'Attach',
-                    icon: const Icon(Icons.add, color: _CursorChatTheme.faint),
-                    visualDensity: VisualDensity.compact,
-                  ),
-                  Expanded(
-                    child: TextField(
-                      controller: controller,
-                      style: const TextStyle(
-                        color: _CursorChatTheme.text,
-                        fontSize: 14,
-                        height: 1.4,
-                      ),
-                      minLines: 1,
-                      maxLines: 6,
-                      decoration: const InputDecoration(
-                        hintText: 'Send a follow-up…',
-                        hintStyle: TextStyle(color: _CursorChatTheme.faint),
-                        border: InputBorder.none,
-                        isDense: true,
-                        contentPadding:
-                            EdgeInsets.symmetric(horizontal: 4, vertical: 12),
-                      ),
-                      textInputAction: TextInputAction.send,
-                      onSubmitted: (_) => onSend(),
-                    ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 4, right: 4),
-                    child: Material(
-                      color: sending
-                          ? _CursorChatTheme.border
-                          : _CursorChatTheme.accent,
-                      shape: const CircleBorder(),
-                      child: InkWell(
-                        customBorder: const CircleBorder(),
-                        onTap: sending ? null : onSend,
-                        child: SizedBox(
-                          width: 34,
-                          height: 34,
-                          child: Center(
-                            child: sending
-                                ? const SizedBox(
-                                    width: 14,
-                                    height: 14,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: Colors.white70,
-                                    ),
-                                  )
-                                : const Icon(Icons.arrow_upward_rounded,
-                                    size: 18, color: Colors.white),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 6),
-            const Row(
-              children: [
-                Text(
-                  'This Mac',
-                  style: TextStyle(
-                      color: _CursorChatTheme.faint, fontSize: 11),
-                ),
-                Icon(Icons.expand_more,
-                    size: 14, color: _CursorChatTheme.faint),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ChatTab extends StatefulWidget {
-  final List<CdpAgentMessage> messages;
-  final List<String> notes;
-  final ScrollController controller;
-  final bool agentRunning;
-
-  const _ChatTab({
-    required this.messages,
-    required this.notes,
-    required this.controller,
-    this.agentRunning = false,
-  });
-
-  @override
-  State<_ChatTab> createState() => _ChatTabState();
-}
-
-class _ChatTabState extends State<_ChatTab> {
-  int _lastCount = 0;
-  int _pendingNew = 0;
+  final _input = TextEditingController();
+  final _focus = FocusNode();
   bool _stickToBottom = true;
+  int _pendingNew = 0;
+  int _lastCount = 0;
+  String? _lastChat;
+
+  ChatStore get store => widget.store;
 
   @override
   void initState() {
     super.initState();
-    widget.controller.addListener(_onScroll);
-    _lastCount = widget.messages.length;
+    _scroll.addListener(_onScroll);
+    store.addListener(_onStore);
   }
 
   @override
-  void didUpdateWidget(covariant _ChatTab oldWidget) {
+  void didUpdateWidget(covariant AgentChatPane oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.messages.length != _lastCount ||
-        (widget.messages.isNotEmpty &&
-            oldWidget.messages.isNotEmpty &&
-            widget.messages.last.text != oldWidget.messages.last.text)) {
-      final grew = widget.messages.length > _lastCount;
-      _lastCount = widget.messages.length;
-      if (_stickToBottom) {
-        WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToEnd());
-      } else if (grew) {
-        setState(() => _pendingNew++);
-      }
+    if (oldWidget.store != widget.store) {
+      oldWidget.store.removeListener(_onStore);
+      widget.store.addListener(_onStore);
     }
   }
 
   @override
   void dispose() {
-    widget.controller.removeListener(_onScroll);
+    store.removeListener(_onStore);
+    _scroll.dispose();
+    _input.dispose();
+    _focus.dispose();
     super.dispose();
+  }
+
+  void _onStore() {
+    final count = store.thread?.items.length ?? 0;
+    final chat = store.selectedChatId;
+    if (chat != _lastChat) {
+      _lastChat = chat;
+      _lastCount = count;
+      _stickToBottom = true;
+      _pendingNew = 0;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToEnd());
+      return;
+    }
+    if (count == _lastCount) return;
+    final grew = count > _lastCount;
+    _lastCount = count;
+    if (_stickToBottom) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToEnd());
+    } else if (grew && mounted) {
+      setState(() => _pendingNew++);
+    }
   }
 
   void _onScroll() {
-    if (!widget.controller.hasClients) return;
-    final pos = widget.controller.position;
+    if (!_scroll.hasClients) return;
+    final pos = _scroll.position;
     final atBottom = pos.pixels >= pos.maxScrollExtent - 80;
     if (atBottom != _stickToBottom) {
       setState(() {
@@ -517,559 +129,824 @@ class _ChatTabState extends State<_ChatTab> {
     }
   }
 
+  void _jumpToEnd() {
+    if (_scroll.hasClients) _scroll.jumpTo(_scroll.position.maxScrollExtent);
+  }
+
   void _scrollToEnd() {
-    if (!widget.controller.hasClients) return;
-    widget.controller.animateTo(
-      widget.controller.position.maxScrollExtent,
-      duration: const Duration(milliseconds: 220),
-      curve: Curves.easeOut,
-    );
-    setState(() => _pendingNew = 0);
+    if (!_scroll.hasClients) return;
+    _scroll.animateTo(_scroll.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 220), curve: Curves.easeOut);
+    if (_pendingNew != 0) setState(() => _pendingNew = 0);
   }
 
-  bool _isMetaLine(CdpAgentMessage m) {
-    if (m.role != 'tool' && m.role != 'system') return false;
-    final t = m.text.trim();
-    return RegExp(r'^(worked for|thought)\b', caseSensitive: false).hasMatch(t) ||
-        RegExp(r'^chat context summarized$', caseSensitive: false).hasMatch(t);
+  void _send() {
+    final text = _input.text.trim();
+    if (text.isEmpty || store.running) return;
+    store.sendPrompt(text);
+    _input.clear();
+    _stickToBottom = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToEnd());
+  }
+
+  void _openDiff(FileEdit file) {
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => DiffScreen(file: file, diff: store.fileDiff(file.path)),
+    ));
+  }
+
+  Future<void> _resolve(PendingRequest request, bool approve) async {
+    if (!await confirmResolve(context, request, approve: approve)) return;
+    await store.resolve(request, approve: approve);
   }
 
   @override
   Widget build(BuildContext context) {
-    if (widget.messages.isEmpty) {
-      return ListView(
-        padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 48),
-        children: [
-          const Icon(Icons.chat_bubble_outline,
-              size: 40, color: Color(0xFF4B4B4E)),
-          const SizedBox(height: 16),
-          const Text(
-            'Conversation will appear here',
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: _CursorChatTheme.text,
-              fontSize: 16,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            widget.agentRunning
-                ? 'Agent is working in Cursor — new messages sync as they appear.'
-                : 'Open this chat in Cursor Agents, or send a prompt below.\nHistory rows load best-effort from the Agents sidebar.',
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-                color: _CursorChatTheme.muted, fontSize: 13, height: 1.45),
-          ),
-          if (widget.notes.isNotEmpty) ...[
-            const SizedBox(height: 24),
-            Theme(
-              data: ThemeData.dark(),
-              child: ExpansionTile(
-                tilePadding: EdgeInsets.zero,
-                title: const Text(
-                  'Diagnostics',
-                  style: TextStyle(color: _CursorChatTheme.muted, fontSize: 12),
+    return ListenableBuilder(
+      listenable: store,
+      builder: (context, _) {
+        final thread = store.thread;
+        final composer = store.liveComposer;
+        return ColoredBox(
+          color: Cr.bg,
+          child: Column(
+            children: [
+              _Header(store: store, onOpenSidebar: widget.onOpenSidebar),
+              if (store.error != null) _ErrorBanner(message: store.error!, onClose: store.clearError),
+              Expanded(child: _body(thread)),
+              if (thread != null && thread.filesChanged.isNotEmpty)
+                _FilesChanged(files: thread.filesChanged, onOpen: _openDiff),
+              if (composer?.pending != null)
+                _PermissionCard(
+                  request: composer!.pending!,
+                  onApprove: () => _resolve(composer.pending!, true),
+                  onReject: () => _resolve(composer.pending!, false),
                 ),
-                children: widget.notes
-                    .map((n) => Align(
-                          alignment: Alignment.centerLeft,
-                          child: Padding(
-                            padding: const EdgeInsets.only(bottom: 4),
-                            child: Text('• $n',
-                                style: const TextStyle(
-                                    color: _CursorChatTheme.faint,
-                                    fontSize: 11)),
-                          ),
-                        ))
-                    .toList(),
+              _Composer(
+                store: store,
+                controller: _input,
+                focus: _focus,
+                onSend: _send,
               ),
-            ),
-          ],
-        ],
-      );
-    }
-
-    return ColoredBox(
-      color: _CursorChatTheme.bg,
-      child: Stack(
-        children: [
-          ListView.builder(
-            controller: widget.controller,
-            padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
-            itemCount: widget.messages.length + (widget.agentRunning ? 1 : 0),
-            itemBuilder: (context, i) {
-              if (i == widget.messages.length) {
-                return const Padding(
-                  padding: EdgeInsets.only(top: 8, bottom: 8),
-                  child: Row(
-                    children: [
-                      SizedBox(
-                        width: 12,
-                        height: 12,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 1.5,
-                          color: _CursorChatTheme.muted,
-                        ),
-                      ),
-                      SizedBox(width: 10),
-                      Text(
-                        'Working…',
-                        style: TextStyle(
-                            color: _CursorChatTheme.muted, fontSize: 12),
-                      ),
-                    ],
-                  ),
-                );
-              }
-              final m = widget.messages[i];
-              if (_isMetaLine(m)) {
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 10, top: 4),
-                  child: Text(
-                    m.text.trim(),
-                    style: const TextStyle(
-                      color: _CursorChatTheme.muted,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                );
-              }
-              if (m.role == 'user') {
-                return _CursorUserBubble(text: m.text);
-              }
-              return _CursorAssistantBlock(
-                text: m.text,
-                streaming: m.status == 'streaming',
-              );
-            },
+            ],
           ),
-          if (_pendingNew > 0)
-            Positioned(
-              bottom: 12,
-              left: 0,
-              right: 0,
-              child: Center(
-                child: Material(
-                  color: _CursorChatTheme.accent,
-                  borderRadius: BorderRadius.circular(20),
-                  child: InkWell(
-                    onTap: _scrollToEnd,
-                    borderRadius: BorderRadius.circular(20),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 14, vertical: 8),
-                      child: Text(
-                        '$_pendingNew new message${_pendingNew == 1 ? '' : 's'} ↓',
-                        style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _CursorUserBubble extends StatelessWidget {
-  final String text;
-  const _CursorUserBubble({required this.text});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 18),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Align(
-            alignment: Alignment.centerLeft,
-            child: ConstrainedBox(
-              constraints: BoxConstraints(
-                maxWidth: MediaQuery.sizeOf(context).width * 0.92,
-              ),
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                decoration: BoxDecoration(
-                  color: _CursorChatTheme.userBubble,
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: SelectableText(
-                  text,
-                  style: const TextStyle(
-                    color: _CursorChatTheme.text,
-                    fontSize: 14.5,
-                    height: 1.45,
-                  ),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 6),
-          _MessageActions(text: text),
-        ],
-      ),
-    );
-  }
-}
-
-class _CursorAssistantBlock extends StatelessWidget {
-  final String text;
-  final bool streaming;
-  const _CursorAssistantBlock({required this.text, this.streaming = false});
-
-  static MarkdownStyleSheet _sheet(BuildContext context) {
-    const base = TextStyle(
-      color: _CursorChatTheme.text,
-      fontSize: 14.5,
-      height: 1.55,
-    );
-    return MarkdownStyleSheet(
-      p: base,
-      pPadding: const EdgeInsets.only(bottom: 10),
-      strong: base.copyWith(fontWeight: FontWeight.w700),
-      em: base.copyWith(fontStyle: FontStyle.italic),
-      a: base.copyWith(
-        color: _CursorChatTheme.link,
-        decoration: TextDecoration.underline,
-        decorationColor: _CursorChatTheme.link.withValues(alpha: 0.4),
-      ),
-      code: base.copyWith(
-        fontFamily: 'monospace',
-        fontSize: 13,
-        backgroundColor: const Color(0xFF1A1C22),
-        color: const Color(0xFFE2E8F0),
-      ),
-      codeblockDecoration: BoxDecoration(
-        color: const Color(0xFF1A1C22),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: _CursorChatTheme.border),
-      ),
-      codeblockPadding: const EdgeInsets.all(12),
-      blockquote: base.copyWith(color: _CursorChatTheme.muted),
-      blockquoteDecoration: const BoxDecoration(
-        border: Border(
-          left: BorderSide(color: _CursorChatTheme.border, width: 3),
-        ),
-      ),
-      h1: base.copyWith(fontSize: 20, fontWeight: FontWeight.w700, height: 1.3),
-      h2: base.copyWith(fontSize: 17, fontWeight: FontWeight.w700, height: 1.3),
-      h3: base.copyWith(fontSize: 15, fontWeight: FontWeight.w700, height: 1.3),
-      h1Padding: const EdgeInsets.only(top: 8, bottom: 8),
-      h2Padding: const EdgeInsets.only(top: 6, bottom: 6),
-      h3Padding: const EdgeInsets.only(top: 4, bottom: 4),
-      listBullet: base,
-      listIndent: 22,
-      tableHead: base.copyWith(
-        fontWeight: FontWeight.w600,
-        color: _CursorChatTheme.muted,
-        fontSize: 13,
-      ),
-      tableBody: base.copyWith(fontSize: 13.5),
-      tableBorder: TableBorder(
-        horizontalInside: BorderSide(
-          color: _CursorChatTheme.border.withValues(alpha: 0.9),
-        ),
-        bottom: BorderSide(color: _CursorChatTheme.border.withValues(alpha: 0.9)),
-      ),
-      tableCellsPadding:
-          const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      tableHeadAlign: TextAlign.left,
-      tableColumnWidth: const FlexColumnWidth(),
-      horizontalRuleDecoration: BoxDecoration(
-        border: Border(
-          top: BorderSide(color: _CursorChatTheme.border.withValues(alpha: 0.8)),
-        ),
-      ),
-    );
-  }
-
-  /// Soften plain DOM text into markdown-ish structure when Cursor dumps
-  /// headings without `#` markers (common from DOM scrape).
-  String _prepare(String raw) {
-    var t = raw.trim();
-    // Linkify bare cursor.com / http URLs that aren't already markdown links
-    t = t.replaceAllMapped(
-      RegExp(r'(?<!\]\()(?<!\[)(https?:\/\/[^\s\)]+|cursor\.com\/[^\s\)]+)'),
-      (m) {
-        final u = m.group(1)!;
-        final href = u.startsWith('http') ? u : 'https://$u';
-        return '[$u]($href)';
-      },
-    );
-    return t;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final prepared = _prepare(text);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (streaming)
-            const Padding(
-              padding: EdgeInsets.only(bottom: 6),
-              child: Text(
-                'Generating…',
-                style: TextStyle(
-                    color: _CursorChatTheme.muted,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w500),
-              ),
-            ),
-          MarkdownBody(
-            data: prepared,
-            selectable: true,
-            styleSheet: _sheet(context),
-            softLineBreak: true,
-          ),
-          const SizedBox(height: 8),
-          _MessageActions(text: text),
-        ],
-      ),
-    );
-  }
-}
-
-class _MessageActions extends StatelessWidget {
-  final String text;
-  const _MessageActions({required this.text});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        _ActionIcon(
-          icon: Icons.thumb_up_alt_outlined,
-          onTap: () {},
-        ),
-        _ActionIcon(
-          icon: Icons.thumb_down_alt_outlined,
-          onTap: () {},
-        ),
-        _ActionIcon(
-          icon: Icons.content_copy_rounded,
-          onTap: () async {
-            await Clipboard.setData(ClipboardData(text: text));
-            if (context.mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Copied'),
-                  duration: Duration(seconds: 1),
-                  behavior: SnackBarBehavior.floating,
-                ),
-              );
-            }
-          },
-        ),
-        _ActionIcon(
-          icon: Icons.refresh_rounded,
-          onTap: () {},
-        ),
-      ],
-    );
-  }
-}
-
-class _ActionIcon extends StatelessWidget {
-  final IconData icon;
-  final VoidCallback onTap;
-  const _ActionIcon({required this.icon, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(6),
-      child: Padding(
-        padding: const EdgeInsets.all(6),
-        child: Icon(icon, size: 15, color: _CursorChatTheme.faint),
-      ),
-    );
-  }
-}
-
-class _PlanTab extends StatelessWidget {
-  final CdpAgentPlan? plan;
-  const _PlanTab({required this.plan});
-
-  @override
-  Widget build(BuildContext context) {
-    if (plan == null || !plan!.available) {
-      return const Padding(
-        padding: EdgeInsets.all(16),
-        child: Text(
-          'Plan\n\nNOT CURRENTLY ACCESSIBLE / PARTIALLY SUPPORTED\n\n'
-          'No plan UI detected in this Cursor target. '
-          'When Cursor exposes plan steps in the DOM, they appear here.',
-          style: TextStyle(color: Colors.white70, height: 1.4),
-        ),
-      );
-    }
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        Text(
-          plan!.title.isEmpty ? 'Plan' : plan!.title,
-          style: const TextStyle(
-              color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700),
-        ),
-        Text('Support: ${plan!.support}',
-            style: const TextStyle(color: Color(0xFF9E9E9E), fontSize: 12)),
-        const SizedBox(height: 12),
-        ...plan!.steps.map((s) {
-          final mark = s.status == 'completed'
-              ? '✓'
-              : s.status == 'running'
-                  ? '●'
-                  : '○';
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 10),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(mark,
-                    style: TextStyle(
-                      color: s.status == 'completed'
-                          ? const Color(0xFF81C784)
-                          : s.status == 'running'
-                              ? const Color(0xFFFFB74D)
-                              : const Color(0xFF9E9E9E),
-                      fontSize: 16,
-                    )),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(s.text,
-                      style: const TextStyle(color: Colors.white, fontSize: 14)),
-                ),
-              ],
-            ),
-          );
-        }),
-      ],
-    );
-  }
-}
-
-class _ChangesTab extends StatelessWidget {
-  final CdpFileChanges changes;
-  const _ChangesTab({required this.changes});
-
-  @override
-  Widget build(BuildContext context) {
-    if (!changes.available) {
-      return Padding(
-        padding: const EdgeInsets.all(16),
-        child: Text(
-          'Changes\n\n${changes.support}\n\n'
-          '${changes.note ?? "File change list is not reliably exposed via CDP Agent DOM."}\n'
-          'Diffs are typically NOT CURRENTLY ACCESSIBLE from this path.',
-          style: const TextStyle(color: Colors.white70, height: 1.4),
-        ),
-      );
-    }
-    final modified =
-        changes.items.where((e) => e.changeType == 'modified').toList();
-    final added = changes.items.where((e) => e.changeType == 'added').toList();
-    final deleted =
-        changes.items.where((e) => e.changeType == 'deleted').toList();
-    final other =
-        changes.items.where((e) => e.changeType == 'unknown').toList();
-
-    Widget section(String title, List<CdpFileChange> items, Color color) {
-      if (items.isEmpty) return const SizedBox.shrink();
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(title,
-              style: TextStyle(
-                  color: color, fontWeight: FontWeight.w700, fontSize: 14)),
-          const SizedBox(height: 6),
-          ...items.map((f) => Padding(
-                padding: const EdgeInsets.only(bottom: 6),
-                child: Text(f.path,
-                    style: const TextStyle(
-                        color: Colors.white, fontFamily: 'monospace')),
-              )),
-          const SizedBox(height: 14),
-        ],
-      );
-    }
-
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        Text('Support: ${changes.support}',
-            style: const TextStyle(color: Color(0xFF9E9E9E), fontSize: 12)),
-        const SizedBox(height: 12),
-        section('Modified', modified, const Color(0xFFFFB74D)),
-        section('Added', added, const Color(0xFF81C784)),
-        section('Deleted', deleted, const Color(0xFFE57373)),
-        section('Other', other, const Color(0xFFBDBDBD)),
-      ],
-    );
-  }
-}
-
-class _ActivityTab extends StatelessWidget {
-  final List<CdpActivityEvent> activity;
-  const _ActivityTab({required this.activity});
-
-  @override
-  Widget build(BuildContext context) {
-    if (activity.isEmpty) {
-      return const Padding(
-        padding: EdgeInsets.all(16),
-        child: Text(
-          'No activity events yet.\nUpdates appear as the Agent works.',
-          style: TextStyle(color: Colors.white70),
-        ),
-      );
-    }
-    return ListView.separated(
-      padding: const EdgeInsets.all(16),
-      itemCount: activity.length,
-      separatorBuilder: (_, __) => const Divider(color: Color(0xFF333333)),
-      itemBuilder: (context, i) {
-        final e = activity[activity.length - 1 - i];
-        return ListTile(
-          contentPadding: EdgeInsets.zero,
-          leading: Icon(_icon(e.kind), color: const Color(0xFF80CBC4), size: 20),
-          title: Text(e.text,
-              style: const TextStyle(color: Colors.white, fontSize: 14)),
-          subtitle: Text(e.kind,
-              style: const TextStyle(color: Color(0xFF9E9E9E), fontSize: 11)),
         );
       },
     );
   }
 
-  IconData _icon(String kind) {
-    switch (kind) {
-      case 'reading':
-        return Icons.menu_book_outlined;
-      case 'command':
-        return Icons.terminal;
-      case 'permission':
-        return Icons.warning_amber;
-      case 'thinking':
-        return Icons.psychology_alt_outlined;
-      case 'completed':
-        return Icons.check_circle_outline;
-      case 'error':
-        return Icons.error_outline;
-      default:
-        return Icons.bolt;
+  Widget _body(ChatThread? thread) {
+    if (store.draft) {
+      return const _Placeholder(
+        icon: Icons.add_comment_outlined,
+        title: 'New chat',
+        body: 'Type a prompt below. Cursor starts a new chat in its Agents window.',
+      );
     }
+    if (thread == null) {
+      return const _Placeholder(
+        icon: Icons.forum_outlined,
+        title: 'Pick a chat',
+        body: 'Choose a chat from the sidebar, or start a new one.',
+      );
+    }
+    if (thread.loading) {
+      return const Center(child: CircularProgressIndicator(strokeWidth: 2));
+    }
+    final items = thread.items;
+    final pending = store.pendingPrompt;
+    final extra = (pending != null ? 1 : 0) + (store.running ? 1 : 0);
+    final head = thread.hasOlder ? 1 : 0;
+    if (items.isEmpty && pending == null) {
+      return const _Placeholder(
+        icon: Icons.chat_bubble_outline,
+        title: 'No messages yet',
+        body: 'This chat has no saved history on the Mac. Send a prompt to continue it.',
+      );
+    }
+    return Stack(
+      children: [
+        ListView.builder(
+          controller: _scroll,
+          padding: const EdgeInsets.fromLTRB(18, 14, 18, 24),
+          itemCount: head + items.length + extra,
+          itemBuilder: (context, i) {
+            if (i < head) {
+              return Center(
+                child: thread.loadingOlder
+                    ? const Padding(
+                        padding: EdgeInsets.all(8),
+                        child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                      )
+                    : TextButton.icon(
+                        onPressed: store.loadOlder,
+                        icon: const Icon(Icons.history_rounded, size: 16),
+                        label: const Text('Load older'),
+                      ),
+              );
+            }
+            final index = i - head;
+            if (index < items.length) return _ItemView(item: items[index], onOpenFile: _openDiff);
+            if (pending != null && index == items.length) {
+              return Opacity(opacity: 0.6, child: _UserBubble(text: pending));
+            }
+            return const _Working();
+          },
+        ),
+        if (_pendingNew > 0)
+          Positioned(
+            bottom: 10,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: Material(
+                color: Cr.accent,
+                borderRadius: BorderRadius.circular(20),
+                child: InkWell(
+                  onTap: _scrollToEnd,
+                  borderRadius: BorderRadius.circular(20),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    child: Text('$_pendingNew new message${_pendingNew == 1 ? '' : 's'} ↓',
+                        style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// Status label for a chat, as Cursor shows it next to the row.
+(String, Color, bool) chatStatus(String status, {bool running = false, bool waiting = false}) {
+  if (waiting || status == 'waiting') return ('Waiting for you', Cr.warning, false);
+  if (running || status == 'running') return ('Working', Cr.warning, true);
+  if (status == 'error') return ('Error', Cr.danger, false);
+  if (status == 'draft') return ('Draft', Cr.textFaint, false);
+  return ('Idle', Cr.success, false);
+}
+
+class _Header extends StatelessWidget {
+  final ChatStore store;
+  final VoidCallback? onOpenSidebar;
+  const _Header({required this.store, this.onOpenSidebar});
+
+  @override
+  Widget build(BuildContext context) {
+    final row = store.selectedRow;
+    final composer = store.liveComposer;
+    final title = store.draft
+        ? 'New chat'
+        : (store.thread?.title.isNotEmpty == true ? store.thread!.title : (row?.title ?? 'Cursor Remote'));
+    final (label, color, busy) = chatStatus(row?.status ?? 'done',
+        running: store.running, waiting: composer?.pending != null);
+    final subtitle = store.thread?.repoName ?? row?.group ?? '';
+    return Container(
+      height: 52,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: const BoxDecoration(
+        color: Cr.bgElevated,
+        border: Border(bottom: BorderSide(color: Cr.borderSubtle)),
+      ),
+      child: Row(
+        children: [
+          if (onOpenSidebar != null)
+            IconButton(
+              tooltip: 'Chats',
+              icon: const Icon(Icons.menu_rounded, size: 20),
+              onPressed: onOpenSidebar,
+            )
+          else
+            const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Cr.text, fontSize: 14.5, fontWeight: FontWeight.w600)),
+                if (subtitle.isNotEmpty && !store.draft)
+                  Text(subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: Cr.textFaint, fontSize: 11.5)),
+              ],
+            ),
+          ),
+          if (!store.draft && store.thread != null)
+            Padding(
+              padding: const EdgeInsets.only(left: 8, right: 8),
+              child: _StatusPill(label: label, color: color, busy: busy),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StatusPill extends StatelessWidget {
+  final String label;
+  final Color color;
+  final bool busy;
+  const _StatusPill({required this.label, required this.color, this.busy = false});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        busy
+            ? SizedBox(width: 9, height: 9, child: CircularProgressIndicator(strokeWidth: 1.4, color: color))
+            : Container(width: 7, height: 7, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+        const SizedBox(width: 6),
+        Text(label, style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w600)),
+      ]),
+    );
+  }
+}
+
+class _ErrorBanner extends StatelessWidget {
+  final String message;
+  final VoidCallback onClose;
+  const _ErrorBanner({required this.message, required this.onClose});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      color: Cr.danger.withValues(alpha: 0.12),
+      padding: const EdgeInsets.fromLTRB(14, 6, 4, 6),
+      child: Row(children: [
+        const Icon(Icons.error_outline_rounded, size: 16, color: Cr.danger),
+        const SizedBox(width: 8),
+        Expanded(child: Text(message, style: const TextStyle(color: Cr.text, fontSize: 12.5))),
+        IconButton(
+          tooltip: 'Dismiss',
+          iconSize: 16,
+          visualDensity: VisualDensity.compact,
+          icon: const Icon(Icons.close_rounded),
+          onPressed: onClose,
+        ),
+      ]),
+    );
+  }
+}
+
+class _Placeholder extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String body;
+  const _Placeholder({required this.icon, required this.title, required this.body});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, size: 38, color: Cr.textFaint),
+          const SizedBox(height: 14),
+          Text(title, style: const TextStyle(color: Cr.text, fontSize: 16, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 6),
+          Text(body,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Cr.textSecondary, fontSize: 13, height: 1.45)),
+        ]),
+      ),
+    );
+  }
+}
+
+class _ItemView extends StatelessWidget {
+  final ChatItem item;
+  final ValueChanged<FileEdit> onOpenFile;
+  const _ItemView({required this.item, required this.onOpenFile});
+
+  @override
+  Widget build(BuildContext context) {
+    switch (item.role) {
+      case 'user':
+        return _UserBubble(text: item.text);
+      case 'work':
+        return item.work == null ? const SizedBox.shrink() : WorkGroup(work: item.work!, onOpenFile: onOpenFile);
+      default:
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 16),
+          child: ChatMarkdown(item.text),
+        );
+    }
+  }
+}
+
+class _UserBubble extends StatelessWidget {
+  final String text;
+  const _UserBubble({required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+          decoration: BoxDecoration(
+            color: Cr.userBubble,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Cr.borderSubtle),
+          ),
+          child: SelectableText(text, style: const TextStyle(color: Cr.text, fontSize: 14.5, height: 1.45)),
+        ),
+      ),
+    );
+  }
+}
+
+/// Collapsible "Edited N files, ran N commands" group for one turn of tool use.
+class WorkGroup extends StatefulWidget {
+  final WorkSummary work;
+  final ValueChanged<FileEdit> onOpenFile;
+  const WorkGroup({super.key, required this.work, required this.onOpenFile});
+
+  @override
+  State<WorkGroup> createState() => _WorkGroupState();
+}
+
+class _WorkGroupState extends State<WorkGroup> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final w = widget.work;
+    final hasDetail = w.edits.isNotEmpty || w.commands.isNotEmpty || w.notes.isNotEmpty;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            borderRadius: BorderRadius.circular(6),
+            onTap: hasDetail ? () => setState(() => _open = !_open) : null,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(w.edits.isNotEmpty ? Icons.edit_note_rounded : Icons.bolt_rounded,
+                    size: 16, color: Cr.textFaint),
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Text(w.summary.isEmpty ? 'Worked' : w.summary,
+                      style: const TextStyle(color: Cr.textSecondary, fontSize: 12.5, fontWeight: FontWeight.w500)),
+                ),
+                if (hasDetail)
+                  Icon(_open ? Icons.expand_less_rounded : Icons.expand_more_rounded, size: 16, color: Cr.textFaint),
+              ]),
+            ),
+          ),
+          if (_open)
+            Container(
+              margin: const EdgeInsets.only(top: 4, left: 4),
+              padding: const EdgeInsets.only(left: 12),
+              decoration: const BoxDecoration(border: Border(left: BorderSide(color: Cr.border))),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final e in w.edits)
+                    InkWell(
+                      onTap: e.kind == 'deleted' ? null : () => widget.onOpenFile(e),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        child: Row(children: [
+                          Icon(_kindIcon(e.kind), size: 14, color: Cr.textFaint),
+                          const SizedBox(width: 6),
+                          Flexible(
+                            child: Text(e.name,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(color: Cr.link, fontSize: 12.5)),
+                          ),
+                          const SizedBox(width: 8),
+                          DiffCounts(added: e.added, removed: e.removed),
+                        ]),
+                      ),
+                    ),
+                  for (final c in w.commands)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 3),
+                      child: Text('\$ $c',
+                          style: const TextStyle(fontFamily: 'monospace', fontSize: 12, color: Cr.textSecondary)),
+                    ),
+                  for (final n in w.notes)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: Text(n, style: const TextStyle(fontSize: 12, color: Cr.textFaint)),
+                    ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+IconData _kindIcon(String kind) => switch (kind) {
+      'added' => Icons.note_add_outlined,
+      'deleted' => Icons.delete_outline_rounded,
+      _ => Icons.description_outlined,
+    };
+
+class _Working extends StatelessWidget {
+  const _Working();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Padding(
+      padding: EdgeInsets.symmetric(vertical: 8),
+      child: Row(children: [
+        SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.5, color: Cr.textSecondary)),
+        SizedBox(width: 10),
+        Text('Working…', style: TextStyle(color: Cr.textSecondary, fontSize: 12)),
+      ]),
+    );
+  }
+}
+
+/// "N Files Changed" panel above the composer; tapping a file opens its diff.
+class _FilesChanged extends StatefulWidget {
+  final List<FileEdit> files;
+  final ValueChanged<FileEdit> onOpen;
+  const _FilesChanged({required this.files, required this.onOpen});
+
+  @override
+  State<_FilesChanged> createState() => _FilesChangedState();
+}
+
+class _FilesChangedState extends State<_FilesChanged> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final files = widget.files;
+    final added = files.fold<int>(0, (s, f) => s + f.added);
+    final removed = files.fold<int>(0, (s, f) => s + f.removed);
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+      decoration: BoxDecoration(
+        color: Cr.surface,
+        borderRadius: BorderRadius.circular(Cr.radiusMd),
+        border: Border.all(color: Cr.borderSubtle),
+      ),
+      child: Column(
+        children: [
+          InkWell(
+            borderRadius: BorderRadius.circular(Cr.radiusMd),
+            onTap: () => setState(() => _open = !_open),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+              child: Row(children: [
+                Icon(_open ? Icons.expand_more_rounded : Icons.chevron_right_rounded, size: 18, color: Cr.textFaint),
+                const SizedBox(width: 4),
+                Text('${files.length} File${files.length == 1 ? '' : 's'} Changed',
+                    style: const TextStyle(color: Cr.text, fontSize: 13, fontWeight: FontWeight.w600)),
+                const SizedBox(width: 8),
+                DiffCounts(added: added, removed: removed),
+              ]),
+            ),
+          ),
+          if (_open)
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 220),
+              child: ListView(
+                shrinkWrap: true,
+                padding: const EdgeInsets.only(bottom: 6),
+                children: [
+                  for (final f in files)
+                    InkWell(
+                      onTap: f.kind == 'deleted' ? null : () => widget.onOpen(f),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                        child: Row(children: [
+                          Icon(_kindIcon(f.kind), size: 15, color: Cr.textFaint),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text.rich(
+                              TextSpan(children: [
+                                TextSpan(text: f.name, style: const TextStyle(color: Cr.text)),
+                                TextSpan(
+                                  text: '  ${f.path}',
+                                  style: const TextStyle(color: Cr.textFaint, fontSize: 11),
+                                ),
+                              ]),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontSize: 12.5),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          DiffCounts(added: f.added, removed: f.removed),
+                        ]),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The agent is waiting for permission: shows the exact command with Approve and Reject.
+class _PermissionCard extends StatelessWidget {
+  final PendingRequest request;
+  final VoidCallback onApprove;
+  final VoidCallback onReject;
+  const _PermissionCard({required this.request, required this.onApprove, required this.onReject});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: BoxDecoration(
+        color: Cr.warning.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(Cr.radiusMd),
+        border: Border.all(color: Cr.warning.withValues(alpha: 0.4)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(children: [
+            Icon(Icons.shield_outlined, size: 16, color: Cr.warning),
+            SizedBox(width: 6),
+            Text('Waiting for your approval',
+                style: TextStyle(color: Cr.text, fontSize: 13, fontWeight: FontWeight.w600)),
+          ]),
+          const SizedBox(height: 8),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 140),
+            child: SingleChildScrollView(child: CodeBlock(request.shown)),
+          ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              OutlinedButton(
+                style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10)),
+                onPressed: onReject,
+                child: Text(request.rejectLabel),
+              ),
+              const SizedBox(width: 8),
+              FilledButton(
+                style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10)),
+                onPressed: onApprove,
+                child: Text(request.approveLabel),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _Composer extends StatelessWidget {
+  final ChatStore store;
+  final TextEditingController controller;
+  final FocusNode focus;
+  final VoidCallback onSend;
+  const _Composer({required this.store, required this.controller, required this.focus, required this.onSend});
+
+  Future<void> _pickModel(BuildContext context) async {
+    if (store.models.isEmpty) store.loadModels();
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Cr.surface,
+      builder: (context) => ListenableBuilder(
+        listenable: store,
+        builder: (context, _) {
+          final current = store.liveComposer?.model ?? '';
+          if (store.models.isEmpty) {
+            return SizedBox(
+              height: 160,
+              child: Center(
+                child: store.loadingModels
+                    ? const CircularProgressIndicator(strokeWidth: 2)
+                    : const Text('No models found. Is the Agents window open in Cursor?',
+                        style: TextStyle(color: Cr.textSecondary)),
+              ),
+            );
+          }
+          return SafeArea(
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(16, 14, 16, 6),
+                  child: Text('Model', style: TextStyle(color: Cr.textFaint, fontSize: 12, fontWeight: FontWeight.w600)),
+                ),
+                for (final m in store.models)
+                  ListTile(
+                    dense: true,
+                    title: Text(m),
+                    trailing: current.toLowerCase().startsWith(m.toLowerCase())
+                        ? const Icon(Icons.check_rounded, size: 18, color: Cr.accent)
+                        : null,
+                    onTap: () => Navigator.pop(context, m),
+                  ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+    if (picked != null) await store.setModel(picked);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final composer = store.liveComposer;
+    final running = store.running;
+    final canAct = store.draft || store.selectedChatId != null;
+    final meta = [
+      if (composer?.branch.isNotEmpty == true) composer!.branch,
+      if (composer?.environment.isNotEmpty == true) composer!.environment,
+      if (composer?.contextPercent != null) 'Context ${composer!.contextPercent}%',
+    ];
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+      decoration: const BoxDecoration(
+        color: Cr.bgElevated,
+        border: Border(top: BorderSide(color: Cr.borderSubtle)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Container(
+              decoration: BoxDecoration(
+                color: Cr.surfaceHigh,
+                borderRadius: BorderRadius.circular(Cr.radiusMd),
+                border: Border.all(color: Cr.border),
+              ),
+              child: Column(
+                children: [
+                  CallbackShortcuts(
+                    bindings: {
+                      const SingleActivator(LogicalKeyboardKey.enter, meta: true): onSend,
+                      const SingleActivator(LogicalKeyboardKey.enter, control: true): onSend,
+                    },
+                    child: TextField(
+                      controller: controller,
+                      focusNode: focus,
+                      enabled: canAct,
+                      minLines: 1,
+                      maxLines: 6,
+                      textInputAction: TextInputAction.newline,
+                      style: const TextStyle(color: Cr.text, fontSize: 14.5),
+                      decoration: InputDecoration(
+                        hintText: store.draft ? 'Plan, build, or ask anything…' : 'Add a follow-up…',
+                        filled: false,
+                        border: InputBorder.none,
+                        enabledBorder: InputBorder.none,
+                        focusedBorder: InputBorder.none,
+                        disabledBorder: InputBorder.none,
+                        contentPadding: const EdgeInsets.fromLTRB(14, 12, 14, 6),
+                      ),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 0, 6, 6),
+                    child: Row(
+                      children: [
+                        if (composer?.canMode ?? true)
+                          _ModeChip(
+                            mode: composer?.mode ?? 'Agent',
+                            enabled: canAct && !running,
+                            onPick: store.setMode,
+                          ),
+                        const SizedBox(width: 6),
+                        if (composer?.canModel ?? true)
+                          Flexible(
+                            child: _Chip(
+                              icon: Icons.auto_awesome_outlined,
+                              label: composer?.model.isNotEmpty == true ? composer!.model : 'Model',
+                              onTap: canAct && !running ? () => _pickModel(context) : null,
+                            ),
+                          ),
+                        const Spacer(),
+                        if (running)
+                          IconButton.filled(
+                            tooltip: 'Stop',
+                            style: IconButton.styleFrom(backgroundColor: Cr.surfaceHover),
+                            icon: const Icon(Icons.stop_rounded, size: 18),
+                            onPressed: store.stop,
+                          )
+                        else
+                          ValueListenableBuilder<TextEditingValue>(
+                            valueListenable: controller,
+                            builder: (context, value, _) => IconButton.filled(
+                              tooltip: 'Send',
+                              icon: const Icon(Icons.arrow_upward_rounded, size: 18),
+                              onPressed: canAct && value.text.trim().isNotEmpty ? onSend : null,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (meta.isNotEmpty || (!store.draft && store.selectedChatId != null && composer == null))
+              Padding(
+                padding: const EdgeInsets.only(top: 6, left: 4),
+                child: Text(
+                  meta.isNotEmpty ? meta.join('  ·  ') : 'Not open in Cursor — sending opens it there',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: Cr.textFaint, fontSize: 11.5),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _Chip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback? onTap;
+  const _Chip({required this.icon, required this.label, this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Cr.surface,
+      borderRadius: BorderRadius.circular(999),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(999),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(icon, size: 13, color: onTap == null ? Cr.textFaint : Cr.textSecondary),
+            const SizedBox(width: 5),
+            Flexible(
+              child: Text(label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      color: onTap == null ? Cr.textFaint : Cr.textSecondary,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500)),
+            ),
+            Icon(Icons.expand_more_rounded, size: 14, color: Cr.textFaint),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
+class _ModeChip extends StatelessWidget {
+  final String mode;
+  final bool enabled;
+  final Future<void> Function(String mode) onPick;
+  const _ModeChip({required this.mode, required this.enabled, required this.onPick});
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<String>(
+      enabled: enabled,
+      tooltip: 'Mode',
+      color: Cr.surfaceHigh,
+      onSelected: onPick,
+      itemBuilder: (context) => [
+        for (final m in kComposerModes)
+          CheckedPopupMenuItem(value: m, checked: m.toLowerCase() == mode.toLowerCase(), child: Text(m)),
+      ],
+      child: IgnorePointer(
+        child: _Chip(
+          icon: switch (mode.toLowerCase()) {
+            'ask' => Icons.help_outline_rounded,
+            'plan' => Icons.checklist_rounded,
+            _ => Icons.all_inclusive_rounded,
+          },
+          label: mode,
+          onTap: enabled ? () {} : null,
+        ),
+      ),
+    );
   }
 }

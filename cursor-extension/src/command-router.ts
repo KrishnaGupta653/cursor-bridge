@@ -6,12 +6,43 @@ import { CommandHandler } from "./command-handler";
 import { WebSocketServer } from "./websocket-server";
 import { CommandMessage, CommandResult } from "./types";
 import * as vscode from "vscode";
-import { remoteCommandError } from "./command-policy";
+import { REMOTE_ACTIONS, remoteCommandError } from "./command-policy";
+import { AgentsWindow, SidebarRow } from "./cdp/agents-window";
+import { ChatWatcher } from "./chat-watcher";
+import { TranscriptIndex } from "./transcripts/transcript-index";
+import { WorkspaceDiff, diffFromSnippets } from "./transcripts/workspace-diff";
+
+export interface ChatServices {
+  index: TranscriptIndex;
+  diff: WorkspaceDiff;
+  watcher: ChatWatcher;
+  agents: () => AgentsWindow | null;
+  remoteActionsEnabled: () => boolean;
+}
+
+export function channelOf(clientId: string | undefined): "relay" | "telegram" | "local" {
+  if (clientId?.startsWith("relay:")) return "relay";
+  if (clientId?.startsWith("telegram:")) return "telegram";
+  return "local";
+}
 
 export class CommandRouter {
   private commandHandler: CommandHandler;
   private wsServer: WebSocketServer;
   private outputChannel: vscode.OutputChannel;
+  private chat: ChatServices | null = null;
+
+  setChatServices(services: ChatServices | null): void {
+    this.chat = services;
+  }
+
+  /** One line per remote action: channel, action, chat. Never includes prompt text or credentials. */
+  private audit(command: CommandMessage, ok: boolean, detail = ""): void {
+    const chatId = typeof command.chatId === "string" ? command.chatId : "-";
+    this.outputChannel.appendLine(
+      `[${new Date().toISOString()}] [Audit] channel=${channelOf(command.clientId)} action=${command.type} chat=${chatId} result=${ok ? "ok" : "refused"}${detail ? ` ${detail}` : ""}`
+    );
+  }
 
   constructor(
     commandHandler: CommandHandler,
@@ -71,7 +102,14 @@ export class CommandRouter {
     const startedAt = Date.now();
     try {
       const policyError = remoteCommandError(command);
-      if (policyError) throw new Error(policyError);
+      if (policyError) {
+        if (REMOTE_ACTIONS.has(command.type)) this.audit(command, false, "policy");
+        throw new Error(policyError);
+      }
+      if (REMOTE_ACTIONS.has(command.type) && this.chat && !this.chat.remoteActionsEnabled()) {
+        this.audit(command, false, "disabled");
+        throw new Error("Remote actions are turned off on this Mac (cursorRemote.remoteActions)");
+      }
       let result: CommandResult | null = null;
 
       switch (command.type) {
@@ -138,10 +176,36 @@ export class CommandRouter {
           result = await this.handleCliPrompt(command);
           break;
         case "approve_action":
-          result = await this.handleApproveAction(command);
-          break;
         case "reject_action":
-          result = await this.handleRejectAction(command);
+          result = await this.handleResolveRequest(command, command.type === "approve_action");
+          break;
+        case "list_chats":
+          result = await this.handleListChats(command);
+          break;
+        case "get_chat":
+          result = await this.handleGetChat(command);
+          break;
+        case "watch_chat":
+          result = this.handleWatchChat(command);
+          break;
+        case "unwatch_chat":
+          result = this.handleUnwatchChat(command);
+          break;
+        case "get_composer_state":
+          result = await this.handleComposerState(command);
+          break;
+        case "list_models":
+          result = await this.handleListModels(command);
+          break;
+        case "get_file_diff":
+          result = await this.handleFileDiff(command);
+          break;
+        case "open_chat":
+        case "new_chat":
+        case "set_model":
+        case "set_mode":
+        case "agent_stop":
+          result = await this.handleAgentsAction(command);
           break;
         default:
           const errorMsg = `Unknown command type: ${command.type}`;
@@ -577,6 +641,7 @@ export class CommandRouter {
     if (!text) {
       return { success: false, error: "Empty prompt" };
     }
+    if (command.chatId || command.newChat === true) return this.handleChatPrompt(command, text);
     await this.commandHandler.insertToPrompt(
       text,
       true,
@@ -609,27 +674,199 @@ export class CommandRouter {
     return { success: true, message: "Prompt sent to Cursor CLI" };
   }
 
-  private async handleApproveAction(
-    command: CommandMessage
-  ): Promise<CommandResult> {
-    const result = await this.commandHandler.approveCdpAction(
-      command.sessionId,
-      command.requestId
-    );
-    return result.ok
-      ? { success: true, message: "Approved" }
-      : { success: false, error: result.error || "Approve failed" };
+  private requireChat(): ChatServices {
+    if (!this.chat) throw new Error("Chat services are not available");
+    return this.chat;
   }
 
-  private async handleRejectAction(
-    command: CommandMessage
-  ): Promise<CommandResult> {
-    const result = await this.commandHandler.rejectCdpAction(
-      command.sessionId,
-      command.requestId
+  private requireAgents(): AgentsWindow {
+    const agents = this.requireChat().agents();
+    if (!agents || !agents.attached) {
+      throw new Error("Cursor Agents window is not attached. Open it in Cursor (with session control on) and try again.");
+    }
+    return agents;
+  }
+
+  /** Sidebar rows (authoritative for groups, pinned and status) followed by transcript-only chats. */
+  private async handleListChats(command: CommandMessage): Promise<CommandResult> {
+    const chat = this.requireChat();
+    const agents = chat.agents();
+    if (command.expand === true && agents?.attached) await agents.expandMore();
+    const sidebar = agents?.attached ? await agents.sidebar() : null;
+    const rows: SidebarRow[] = sidebar?.ok ? sidebar.rows : [];
+    const listed = chat.index.list({ limit: 500, query: command.query });
+    const byId = new Map(listed.chats.map((c) => [c.id, c]));
+    const q = command.query?.trim().toLowerCase();
+    const sidebarChats = rows
+      .filter((r) => !q || r.title.toLowerCase().includes(q) || r.group.toLowerCase().includes(q))
+      .map((r) => {
+        const t = byId.get(r.id);
+        return { ...r, repoName: t?.repoName ?? r.group, updatedAt: t?.updatedAt ?? null, inSidebar: true, hasTranscript: !!t };
+      });
+    const seen = new Set(rows.map((r) => r.id));
+    const offset = Math.max(0, Number(command.offset) || 0);
+    const limit = Math.min(200, Math.max(1, Number(command.limit) || 50));
+    const others = listed.chats.filter((c) => !seen.has(c.id));
+    const more = others.slice(offset, offset + limit).map((c) => ({
+      id: c.id, title: c.title, time: "", group: c.repoName, pinned: false, status: "done",
+      unread: false, active: false, repoName: c.repoName, updatedAt: c.updatedAt, inSidebar: false, hasTranscript: true,
+    }));
+    const payload = {
+      type: "chats",
+      chats: offset === 0 ? [...sidebarChats, ...more] : more,
+      groups: sidebar?.ok ? sidebar.groups : [],
+      sidebar: !!sidebar?.ok,
+      offset,
+      hasMore: offset + limit < others.length,
+      totalOthers: others.length,
+    };
+    this.wsServer.send(this.serializeReply(command, payload));
+    return { success: true, data: { count: payload.chats.length } };
+  }
+
+  private async handleGetChat(command: CommandMessage): Promise<CommandResult> {
+    const chat = this.requireChat();
+    const chatId = command.chatId as string;
+    const page = chat.index.get(chatId, { before: command.before, limit: command.limit });
+    const agents = chat.agents();
+    const composer = agents?.attached ? await agents.composerState() : null;
+    const state = composer?.ok && composer.state.chatId === chatId ? composer.state : null;
+    if (!page && !state) return { success: false, error: "Chat not found on this Mac" };
+    this.wsServer.send(this.serializeReply(command, {
+      type: "chat",
+      chatId,
+      chat: page?.chat ?? null,
+      items: page?.items ?? [],
+      total: page?.total ?? 0,
+      hasOlder: page?.hasOlder ?? false,
+      before: command.before ?? null,
+      filesChanged: page?.filesChanged ?? [],
+      composer: state,
+    }));
+    return { success: true, data: { total: page?.total ?? 0 } };
+  }
+
+  private handleWatchChat(command: CommandMessage): CommandResult {
+    const chat = this.requireChat();
+    if (!command.clientId) return { success: false, error: "Unattributed watch" };
+    chat.watcher.watch(
+      { clientId: command.clientId, targetDeviceId: command.senderDeviceId },
+      command.chatId as string,
+      Math.max(0, Number(command.fromTotal) || 0)
     );
-    return result.ok
-      ? { success: true, message: "Rejected" }
-      : { success: false, error: result.error || "Reject failed" };
+    return { success: true, message: "Watching chat" };
+  }
+
+  private handleUnwatchChat(command: CommandMessage): CommandResult {
+    if (!command.clientId) return { success: false, error: "Unattributed unwatch" };
+    this.requireChat().watcher.unwatch({ clientId: command.clientId, targetDeviceId: command.senderDeviceId });
+    return { success: true, message: "Stopped watching" };
+  }
+
+  private async handleComposerState(command: CommandMessage): Promise<CommandResult> {
+    const result = await this.requireAgents().composerState();
+    if (!result.ok) return { success: false, error: result.error };
+    this.wsServer.send(this.serializeReply(command, { type: "composer_state", chatId: result.state.chatId, state: result.state }));
+    return { success: true };
+  }
+
+  private async handleListModels(command: CommandMessage): Promise<CommandResult> {
+    const result = await this.requireAgents().listModels();
+    if (!result.ok) return { success: false, error: result.error };
+    this.wsServer.send(this.serializeReply(command, { type: "models", models: result.models }));
+    return { success: true };
+  }
+
+  private async handleFileDiff(command: CommandMessage): Promise<CommandResult> {
+    const chat = this.requireChat();
+    const chatId = command.chatId as string;
+    const file = String(command.path);
+    const repo = chat.index.repoPath(chatId);
+    let diff = await chat.diff.fileDiff(repo, file);
+    if (diff && "error" in diff) return { success: false, error: diff.error };
+    if (!diff || !diff.diff) {
+      const snippets = chat.index.snippets(chatId, file);
+      if (!diff && !snippets.length) return { success: false, error: "No diff available for this file" };
+      if (snippets.length) {
+        const rel = repo && file.startsWith(repo + "/") ? file.slice(repo.length + 1) : file;
+        diff = diffFromSnippets(rel, snippets);
+      }
+    }
+    this.wsServer.send(this.serializeReply(command, { type: "file_diff", chatId, ...diff }));
+    return { success: true };
+  }
+
+  private async handleAgentsAction(command: CommandMessage): Promise<CommandResult> {
+    const agents = this.requireAgents();
+    const group = typeof command.group === "string" ? command.group : "";
+    let result: { ok: boolean; error?: string; [k: string]: unknown };
+    switch (command.type) {
+      case "open_chat":
+        result = await agents.openChat(command.chatId as string, group);
+        break;
+      case "new_chat":
+        result = await agents.newChat();
+        break;
+      case "set_model": {
+        const opened = await agents.ensureChat(command.chatId, group);
+        result = opened.ok ? await agents.setModel(String(command.model)) : opened;
+        break;
+      }
+      case "set_mode": {
+        const opened = await agents.ensureChat(command.chatId, group);
+        result = opened.ok ? await agents.setMode(String(command.mode)) : opened;
+        break;
+      }
+      default: {
+        const opened = await agents.ensureChat(command.chatId, group);
+        result = opened.ok ? await agents.stop() : opened;
+      }
+    }
+    this.audit(command, result.ok, command.type === "set_model" ? `model=${String(command.model).slice(0, 40)}` :
+      command.type === "set_mode" ? `mode=${command.mode}` : "");
+    if (!result.ok) return { success: false, error: result.error || `${command.type} failed` };
+    const state = await agents.composerState();
+    if (state.ok) {
+      this.wsServer.send(this.serializeReply(command, { type: "composer_state", chatId: state.state.chatId, state: state.state }));
+    }
+    return { success: true, data: { ...result, chatId: state.ok ? state.state.chatId : null } };
+  }
+
+  /** Approve/reject only the exact pending request the phone showed, in the chat it showed it for. */
+  private async handleResolveRequest(command: CommandMessage, approve: boolean): Promise<CommandResult> {
+    const agents = this.requireAgents();
+    const state = await agents.composerState();
+    if (!state.ok) {
+      this.audit(command, false, "no-state");
+      return { success: false, error: state.error };
+    }
+    if (state.state.chatId !== command.chatId) {
+      this.audit(command, false, "chat-mismatch");
+      return { success: false, error: "That chat is no longer open in Cursor — review the request again" };
+    }
+    const result = await agents.resolve(command.requestId as string, approve);
+    this.audit(command, result.ok, `request=${command.requestId}`);
+    if (!result.ok) return { success: false, error: result.error };
+    return { success: true, message: approve ? "Approved" : "Rejected", data: { label: result.label } };
+  }
+
+  /** Prompt an Agents-window chat (or a new one); the reply is detected from its transcript. */
+  private async handleChatPrompt(command: CommandMessage, text: string): Promise<CommandResult> {
+    const chat = this.requireChat();
+    const agents = this.requireAgents();
+    const opened = command.newChat === true ? await agents.newChat()
+      : await agents.ensureChat(command.chatId, typeof command.group === "string" ? command.group : "");
+    if (!opened.ok) return { success: false, error: opened.error };
+    const chatId = command.newChat === true ? null : (command.chatId as string);
+    if (command.clientId) {
+      chat.watcher.awaitReply({ clientId: command.clientId, targetDeviceId: command.senderDeviceId }, chatId, command.id);
+    }
+    const sent = await agents.sendPrompt(text);
+    this.audit(command, sent.ok, command.newChat === true ? "new-chat" : "");
+    if (!sent.ok) {
+      if (command.clientId) chat.watcher.forgetReply({ clientId: command.clientId, targetDeviceId: command.senderDeviceId });
+      return { success: false, error: sent.error };
+    }
+    return { success: true, message: "Prompt sent to Cursor", data: { chatId } };
   }
 }

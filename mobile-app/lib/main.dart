@@ -2,13 +2,12 @@ import 'dart:convert';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:http/http.dart' as http;
-import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'models/connection_models.dart';
 import 'services/app_settings.dart';
-import 'services/cdp_session_store.dart';
+import 'services/chat_store.dart';
+import 'services/connection.dart';
 import 'screens/agent_control_center.dart';
 import 'screens/connection_landing.dart';
 import 'theme/app_theme.dart';
@@ -146,17 +145,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // 연결 타입
   ConnectionType _connectionType = ConnectionType.relay;
 
-  // Relay 서버 관련
-  String? _sessionId;
-  String _deviceId = '';
-  bool _isConnected = false;
-  bool _isConnecting = false;
+  // Transport (Local / Tunnel / Relay) and the Agents window state
+  late final CursorConnection _conn = CursorConnection(relayUrl: kRelayServerUrl);
+  late final ChatStore _chats =
+      ChatStore(send: (command) async => (await _conn.send(command)).error);
+  String? get _sessionId => _conn.sessionId;
+  String get _deviceId => _conn.deviceId;
+  bool get _isConnected => _conn.connected;
+  bool get _isConnecting => _conn.connecting;
+  bool get _isReconnecting => _conn.reconnecting;
+  int get _reconnectAttempts => _conn.reconnectAttempts;
+  String? get _lastConnectionError => _conn.lastError;
   bool _isWaitingForResponse = false; // waiting for AI response
 
   // Cursor CLI 세션 관련
   String? _currentCursorSessionId; // 현재 Cursor CLI 세션 ID
   String? _currentClientId; // 현재 클라이언트 ID
-  Timer? _pollTimer;
 
   // 스트리밍 관련
   int? _streamingMessageIndex; // 현재 스트리밍 중인 메시지의 인덱스
@@ -170,7 +174,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   List<Map<String, dynamic>> _recentCommandEvents = [];
   bool _loadingCommandApprovals = false;
   bool _loadingCommandEvents = false;
-  DateTime? _lastCommandMetaRefreshAt;
   /// 같은 세션 재연결 시 메인 목록에 히스토리 반영용 (get_chat_history 응답 시 사용)
   bool _loadingSessionHistoryForDisplay = false;
 
@@ -178,24 +181,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _loadingPastMessages = false;
 
   // 로컬 서버 관련
-  WebSocketChannel? _localWebSocket;
-  final Map<String, String> _localCredentials = {};
-  final Map<String, String> _relayCredentials = {};
-  final Map<String, String> _relayDeviceIds = {};
-  Map<String, String> _relayHeaders([String? session]) => {
-    'Content-Type': 'application/json',
-    if (_relayCredentials[session ?? _sessionId] != null)
-      'Authorization': 'Bearer ${_relayCredentials[session ?? _sessionId]}',
-  };
   final TextEditingController _localIpController = TextEditingController();
   final TextEditingController _localPortController =
       TextEditingController(text: '8766');
-
-  // 재연결 관련
-  Timer? _reconnectTimer;
-  int _reconnectAttempts = 0;
-  bool _isReconnecting = false;
-  String? _lastConnectionError;
 
   // 에이전트 모드 관련
   String _selectedAgentMode = 'auto'; // auto, agent, ask, plan, debug
@@ -204,9 +192,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   // Agent backend: CLI (new agent) vs CDP (existing Cursor IDE session)
   String _selectedAgentBackend = 'cdp'; // cdp (Agents) | cli — Agents first
-  final CdpSessionStore _cdpStore = CdpSessionStore();
-  String? get _selectedCdpSessionId =>
-      _cdpStore.sessions.keys.isEmpty ? null : _cdpStore.sessions.keys.first;
 
   final List<MessageItem> _messages = [];
   final TextEditingController _commandController = TextEditingController();
@@ -284,10 +269,54 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // Create a new relay session, then connect (Generate & Connect)
   Future<void> _createSession() async {
     setState(() {
-      _lastConnectionError = 'Create the relay session in Cursor first, then enter its ID here.';
+      _conn.lastError = 'Create the relay session in Cursor first, then enter its ID here.';
       _messages.add(MessageItem(
           'Use Cursor Remote in Cursor to create a session, then Pair Relay Client to obtain a pairing code.',
           type: MessageType.system));
+    });
+  }
+
+  void _onConnectionChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onSystem(String text) {
+    if (!mounted) return;
+    setState(() => _messages.add(MessageItem(text, type: MessageType.system)));
+    _scrollToBottom();
+  }
+
+  /// Runs after every successful connect, whatever the transport.
+  void _onConnected() {
+    if (!mounted) return;
+    final relay = _conn.type == ConnectionType.relay;
+    _saveConnectionSettings();
+    AppSettings().addConnectionHistory(relay
+        ? ConnectionHistoryItem(
+            type: ConnectionType.relay,
+            sessionId: _sessionId,
+            timestamp: DateTime.now(),
+          )
+        : ConnectionHistoryItem(
+            type: _conn.type,
+            ip: _localIpController.text.trim(),
+            port: int.tryParse(_localPortController.text.trim()),
+            timestamp: DateTime.now(),
+          ));
+    try {
+      _expansionTileController.collapse();
+    } catch (_) {}
+    if (relay) _loadingSessionHistoryForDisplay = true;
+    Future.delayed(const Duration(milliseconds: 300), () {
+      if (!mounted) return;
+      _loadChatHistory(sessionId: relay ? _sessionId : null);
+      if (relay) {
+        _loadCommandApprovals(silent: true);
+        _loadCommandEvents(silent: true);
+      }
+    });
+    Future.delayed(const Duration(milliseconds: 500), () {
+      if (mounted && _selectedAgentBackend == 'cdp') _refreshAgents();
     });
   }
 
@@ -360,590 +389,315 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _localIpController.text = host;
     _localPortController.text = port.toString();
 
-    final wsUrl = '$scheme://$host:$port';
+    await _conn.connectLocal('$scheme://$host:$port',
+        tunnel: asTunnel, label: asTunnel ? host : '$host:$port');
+  }
 
-    // Close any prior socket before opening a new one
-    try {
-      await _localWebSocket?.sink.close();
-    } catch (_) {}
-    _localWebSocket = null;
-    _stopReconnect();
+  Future<String?> _showLocalPairDialog() async {
+    if (!mounted) return null;
+    String secret = '';
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Pair with Cursor'),
+        content: TextField(
+          autofocus: true,
+          enableSuggestions: false, autocorrect: false,
+          decoration: const InputDecoration(
+            labelText: 'Pairing code',
+            helperText: 'Run Cursor Remote: Pair Client in Cursor first.',
+          ),
+          onChanged: (value) => secret = value.trim(),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(context, true),
+              child: const Text('Pair')),
+        ],
+      ),
+    );
+    return accepted == true ? secret : null;
+  }
+
+  /// One handler for every inbound message (Local, Tunnel and Relay).
+  void _handleInbound(Map<String, dynamic> messageData) {
+    if (!mounted) return;
+    if (_chats.applyInbound(messageData)) {
+      _syncWaitingWithAgents();
+      return;
+    }
+    final type = messageData['type'];
 
     setState(() {
-      _isConnecting = true;
-      _isConnected = false;
-      _lastConnectionError = null;
-      _messages.add(MessageItem(
-          asTunnel
-              ? 'Connecting via Cloudflare Tunnel ($host)…'
-              : 'Connecting to Cursor Remote server at $host:$port…',
-          type: MessageType.system));
-    });
+      if (type == 'command_result') {
+        if (messageData['success'] == true) {
+          final commandType = messageData['command_type'] as String? ?? '';
 
-    var handshakeComplete = false;
-    var authenticationStarted = false;
-    Timer? connectionTimeout;
-
-    void failConnection(String userMessage,
-        {String? technical, bool scheduleRetry = true}) {
-      if (!mounted || handshakeComplete) return;
-      handshakeComplete = true;
-      connectionTimeout?.cancel();
-      try {
-        _localWebSocket?.sink.close();
-      } catch (_) {}
-      _localWebSocket = null;
-      setState(() {
-        _isConnecting = false;
-        _isConnected = false;
-        _lastConnectionError = technical ?? userMessage;
-        _messages.add(MessageItem('❌ $userMessage', type: MessageType.system));
-      });
-      if (scheduleRetry) _scheduleReconnect();
-    }
-
-    void succeedConnection() {
-      if (!mounted || handshakeComplete) return;
-      handshakeComplete = true;
-      connectionTimeout?.cancel();
-      setState(() {
-        _isConnecting = false;
-        _isConnected = true;
-        _isReconnecting = false;
-        _reconnectAttempts = 0;
-        _lastConnectionError = null;
-        _stopReconnect();
-        _messages.add(MessageItem(
-            asTunnel
-                ? '✅ Connected via Cloudflare Tunnel ($host)'
-                : '✅ Connected to Cursor Remote server at $host:$port',
-            type: MessageType.system));
-      });
-
-      _saveConnectionSettings();
-      AppSettings().addConnectionHistory(ConnectionHistoryItem(
-        type: asTunnel ? ConnectionType.tunnel : ConnectionType.local,
-        ip: host,
-        port: port,
-        timestamp: DateTime.now(),
-      ));
-
-      try {
-        _expansionTileController.collapse();
-      } catch (_) {}
-
-      Future.delayed(const Duration(milliseconds: 300), () {
-        if (mounted) _loadChatHistory();
-      });
-      Future.delayed(const Duration(milliseconds: 500), () {
-        if (mounted && _selectedAgentBackend == 'cdp') {
-          _refreshCdpSessions();
-        }
-      });
-    }
-
-    try {
-      final connection = WebSocketChannel.connect(Uri.parse(wsUrl));
-      _localWebSocket = connection;
-
-      connectionTimeout = Timer(const Duration(seconds: 120), () {
-        failConnection(
-          asTunnel
-              ? 'Tunnel connection timed out. Confirm the extension tunnel is running and paste the latest wss:// URL.'
-              : 'Unable to connect to the Cursor Remote server. '
-                  'Check that Cursor is open with the extension running, '
-                  'and that your phone and Mac are on the same Wi-Fi network.',
-          technical:
-              'Connection or pairing timed out after 120s ($wsUrl). Extension may not be listening on port $port.',
-        );
-      });
-
-      connection.stream.listen(
-        (message) {
-          if (_localWebSocket != connection) return;
-          final raw = message.toString();
-          if (!handshakeComplete) {
-            try {
-              final frame = jsonDecode(raw);
-              if (frame is Map && frame['type'] == 'auth_required') {
-                if (authenticationStarted) return;
-                authenticationStarted = true;
+          // 세션 정보 조회 결과 처리
+          if (commandType == 'get_session_info' &&
+              messageData['data'] != null) {
+            _sessionInfo = messageData['data'] as Map<String, dynamic>;
+            if (_sessionInfo!['currentSessionId'] != null) {
+              _currentCursorSessionId =
+                  _sessionInfo!['currentSessionId'] as String;
+            }
+            if (_sessionInfo!['clientId'] != null) {
+              _currentClientId = _sessionInfo!['clientId'] as String;
+            }
+          }
+          // 대화 히스토리 조회 결과 처리 (Extension은 data에 배열 직접 또는 { entries: [] })
+          else if (commandType == 'get_chat_history' &&
+              messageData['data'] != null) {
+            final raw = messageData['data'];
+            final List<Map<String, dynamic>> entries = raw is List
+                ? List<Map<String, dynamic>>.from(
+                    raw.map((e) => e as Map<String, dynamic>))
+                : (raw is Map<String, dynamic> && raw['entries'] != null)
+                    ? List<Map<String, dynamic>>.from((raw['entries'] as List)
+                        .map((e) => e as Map<String, dynamic>))
+                    : <Map<String, dynamic>>[];
+            if (entries.isNotEmpty ||
+                _loadingSessionHistoryForDisplay ||
+                _loadingPastMessages) {
+              _chatHistory = entries;
+              _availableSessions = _chatHistory
+                  .map((entry) => entry['sessionId'] as String? ?? '')
+                  .where((id) => id.isNotEmpty)
+                  .toSet()
+                  .toList();
+            }
+            if (_loadingSessionHistoryForDisplay) {
+              // After connect: show only current relay session history
+              if (entries.isNotEmpty) {
+                _applyChatHistoryToMessages(entries,
+                    replaceConversation: true);
               }
-            } catch (_) {
-              failConnection('Invalid authentication response', scheduleRetry: false);
-              return;
+              _loadingSessionHistoryForDisplay = false;
             }
-            _authenticateLocalFrame(raw, wsUrl, succeedConnection, () {
-              failConnection('Pairing failed. Use Cursor Remote: Pair Client in Cursor.',
-                  scheduleRetry: false);
-            });
-            return;
-          }
-          _handleLocalMessage(raw);
-        },
-        onError: (error) {
-          if (_localWebSocket != connection) return;
-          final friendly = asTunnel
-              ? 'Tunnel unreachable. This network may block Cloudflare edge. '
-                  'Use Local on same Wi‑Fi — port may be 8767 if 8766 was busy.'
-              : 'Unable to connect to the local Cursor Remote server. '
-                  'Make sure the Cursor extension is running and the server is listening on port $port.';
-          failConnection(friendly, technical: error.toString());
-        },
-        onDone: () {
-          if (_localWebSocket != connection) return;
-          if (connection.closeCode == 4001) {
-            _localCredentials.remove(wsUrl);
-          }
-          if (!handshakeComplete && connection.closeCode == 4001) {
-            failConnection(
-              'Pairing code rejected or expired. Run Cursor Remote: Pair Client again and paste the new code.',
-              technical: 'Authentication failed (4001): ${connection.closeReason ?? ''}',
-              scheduleRetry: false,
-            );
-            return;
-          }
-          if (!handshakeComplete) {
-            failConnection(
-              asTunnel
-                  ? 'Tunnel failed. Cloudflare edge is often blocked here — use Local (same Wi‑Fi). Check Cursor log for the real port (may be 8767, not 8766).'
-                  : 'Unable to connect to the local Cursor Remote server. '
-                      'The connection closed before the handshake completed.',
-              technical: 'WebSocket closed before handshake ($wsUrl)',
-              scheduleRetry: connection.closeCode != 4001,
-            );
-            return;
-          }
-          if (mounted) {
-            setState(() {
-              _messages.add(MessageItem(
-                  'Connection closed.',
-                  type: MessageType.system));
-              _isConnected = false;
-              _isConnecting = false;
-            });
-            _scheduleReconnect();
-          }
-        },
-        cancelOnError: true,
-      );
-    } catch (e) {
-      failConnection(
-        asTunnel
-            ? 'Unable to open the tunnel WebSocket. Check the wss:// URL.'
-            : 'Unable to connect to the local Cursor Remote server. '
-                'Check the address and that the extension is running.',
-        technical: e.toString(),
-        scheduleRetry: false,
-      );
-    }
-  }
-
-  Future<void> _authenticateLocalFrame(String raw, String endpoint,
-      VoidCallback onAuthenticated, VoidCallback onFailure) async {
-    final socket = _localWebSocket;
-    try {
-      final frame = jsonDecode(raw);
-      if (frame is! Map || frame['protocolVersion'] != 2) {
-        onFailure();
-        return;
-      }
-      if (frame['type'] == 'authenticated' && frame['scope'] == 'control') {
-        final token = frame['token'];
-        if (token is String) _localCredentials[endpoint] = token;
-        onAuthenticated();
-        return;
-      }
-      if (frame['type'] != 'auth_required') {
-        onFailure();
-        return;
-      }
-      final token = _localCredentials[endpoint];
-      if (token != null) {
-        socket?.sink.add(jsonEncode({
-          'type': 'authenticate', 'protocolVersion': 2, 'token': token,
-        }));
-        return;
-      }
-      if (!mounted) return;
-      String secret = '';
-      final accepted = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Pair with Cursor'),
-          content: TextField(
-            autofocus: true,
-            enableSuggestions: false, autocorrect: false,
-            decoration: const InputDecoration(
-              labelText: 'Pairing code',
-              helperText: 'Run Cursor Remote: Pair Client in Cursor first.',
-            ),
-            onChanged: (value) => secret = value.trim(),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(context, false),
-                child: const Text('Cancel')),
-            TextButton(onPressed: () => Navigator.pop(context, true),
-                child: const Text('Pair')),
-          ],
-        ),
-      );
-      if (!mounted || socket != _localWebSocket) return;
-      if (accepted != true || secret.isEmpty) { onFailure(); return; }
-      socket?.sink.add(jsonEncode({
-        'type': 'pair', 'protocolVersion': 2, 'secret': secret,
-      }));
-    } catch (_) {
-      _localCredentials.remove(endpoint);
-      onFailure();
-    }
-  }
-
-  // Handle messages from local WebSocket server
-  void _handleLocalMessage(String message) {
-    if (!mounted) return;
-
-    try {
-      final data = jsonDecode(message);
-      final type = data['type'] ?? 'unknown';
-
-      setState(() {
-        if (type == 'chat_response') {
-          // 세션 ID 추출 및 저장
-          if (data['sessionId'] != null) {
-            setState(() {
-              _currentCursorSessionId = data['sessionId'] as String;
-            });
-          }
-          if (data['clientId'] != null) {
-            final newClientId = data['clientId'] as String;
-            setState(() {
-              // clientId가 처음 설정되면 세션 정보 및 히스토리 조회
-              if (_currentClientId == null) {
-                _currentClientId = newClientId;
-                _loadSessionInfo();
-                _loadChatHistory();
-              } else if (_currentClientId != newClientId) {
-                // clientId가 변경된 경우
-                _currentClientId = newClientId;
-                _loadSessionInfo();
-                _loadChatHistory();
-              } else {
-                // 같은 clientId면 히스토리만 새로고침
-                Future.delayed(const Duration(milliseconds: 500), () {
-                  _loadChatHistory();
-                });
+            if (_loadingPastMessages) {
+              if (entries.isNotEmpty) {
+                _applyChatHistoryToMessages(entries, skipIfExists: true);
               }
-            });
-          } else if (_currentClientId != null) {
-            // clientId가 이미 있으면 응답 수신 후 히스토리만 새로고침
-            Future.delayed(const Duration(milliseconds: 500), () {
-              _loadChatHistory();
-            });
+              _loadingPastMessages = false;
+            }
           }
-          final text = data['text'] ?? '';
-          _messages.add(MessageItem('', type: MessageType.chatResponseDivider));
-          _messages.add(MessageItem('🤖 Cursor AI Response',
-              type: MessageType.chatResponseHeader));
-          _messages.add(MessageItem(text, type: MessageType.chatResponse));
-          _messages.add(MessageItem('', type: MessageType.chatResponseDivider));
-          _isWaitingForResponse = false;
-        } else if (type == 'command_result') {
-          if (data['success'] == true) {
-            final commandType = data['command_type'] as String? ?? '';
 
-            // 세션 정보 조회 결과 처리
-            if (commandType == 'get_session_info' && data['data'] != null) {
-              setState(() {
-                _sessionInfo = data['data'] as Map<String, dynamic>;
-                if (_sessionInfo!['currentSessionId'] != null) {
-                  _currentCursorSessionId =
-                      _sessionInfo!['currentSessionId'] as String;
-                }
-                if (_sessionInfo!['clientId'] != null) {
-                  _currentClientId = _sessionInfo!['clientId'] as String;
-                }
-              });
-            }
-            // 대화 히스토리 조회 결과 처리 (Extension은 data에 배열 직접 반환 또는 { entries: [] } 반환)
-            else if (commandType == 'get_chat_history' &&
-                data['data'] != null) {
-              final raw = data['data'];
-              final List<Map<String, dynamic>> entries = raw is List
-                  ? List<Map<String, dynamic>>.from(
-                      raw.map((e) => e as Map<String, dynamic>))
-                  : (raw is Map<String, dynamic> && raw['entries'] != null)
-                      ? List<Map<String, dynamic>>.from((raw['entries'] as List)
-                          .map((e) => e as Map<String, dynamic>))
-                      : <Map<String, dynamic>>[];
-              if (entries.isNotEmpty ||
-                  _loadingSessionHistoryForDisplay ||
-                  _loadingPastMessages) {
-                setState(() {
-                  _chatHistory = entries;
-                  _availableSessions = _chatHistory
-                      .map((entry) => entry['sessionId'] as String? ?? '')
-                      .where((id) => id.isNotEmpty)
-                      .toSet()
-                      .toList();
-                  if (_loadingSessionHistoryForDisplay) {
-                    // After connect: show only current relay session history
-                    if (entries.isNotEmpty) {
-                      _applyChatHistoryToMessages(entries,
-                          replaceConversation: true);
-                    }
-                    _loadingSessionHistoryForDisplay = false;
-                  }
-                  if (_loadingPastMessages) {
-                    if (entries.isNotEmpty) {
-                      _applyChatHistoryToMessages(entries, skipIfExists: true);
-                    }
-                    _loadingPastMessages = false;
-                  }
-                });
-              } else {
-                if (_loadingSessionHistoryForDisplay) {
-                  _loadingSessionHistoryForDisplay = false;
-                }
-                if (_loadingPastMessages) _loadingPastMessages = false;
-              }
-            }
-
-            // 일반 명령 성공 메시지는 세션/히스토리 조회 시에는 표시하지 않음
-            if (commandType != 'get_session_info' &&
-                commandType != 'get_chat_history') {
-              _messages.add(
-                  MessageItem('✅ Command succeeded', type: MessageType.system));
-            }
-            if (commandType == 'stop_prompt') {
-              _isWaitingForResponse = false;
-            }
-          } else {
-            _messages.add(MessageItem('❌ Command failed: ${data['error']}',
-                type: MessageType.system));
+          // 일반 명령 성공 메시지는 세션/히스토리 조회 시에는 표시하지 않음
+          if (commandType != 'get_session_info' &&
+              commandType != 'get_chat_history') {
+            _messages.add(
+                MessageItem('✅ Command succeeded', type: MessageType.system));
+          }
+          if (commandType == 'stop_prompt') {
             _isWaitingForResponse = false;
           }
-        } else if (type == 'log') {
-          // 실시간 로그 메시지 처리
-          final logLevelStr = data['level'] ?? 'info';
-          final logMessage = data['message'] ?? '';
-          final logSource = data['source'] ?? 'unknown';
-          final logError = data['error'];
-
-          // 로그 레벨 파싱
-          LogLevel parsedLogLevel;
-          switch (logLevelStr) {
-            case 'error':
-              parsedLogLevel = LogLevel.error;
-              break;
-            case 'warn':
-            case 'warning':
-              parsedLogLevel = LogLevel.warning;
-              break;
-            default:
-              parsedLogLevel = LogLevel.info;
-          }
-
-          String logPrefix = '';
-          switch (logSource) {
-            case 'extension':
-              logPrefix = '🔌 [Extension]';
-              break;
-            case 'pc-server':
-              logPrefix = '🖥️ [PC Server]';
-              break;
-            default:
-              logPrefix = '📝 [Log]';
-          }
-
-          String logText = '$logPrefix $logMessage';
-          if (logError != null) {
-            logText += ' - Error: $logError';
-          }
-
-          _messages.add(MessageItem(logText,
-              type: MessageType.log, logLevel: parsedLogLevel));
-        } else if (type == 'agent_mode_selected') {
-          // 자동 모드로 선택된 실제 모드 정보
-          final requestedMode = data['requestedMode'] ?? 'auto';
-          final actualMode = data['actualMode'] ?? 'agent';
-          final displayName = data['displayName'] ?? actualMode;
-
-
-          if (mounted) {
-            setState(() {
-              // 자동 모드로 선택된 경우에만 표시
-              if (requestedMode == 'auto' && _selectedAgentMode == 'auto') {
-                _actualSelectedMode = actualMode;
-
-                // 마지막 User Prompt의 모드 업데이트
-                // 메시지 리스트에서 가장 최근 User Prompt 찾아서 업데이트
-                bool found = false;
-                for (int i = _messages.length - 1; i >= 0; i--) {
-                  if (_messages[i].type == MessageType.userPrompt) {
-                    // agentMode가 null인 경우 (자동 모드로 전송된 경우) 업데이트
-                    if (_messages[i].agentMode == null) {
-                      final updatedItem = MessageItem(
-                        _messages[i].text,
-                        type: _messages[i].type,
-                        agentMode: actualMode,
-                      );
-                      _messages[i] = updatedItem;
-                      // _lastUserPrompt도 업데이트
-                      if (_lastUserPrompt != null &&
-                          _lastUserPrompt!.text == _messages[i].text) {
-                        _lastUserPrompt = updatedItem;
-                      }
-                      found = true;
-                      break;
-                    }
-                  }
-                }
-
-                if (!found) {
-                } else {
-                  // UI 강제 업데이트를 위해 스크롤
-                  Future.microtask(() {
-                    if (mounted) {
-                      _scrollToBottom();
-                    }
-                  });
-                }
-              }
-            });
-
-            // 사용자에게 알림 (SnackBar)
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('🤖 Auto mode: $displayName'),
-                duration: const Duration(seconds: 2),
-                backgroundColor: Colors.blue.shade700,
-              ),
-            );
-          }
-        } else if (type == 'connection_status') {
-          final status = data['status'] ?? 'unknown';
-          final message = data['message'] ?? '';
-          final errorCode = data['errorCode']?.toString();
-
-          String statusText = '';
-          switch (status) {
-            case 'connected':
-              statusText = '✅ $message';
-              setState(() {
-                _isReconnecting = false;
-                _reconnectAttempts = 0;
-                _stopReconnect();
-              });
-              break;
-            case 'disconnected':
-              statusText = '⚠️ $message';
-              setState(() {
-                _isConnected = false;
-              });
-              _scheduleReconnect();
-              break;
-            case 'error':
-              final detail = (errorCode != null && errorCode.isNotEmpty)
-                  ? '$message ($errorCode)'
-                  : message;
-              statusText = '❌ $detail';
-              setState(() {
-                _isConnected = false;
-                _lastConnectionError = detail;
-              });
-              _scheduleReconnect();
-              break;
-          }
-
-          if (statusText.isNotEmpty) {
-            _messages.add(MessageItem(statusText, type: MessageType.system));
-          }
         } else {
-          _applyCdpInbound(data);
+          _messages.add(MessageItem('❌ Command failed: ${messageData['error'] ?? messageData['error_message']}',
+              type: MessageType.system));
+          _isWaitingForResponse = false;
         }
-      });
-      _scrollToBottom();
-    } catch (e) {
-      // JSON 파싱 실패 시 원본 메시지 표시
-      if (mounted) {
-        setState(() {
-          _messages
-              .add(MessageItem('Received: $message', type: MessageType.system));
-        });
-      }
-    }
-  }
-
-  /// Apply allowlisted CDP / Existing Agent WebSocket payloads.
-  void _applyCdpInbound(Map<String, dynamic> data) {
-    final type = data['type']?.toString() ?? '';
-    final cdpTypes = {
-      'cdp_status',
-      'cdp_targets',
-      'sessions',
-      'agent_history',
-      'agent_state',
-      'agent_state_changed',
-      'agent_message',
-      'agent_message_delta',
-      'permission_request',
-      'permission_resolved',
-      'agent_completed',
-      'agent_plan',
-      'agent_plan_changed',
-      'file_changed',
-      'activity_event',
-      'agent_error',
-    };
-    if (!cdpTypes.contains(type)) return;
-    _cdpStore.applyInbound(data);
-    if (type == 'agent_completed' ||
-        (type == 'agent_state' &&
-            (data['state'] == 'COMPLETED' || data['state'] == 'IDLE'))) {
-      _isWaitingForResponse = false;
-    }
-    if (type == 'agent_message') {
-      final m = data['message'];
-      if (m is Map && m['role'] == 'assistant') {
+      } else if (type == 'error') {
+        _messages.add(MessageItem('❌ Error: ${messageData['message']}',
+            type: MessageType.system));
         _isWaitingForResponse = false;
+      } else if (type == 'user_message') {
+        final text = messageData['text'] ?? '';
+        _messages
+            .add(MessageItem('💬 You: $text', type: MessageType.userMessage));
+      } else if (type == 'gemini_response') {
+        final text = messageData['text'] ?? '';
+        _messages.add(
+            MessageItem('🤖 Gemini: $text', type: MessageType.geminiResponse));
+      } else if (type == 'terminal_output') {
+        final text = messageData['text'] ?? '';
+        _messages.add(MessageItem('📟 Terminal: $text',
+            type: MessageType.terminalOutput));
+      } else if (type == 'chat_response_chunk') {
+        // 스트리밍 청크 처리
+        final chunkText = messageData['text'] ?? '';
+        final fullText = messageData['fullText'] ?? chunkText;
+        final isReplace = messageData['isReplace'] == true;
+
+        if (messageData['sessionId'] != null) {
+          _currentCursorSessionId = messageData['sessionId'] as String;
+        }
+        final newClientId = messageData['clientId'] as String?;
+        if (newClientId != null && _currentClientId != newClientId) {
+          _currentClientId = newClientId;
+          _loadSessionInfo();
+          _loadChatHistory();
+        }
+
+        // 첫 번째 청크인 경우 메시지 추가
+        if (_streamingMessageIndex == null) {
+          _messages
+              .add(MessageItem('', type: MessageType.chatResponseDivider));
+          _messages.add(MessageItem('🤖 Cursor AI Response',
+              type: MessageType.chatResponseHeader));
+          _streamingText = isReplace ? fullText : chunkText;
+          _messages.add(MessageItem(_streamingText,
+              type: MessageType.chatResponseChunk));
+          _streamingMessageIndex = _messages.length - 1;
+        } else {
+          // 기존 스트리밍 메시지 업데이트
+          if (isReplace) {
+            _streamingText = fullText;
+          } else {
+            _streamingText += chunkText;
+          }
+          if (_streamingMessageIndex! < _messages.length) {
+            _messages[_streamingMessageIndex!] = MessageItem(_streamingText,
+                type: MessageType.chatResponseChunk);
+          }
+        }
+      } else if (type == 'chat_response_complete') {
+        // 스트리밍 완료 처리
+        if (_streamingMessageIndex != null &&
+            _streamingMessageIndex! < _messages.length) {
+          _messages[_streamingMessageIndex!] =
+              MessageItem(_streamingText, type: MessageType.chatResponse);
+          _streamingMessageIndex = null;
+          _streamingText = '';
+        }
+        final newClientId = messageData['clientId'] as String?;
+        if (newClientId != null && _currentClientId != newClientId) {
+          _currentClientId = newClientId;
+          _loadSessionInfo();
+        }
+        if (_currentClientId != null) {
+          Future.delayed(const Duration(milliseconds: 500), () {
+            _loadChatHistory();
+          });
+        }
+        _isWaitingForResponse = false;
+      } else if (type == 'chat_response') {
+        // 비스트리밍 응답 (CLI)
+        if (messageData['sessionId'] != null) {
+          _currentCursorSessionId = messageData['sessionId'] as String;
+        }
+        final newClientId = messageData['clientId'] as String?;
+        if (newClientId != null && _currentClientId != newClientId) {
+          // clientId가 처음 설정되거나 변경되면 세션 정보 및 히스토리 조회
+          _currentClientId = newClientId;
+          _loadSessionInfo();
+          _loadChatHistory();
+        } else if (_currentClientId != null) {
+          // 같은 clientId면 히스토리만 새로고침
+          Future.delayed(const Duration(milliseconds: 500), () {
+            _loadChatHistory();
+          });
+        }
+        final text = messageData['text'] ?? '';
+        _messages.add(MessageItem('', type: MessageType.chatResponseDivider));
+        _messages.add(MessageItem('🤖 Cursor AI Response',
+            type: MessageType.chatResponseHeader));
+        _messages.add(MessageItem(text, type: MessageType.chatResponse));
+        _messages.add(MessageItem('', type: MessageType.chatResponseDivider));
+        _isWaitingForResponse = false;
+      } else if (type == 'agent_mode_selected') {
+        _applyAgentModeSelected(messageData);
+      } else if (type == 'log') {
+        _messages.add(_logMessageItem(messageData));
+      } else if (type == 'connection_status') {
+        final status = messageData['status'] ?? 'unknown';
+        final message = messageData['message'] ?? '';
+        final errorCode = messageData['errorCode']?.toString();
+        String statusText = '';
+        switch (status) {
+          case 'connected':
+            statusText = '✅ $message';
+            _conn.stopReconnect();
+            _conn.resetReconnectAttempts();
+            break;
+          case 'disconnected':
+            statusText = '⚠️ $message';
+            break;
+          case 'error':
+            final detail = (errorCode != null && errorCode.isNotEmpty)
+                ? '$message ($errorCode)'
+                : message;
+            statusText = '❌ $detail';
+            _conn.lastError = detail;
+            break;
+        }
+        if (statusText.isNotEmpty) {
+          _messages.add(MessageItem(statusText, type: MessageType.system));
+        }
       }
+    });
+    _scrollToBottom();
+  }
+
+  /// The CLI "waiting" spinner must not stay on when an Agents-window run finishes.
+  void _syncWaitingWithAgents() {
+    if (_isWaitingForResponse && _selectedAgentBackend == 'cdp' && !_chats.running &&
+        !_chats.awaitingReply) {
+      setState(() => _isWaitingForResponse = false);
     }
   }
 
-  void _refreshCdpSessions() {
-    if (!_isConnected) return;
-    _sendCommand('cdp_status');
-    _sendCommand('get_sessions');
-    _sendCommand('get_agent_history');
-  }
-
-  Future<void> _sendCdpControlCommand(String type,
-      {String? sessionId, String? text, String? requestId, String? historyId}) {
-    return _sendCommand(
-      type,
-      text: text,
-      sessionId: sessionId,
-      requestId: requestId,
-      historyId: historyId,
-      prompt: type == 'agent_prompt' ? true : null,
-      execute: type == 'agent_prompt' ? true : null,
-      agentBackend: type == 'agent_prompt' ? 'cdp' : null,
+  void _applyAgentModeSelected(Map<String, dynamic> messageData) {
+    final requestedMode = messageData['requestedMode'] ?? 'auto';
+    final actualMode = messageData['actualMode'] ?? 'agent';
+    final displayName = messageData['displayName'] ?? actualMode;
+    // 자동 모드로 선택된 경우에만 표시: 가장 최근 모드 없는 User Prompt 업데이트
+    if (requestedMode == 'auto' && _selectedAgentMode == 'auto') {
+      _actualSelectedMode = actualMode;
+      for (int i = _messages.length - 1; i >= 0; i--) {
+        if (_messages[i].type == MessageType.userPrompt &&
+            _messages[i].agentMode == null) {
+          final updatedItem = MessageItem(
+            _messages[i].text,
+            type: _messages[i].type,
+            agentMode: actualMode,
+          );
+          if (_lastUserPrompt != null &&
+              _lastUserPrompt!.text == _messages[i].text) {
+            _lastUserPrompt = updatedItem;
+          }
+          _messages[i] = updatedItem;
+          break;
+        }
+      }
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('🤖 Auto mode: $displayName'),
+        duration: const Duration(seconds: 2),
+        backgroundColor: Colors.blue.shade700,
+      ),
     );
   }
 
+  MessageItem _logMessageItem(Map<String, dynamic> messageData) {
+    final logLevelStr = messageData['level'] ?? 'info';
+    final logMessage = messageData['message'] ?? '';
+    final logSource = messageData['source'] ?? 'unknown';
+    final logError = messageData['error'];
+    final level = switch (logLevelStr) {
+      'error' => LogLevel.error,
+      'warn' || 'warning' => LogLevel.warning,
+      _ => LogLevel.info,
+    };
+    final prefix = switch (logSource) {
+      'extension' => '🔌 [Extension]',
+      'pc-server' => '🖥️ [PC Server]',
+      _ => '📝 [Log]',
+    };
+    var logText = '$prefix $logMessage';
+    if (logError != null) logText += ' - Error: $logError';
+    return MessageItem(logText, type: MessageType.log, logLevel: level);
+  }
+
+  /// Reload the Agents sidebar and resume watching the open chat (after connect / reconnect).
+  void _refreshAgents() {
+    if (!_isConnected) return;
+    _chats.refreshChats();
+    _chats.resume();
+  }
+
   Future<void> _submitPromptToAgent(String text, {bool newSession = false}) {
-    if (_selectedAgentBackend == 'cdp') {
-      return _sendCommand(
-        'agent_prompt',
-        text: text,
-        prompt: true,
-        execute: true,
-        sessionId: _selectedCdpSessionId,
-        agentMode: _selectedAgentMode,
-        agentBackend: 'cdp',
-      );
-    }
     return _sendCommand(
       'insert_text',
       text: text,
@@ -1010,155 +764,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   // Connect to an existing session (PIN only required when set by PC)
-  Future<void> _connectToSession(String sessionId, [String? pin]) async {
-    sessionId = sessionId.trim().toUpperCase();
-    _deviceId = _relayDeviceIds[sessionId] ?? _deviceId;
-    if (sessionId.isEmpty) {
+  Future<void> _connectToSession(String sessionId) async {
+    if (sessionId.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please enter a Session ID')),
       );
       return;
     }
-
-    // Create device ID if missing
-    if (_deviceId.isEmpty) {
-      _deviceId = 'mobile-${DateTime.now().millisecondsSinceEpoch}';
-    }
-
-    try {
-      if (!_isConnecting) {
-        setState(() {
-          _isConnecting = true;
-          _lastConnectionError = null;
-        });
-      }
-      setState(() {
-        _messages.add(MessageItem(
-            pin != null
-                ? 'Connecting to session $sessionId with a pairing code...'
-                : 'Connecting to session $sessionId...',
-            type: MessageType.system));
-      });
-
-      final body = <String, dynamic>{
-        'sessionId': sessionId,
-        'deviceId': _deviceId,
-        'deviceType': 'mobile',
-      };
-      if (pin != null && pin.isNotEmpty) {
-        body['pairingCode'] = pin;
-      }
-
-      final response = await http
-          .post(
-            Uri.parse('$kRelayServerUrl/api/connect'),
-            headers: _relayHeaders(sessionId),
-            body: jsonEncode(body),
-          )
-          .timeout(const Duration(seconds: 15));
-
-      final data = response.body.isNotEmpty
-          ? jsonDecode(response.body) as Map<String, dynamic>?
-          : <String, dynamic>{};
-      final dataMap = data ?? {};
-      final errorCode = dataMap['errorCode']?.toString();
-      final errorMessage = dataMap['error']?.toString() ?? '';
-
-      if (response.statusCode == 200 && dataMap['success'] == true && dataMap['protocolVersion'] == 2) {
-        final assignedDeviceId = dataMap['data']?['deviceId'];
-        if (assignedDeviceId is String) {
-          _deviceId = assignedDeviceId;
-          _relayDeviceIds[sessionId] = assignedDeviceId;
-        }
-        final issued = dataMap['data']?['token'];
-        if (issued is String && issued.length == 43) _relayCredentials[sessionId] = issued;
-        if (_relayCredentials[sessionId] == null) throw StateError('Missing relay credential');
-        setState(() {
-          _sessionId = sessionId;
-          _isConnected = true;
-          _isConnecting = false;
-          _isReconnecting = false;
-          _reconnectAttempts = 0;
-          _lastConnectionError = null;
-          _lastCommandMetaRefreshAt = null;
-          _stopReconnect();
-          _messages.add(MessageItem('✅ Connected to session $sessionId',
-              type: MessageType.system));
-        });
-
-        // Save connection settings
-        _saveConnectionSettings();
-
-        // Add to connection history
-        AppSettings().addConnectionHistory(ConnectionHistoryItem(
-          type: ConnectionType.relay,
-          sessionId: sessionId,
-          timestamp: DateTime.now(),
-        ));
-
-        // Auto-collapse connection panel on success
-        try {
-          _expansionTileController.collapse();
-        } catch (e) {
-          // Ignore if ExpansionTileController is not attached yet
-        }
-
-        // Start polling
-        _startPolling();
-
-        // 같은 세션이면 이전 프롬프트/답변을 메인 목록에 가져오기 위해 해당 세션 히스토리 조회
-        _loadingSessionHistoryForDisplay = true;
-        Future.delayed(const Duration(milliseconds: 300), () {
-          _loadChatHistory(sessionId: _sessionId);
-        });
-        Future.delayed(const Duration(milliseconds: 300), () {
-          _loadCommandApprovals(silent: true);
-          _loadCommandEvents(silent: true);
-        });
-      } else if (errorCode == 'PAIRING_CODE_REQUIRED') {
-        if (!mounted) return;
-        final enteredCode = await _showPinDialog();
-        if (!mounted) return;
-        if (enteredCode != null && enteredCode.isNotEmpty) {
-          await _connectToSession(sessionId, enteredCode);
-        } else {
-          setState(() => _isConnecting = false);
-        }
-      } else if ([401, 403, 409, 429].contains(response.statusCode)) {
-        _relayCredentials.remove(sessionId);
-        setState(() {
-          _isConnected = false;
-          _isConnecting = false;
-          _lastConnectionError = 'Relay authentication failed ($errorCode). Check the session and obtain a new pairing code in Cursor.';
-        });
-      } else {
-        final error = errorMessage.isNotEmpty
-            ? errorMessage
-            : 'Unable to connect to the relay server (HTTP ${response.statusCode}).';
-        setState(() {
-          _isConnecting = false;
-          _lastConnectionError = error;
-          _messages
-              .add(MessageItem('❌ Connection failed: $error', type: MessageType.system));
-        });
-        // Do not auto-create a new session on "Session not found"
-        final isSessionNotFound =
-            error.toLowerCase().contains('session not found');
-        if (!isSessionNotFound) {
-          _scheduleReconnect();
-        }
-      }
-    } catch (e) {
-      final friendly = e is TimeoutException
-          ? 'The relay server did not respond in time. Check your internet connection and try again.'
-          : 'Unable to reach the relay server. Check your internet connection and try again.';
-      setState(() {
-        _isConnecting = false;
-        _lastConnectionError = e.toString();
-        _messages.add(MessageItem('❌ $friendly', type: MessageType.system));
-      });
-      _scheduleReconnect();
-    }
+    await _conn.connectRelay(sessionId);
   }
 
   void _connect() {
@@ -1196,386 +809,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     // 연결 시도
     _connect();
-  }
-
-  // 메시지 폴링 시작
-  void _startPolling() {
-    _stopPolling(); // 기존 타이머 정지
-
-    _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
-      if (!_isConnected || _sessionId == null) return;
-
-      try {
-        final response = await http.get(
-          Uri.parse(
-              '$kRelayServerUrl/api/poll?sessionId=$_sessionId&deviceType=mobile&deviceId=$_deviceId'),
-          headers: _relayHeaders(),
-        );
-
-        if (response.statusCode == 200) {
-          final data = jsonDecode(response.body);
-          if (data['success'] == true && data['data']['messages'] != null) {
-            final messages = data['data']['messages'] as List;
-            for (final msg in messages) {
-              _handleRelayMessage(msg);
-            }
-          }
-          unawaited(_refreshCommandMetaIfStale());
-        } else {
-          _stopPolling();
-          if ([401, 403].contains(response.statusCode)) _relayCredentials.remove(_sessionId);
-          if (mounted) setState(() {
-            _isConnected = false;
-            _lastConnectionError = 'Relay polling failed (HTTP ${response.statusCode}). Reconnect to continue.';
-          });
-        }
-      } catch (e) {
-        _stopPolling();
-        if (mounted) setState(() {
-          _isConnected = false;
-          _lastConnectionError = 'Relay connection lost. Reconnect to continue.';
-        });
-      }
-    });
-  }
-
-  void _stopPolling() {
-    _pollTimer?.cancel();
-    _pollTimer = null;
-  }
-
-  // relay 서버에서 받은 메시지 처리
-  void _handleRelayMessage(Map<String, dynamic> msg) {
-    if (!mounted) return;
-
-    final type = msg['type'] ?? msg['data']?['type'];
-    final messageData = msg['data'] ?? msg;
-
-    setState(() {
-      if (type == 'command_result') {
-        if (messageData['success'] == true) {
-          final commandType = messageData['command_type'] as String? ?? '';
-
-          // 세션 정보 조회 결과 처리
-          if (commandType == 'get_session_info' &&
-              messageData['data'] != null) {
-            setState(() {
-              _sessionInfo = messageData['data'] as Map<String, dynamic>;
-              if (_sessionInfo!['currentSessionId'] != null) {
-                _currentCursorSessionId =
-                    _sessionInfo!['currentSessionId'] as String;
-              }
-              if (_sessionInfo!['clientId'] != null) {
-                _currentClientId = _sessionInfo!['clientId'] as String;
-              }
-            });
-          }
-          // 대화 히스토리 조회 결과 처리 (Extension은 data에 배열 직접 또는 { entries: [] })
-          else if (commandType == 'get_chat_history' &&
-              messageData['data'] != null) {
-            final raw = messageData['data'];
-            final List<Map<String, dynamic>> entries = raw is List
-                ? List<Map<String, dynamic>>.from(
-                    raw.map((e) => e as Map<String, dynamic>))
-                : (raw is Map<String, dynamic> && raw['entries'] != null)
-                    ? List<Map<String, dynamic>>.from((raw['entries'] as List)
-                        .map((e) => e as Map<String, dynamic>))
-                    : <Map<String, dynamic>>[];
-            setState(() {
-              _chatHistory = entries;
-              _availableSessions = _chatHistory
-                  .map((entry) => entry['sessionId'] as String? ?? '')
-                  .where((id) => id.isNotEmpty)
-                  .toSet()
-                  .toList();
-              if (_loadingSessionHistoryForDisplay) {
-                if (entries.isNotEmpty) {
-                  _applyChatHistoryToMessages(entries,
-                      replaceConversation: true);
-                }
-                _loadingSessionHistoryForDisplay = false;
-              }
-              if (_loadingPastMessages) {
-                if (entries.isNotEmpty) {
-                  _applyChatHistoryToMessages(entries, skipIfExists: true);
-                }
-                _loadingPastMessages = false;
-              }
-            });
-            if (entries.isEmpty) {
-              if (_loadingSessionHistoryForDisplay) {
-                setState(() => _loadingSessionHistoryForDisplay = false);
-              }
-              if (_loadingPastMessages) {
-                setState(() => _loadingPastMessages = false);
-              }
-            }
-          }
-
-          // 일반 명령 성공 메시지는 세션/히스토리 조회 시에는 표시하지 않음
-          if (commandType != 'get_session_info' &&
-              commandType != 'get_chat_history') {
-            _messages.add(
-                MessageItem('✅ Command succeeded', type: MessageType.system));
-          }
-          if (commandType == 'stop_prompt') {
-            _isWaitingForResponse = false;
-          }
-        } else {
-          _messages.add(MessageItem('❌ Command failed: ${messageData['error']}',
-              type: MessageType.system));
-          _isWaitingForResponse = false;
-        }
-      } else if (type == 'error') {
-        _messages.add(MessageItem('❌ Error: ${messageData['message']}',
-            type: MessageType.system));
-        _isWaitingForResponse = false;
-      } else if (type == 'user_message') {
-        final text = messageData['text'] ?? '';
-        _messages
-            .add(MessageItem('💬 You: $text', type: MessageType.userMessage));
-      } else if (type == 'gemini_response') {
-        final text = messageData['text'] ?? '';
-        _messages.add(
-            MessageItem('🤖 Gemini: $text', type: MessageType.geminiResponse));
-      } else if (type == 'terminal_output') {
-        final text = messageData['text'] ?? '';
-        _messages.add(MessageItem('📟 Terminal: $text',
-            type: MessageType.terminalOutput));
-      } else if (type == 'chat_response_chunk') {
-        // 스트리밍 청크 처리
-        final chunkText = messageData['text'] ?? '';
-        final fullText = messageData['fullText'] ?? chunkText;
-        final isReplace = messageData['isReplace'] == true;
-
-        // 세션 ID 추출 및 저장
-        if (messageData['sessionId'] != null) {
-          setState(() {
-            _currentCursorSessionId = messageData['sessionId'] as String;
-          });
-        }
-        if (messageData['clientId'] != null) {
-          final newClientId = messageData['clientId'] as String;
-          setState(() {
-            if (_currentClientId == null) {
-              _currentClientId = newClientId;
-              _loadSessionInfo();
-              _loadChatHistory();
-            } else if (_currentClientId != newClientId) {
-              _currentClientId = newClientId;
-              _loadSessionInfo();
-              _loadChatHistory();
-            }
-          });
-        }
-
-        setState(() {
-          // 첫 번째 청크인 경우 메시지 추가
-          if (_streamingMessageIndex == null) {
-            _messages
-                .add(MessageItem('', type: MessageType.chatResponseDivider));
-            _messages.add(MessageItem('🤖 Cursor AI Response',
-                type: MessageType.chatResponseHeader));
-            _streamingText = isReplace ? fullText : chunkText;
-            _messages.add(MessageItem(_streamingText,
-                type: MessageType.chatResponseChunk));
-            _streamingMessageIndex = _messages.length - 1;
-          } else {
-            // 기존 스트리밍 메시지 업데이트
-            if (isReplace) {
-              _streamingText = fullText;
-            } else {
-              _streamingText += chunkText;
-            }
-            // 메시지 업데이트
-            if (_streamingMessageIndex! < _messages.length) {
-              _messages[_streamingMessageIndex!] = MessageItem(_streamingText,
-                  type: MessageType.chatResponseChunk);
-            }
-          }
-        });
-        _scrollToBottom();
-      } else if (type == 'chat_response_complete') {
-        // 스트리밍 완료 처리
-        setState(() {
-          if (_streamingMessageIndex != null &&
-              _streamingMessageIndex! < _messages.length) {
-            // 스트리밍 메시지를 일반 chat_response로 변경
-            _messages[_streamingMessageIndex!] =
-                MessageItem(_streamingText, type: MessageType.chatResponse);
-            _streamingMessageIndex = null;
-            _streamingText = '';
-          }
-          // 세션 ID 추출 및 저장
-          if (messageData['clientId'] != null) {
-            final newClientId = messageData['clientId'] as String;
-            if (_currentClientId == null || _currentClientId != newClientId) {
-              _currentClientId = newClientId;
-              _loadSessionInfo();
-            }
-            // 히스토리 새로고침
-            Future.delayed(const Duration(milliseconds: 500), () {
-              _loadChatHistory();
-            });
-          } else if (_currentClientId != null) {
-            Future.delayed(const Duration(milliseconds: 500), () {
-              _loadChatHistory();
-            });
-          }
-          _isWaitingForResponse = false;
-        });
-        _scrollToBottom();
-      } else if (type == 'chat_response') {
-        // 기존 방식 (비스트리밍 응답) - 하위 호환성
-        // 세션 ID 추출 및 저장
-        if (messageData['sessionId'] != null) {
-          setState(() {
-            _currentCursorSessionId = messageData['sessionId'] as String;
-          });
-        }
-        if (messageData['clientId'] != null) {
-          final newClientId = messageData['clientId'] as String;
-          setState(() {
-            // clientId가 처음 설정되면 세션 정보 및 히스토리 조회
-            if (_currentClientId == null) {
-              _currentClientId = newClientId;
-              _loadSessionInfo();
-              _loadChatHistory();
-            } else if (_currentClientId != newClientId) {
-              // clientId가 변경된 경우
-              _currentClientId = newClientId;
-              _loadSessionInfo();
-              _loadChatHistory();
-            } else {
-              // 같은 clientId면 히스토리만 새로고침
-              Future.delayed(const Duration(milliseconds: 500), () {
-                _loadChatHistory();
-              });
-            }
-          });
-        } else if (_currentClientId != null) {
-          // clientId가 이미 있으면 응답 수신 후 히스토리만 새로고침
-          Future.delayed(const Duration(milliseconds: 500), () {
-            _loadChatHistory();
-          });
-        }
-        final text = messageData['text'] ?? '';
-        _messages.add(MessageItem('', type: MessageType.chatResponseDivider));
-        _messages.add(MessageItem('🤖 Cursor AI Response',
-            type: MessageType.chatResponseHeader));
-        _messages.add(MessageItem(text, type: MessageType.chatResponse));
-        _messages.add(MessageItem('', type: MessageType.chatResponseDivider));
-        _isWaitingForResponse = false;
-      } else if (type == 'agent_mode_selected') {
-        // 자동 모드로 선택된 실제 모드 정보 (릴레이 서버 연결)
-        final requestedMode = messageData['requestedMode'] ?? 'auto';
-        final actualMode = messageData['actualMode'] ?? 'agent';
-        final displayName = messageData['displayName'] ?? actualMode;
-
-
-        if (mounted) {
-          setState(() {
-            // 자동 모드로 선택된 경우에만 표시
-            if (requestedMode == 'auto' && _selectedAgentMode == 'auto') {
-              _actualSelectedMode = actualMode;
-
-              // 마지막 User Prompt의 모드 업데이트
-              // 메시지 리스트에서 가장 최근 User Prompt 찾아서 업데이트
-              bool found = false;
-              for (int i = _messages.length - 1; i >= 0; i--) {
-                if (_messages[i].type == MessageType.userPrompt) {
-                  // agentMode가 null인 경우 (자동 모드로 전송된 경우) 업데이트
-                  if (_messages[i].agentMode == null) {
-                    final updatedItem = MessageItem(
-                      _messages[i].text,
-                      type: _messages[i].type,
-                      agentMode: actualMode,
-                    );
-                    _messages[i] = updatedItem;
-                    // _lastUserPrompt도 업데이트
-                    if (_lastUserPrompt != null &&
-                        _lastUserPrompt!.text == _messages[i].text) {
-                      _lastUserPrompt = updatedItem;
-                    }
-                    found = true;
-                    break;
-                  }
-                }
-              }
-
-              if (!found) {
-              } else {
-                // UI 강제 업데이트를 위해 스크롤
-                Future.microtask(() {
-                  if (mounted) {
-                    _scrollToBottom();
-                  }
-                });
-              }
-            }
-          });
-
-          // 사용자에게 알림 (SnackBar)
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('🤖 Auto mode: $displayName'),
-              duration: const Duration(seconds: 2),
-              backgroundColor: Colors.blue.shade700,
-            ),
-          );
-        }
-      } else if (type == 'log') {
-        // 실시간 로그 메시지 처리
-        final logLevelStr = messageData['level'] ?? 'info';
-        final logMessage = messageData['message'] ?? '';
-        final logSource = messageData['source'] ?? 'unknown';
-        final logError = messageData['error'];
-
-        // 로그 레벨 파싱
-        LogLevel parsedLogLevel;
-        switch (logLevelStr) {
-          case 'error':
-            parsedLogLevel = LogLevel.error;
-            break;
-          case 'warn':
-          case 'warning':
-            parsedLogLevel = LogLevel.warning;
-            break;
-          default:
-            parsedLogLevel = LogLevel.info;
-        }
-
-        String logPrefix = '';
-        switch (logSource) {
-          case 'extension':
-            logPrefix = '🔌 [Extension]';
-            break;
-          case 'pc-server':
-            logPrefix = '🖥️ [PC Server]';
-            break;
-          default:
-            logPrefix = '📝 [Log]';
-        }
-
-        String logText = '$logPrefix $logMessage';
-        if (logError != null) {
-          logText += ' - Error: $logError';
-        }
-
-        setState(() {
-          _messages.add(MessageItem(logText,
-              type: MessageType.log, logLevel: parsedLogLevel));
-        });
-        _scrollToBottom();
-      } else {
-        _applyCdpInbound(
-          messageData is Map<String, dynamic>
-              ? messageData
-              : Map<String, dynamic>.from(msg),
-        );
-      }
-    });
-    _scrollToBottom();
   }
 
   // 모드 이름을 사용자 친화적인 표시 이름으로 변환
@@ -1719,99 +952,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _disconnect() async {
-    final relaySession = _sessionId;
-    final relayHeaders = _relayHeaders();
-    _stopPolling();
-    _stopReconnect();
-
-    // Close local WebSocket
-    _localWebSocket?.sink.close();
-    _localWebSocket = null;
-
+    _chats.reset();
     if (mounted) {
       setState(() {
-        _isConnected = false;
-        _isConnecting = false;
-        _sessionId = null;
-        _isReconnecting = false;
-        _reconnectAttempts = 0;
         _pendingCommandApprovals = [];
         _recentCommandEvents = [];
         _loadingCommandApprovals = false;
         _loadingCommandEvents = false;
-        _lastCommandMetaRefreshAt = null;
-        _messages.add(MessageItem('Disconnected', type: MessageType.system));
+        _isWaitingForResponse = false;
       });
     }
-    if (relaySession != null && _relayCredentials.containsKey(relaySession)) {
-      try {
-        final response = await http.post(Uri.parse('$kRelayServerUrl/api/disconnect'),
-          headers: relayHeaders, body: jsonEncode({'sessionId': relaySession}))
-          .timeout(const Duration(seconds: 15));
-        if (response.statusCode != 200) throw StateError('Disconnect failed');
-        _relayCredentials.remove(relaySession);
-      } catch (_) {
-        if (mounted) setState(() => _lastConnectionError =
-            'Disconnected locally; server revocation was not confirmed. Revoke the relay session in Cursor if needed.');
-      }
-    }
+    final warning = await _conn.disconnect();
+    if (warning != null && mounted) setState(() => _conn.lastError = warning);
   }
 
-  // Schedule reconnection with exponential backoff
-  void _scheduleReconnect() {
-    if (_isReconnecting || _isConnected) return;
-
-    const maxAttempts = 5;
-    if (_reconnectAttempts >= maxAttempts) {
-      setState(() {
-        _isReconnecting = false;
-        _messages.add(MessageItem(
-            '❌ Reconnection failed after $maxAttempts attempts. Please reconnect manually.',
-            type: MessageType.system));
-      });
-      return;
-    }
-
-    setState(() {
-      _isReconnecting = true;
-      _reconnectAttempts++;
-    });
-
-    // Exponential backoff: 2s, 4s, 8s, 16s, 32s
-    final delay = Duration(seconds: 2 * (1 << (_reconnectAttempts - 1)));
-
-    setState(() {
-      _messages.add(MessageItem(
-          '🔄 Reconnecting in ${delay.inSeconds}s... (attempt $_reconnectAttempts/$maxAttempts)',
-          type: MessageType.system));
-    });
-
-    _reconnectTimer = Timer(delay, () {
-      if (mounted && !_isConnected) {
-        if (_connectionType == ConnectionType.local ||
-            _connectionType == ConnectionType.tunnel) {
-          _connectToLocal();
-        } else {
-          final sessionId = _sessionIdController.text.trim();
-          if (sessionId.isNotEmpty) {
-            _connectToSession(sessionId);
-          }
-        }
-      }
-    });
-  }
-
-  // 재연결 중지
-  void _stopReconnect() {
-    _reconnectTimer?.cancel();
-    _reconnectTimer = null;
-    _isReconnecting = false;
-  }
+  void _stopReconnect() => _conn.stopReconnect();
 
   // 수동 재연결
   void _manualReconnect() {
-    _stopReconnect();
-    _reconnectAttempts = 0;
+    _conn.stopReconnect();
+    _conn.resetReconnectAttempts();
     _connect();
   }
 
@@ -1832,9 +992,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       String? agentBackend,
       String? requestId,
       String? historyId}) async {
-    // 연결 상태 재확인
-    _checkConnectionState();
-
     if (!_isConnected) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1844,170 +1001,86 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
 
-    try {
-      // agentMode가 제공되지 않으면 선택된 모드 사용 (또는 auto)
-      final mode = agentMode ?? _selectedAgentMode;
-      final backend = agentBackend ?? _selectedAgentBackend;
+    // agentMode가 제공되지 않으면 선택된 모드 사용 (또는 auto)
+    final mode = agentMode ?? _selectedAgentMode;
+    final backend = agentBackend ?? _selectedAgentBackend;
 
-      // 자동 모드이고 프롬프트인 경우 텍스트를 분석하여 모드 미리 감지
-      String? finalModeForCommand;
-      if (prompt == true && text != null && mode == 'auto') {
-        final detectedMode = _detectAgentMode(text);
-        finalModeForCommand = detectedMode ?? 'agent'; // 감지되지 않으면 기본 Agent 모드
-      } else if (mode != 'auto') {
-        finalModeForCommand = mode;
-      }
-
-      final commandData = {
-        'type': type,
-        'id': DateTime.now().microsecondsSinceEpoch.toString(),
-        'deadline': DateTime.now().add(const Duration(minutes: 1)).millisecondsSinceEpoch,
-        if (text != null) 'text': text,
-        if (command != null) 'command': command,
-        if (args != null) 'args': args,
-        if (prompt != null) 'prompt': prompt,
-        if (terminal != null) 'terminal': terminal,
-        if (execute != null) 'execute': execute,
-        if (action != null) 'action': action,
-        if (newSession != null) 'newSession': newSession,
-        if (clientId != null) 'clientId': clientId,
-        if (sessionId != null) 'sessionId': sessionId,
-        if (relaySessionId != null) 'relaySessionId': relaySessionId,
-        if (limit != null) 'limit': limit,
-        // 자동 모드일 때도 감지된 모드를 전달하여 히스토리에 저장되도록 함
-        if (finalModeForCommand != null) 'agentMode': finalModeForCommand,
-        if (backend.isNotEmpty) 'agentBackend': backend,
-        if (requestId != null) 'requestId': requestId,
-        if (historyId != null) 'historyId': historyId,
-      };
-
-      // 프롬프트 전송 시 사용자 프롬프트를 별도로 기록하고 응답 대기 상태 설정
-      if (prompt == true && execute == true && text != null) {
-        setState(() {
-          _isWaitingForResponse = true;
-          // 사용자 프롬프트를 별도 타입으로 추가 (선택된 모드와 함께)
-          final promptItem = MessageItem(
-            text,
-            type: MessageType.userPrompt,
-            agentMode: finalModeForCommand ?? mode, // 감지된 모드 또는 선택된 모드
-          );
-          _lastUserPrompt = promptItem;
-          _messages.add(promptItem);
-
-          // 디버깅: 모드 정보 출력
-        });
-      }
-
-      if (_connectionType == ConnectionType.local ||
-          _connectionType == ConnectionType.tunnel) {
-        // 로컬/터널 서버로 메시지 전송 (WebSocket)
-        if (_localWebSocket != null) {
-          _localWebSocket!.sink.add(jsonEncode(commandData));
-          if (mounted) {
-            setState(() {
-              _messages.add(MessageItem('✅ Message sent to local server',
-                  type: MessageType.system));
-            });
-            _scrollToBottom();
-          }
-        } else {
-          throw Exception('Local WebSocket not connected');
-        }
-      } else {
-        // 릴레이 서버로 메시지 전송
-        if (_sessionId == null) {
-          throw Exception('Session ID is required for relay connection');
-        }
-        // '응답 대기 중' UI가 먼저 그려지도록 다음 프레임에서 전송
-        WidgetsBinding.instance.addPostFrameCallback((_) async {
-          if (!mounted || _sessionId == null) return;
-          try {
-            final response = await http.post(
-              Uri.parse('$kRelayServerUrl/api/send'),
-              headers: _relayHeaders(),
-              body: jsonEncode({
-                'sessionId': _sessionId,
-                'deviceId': _deviceId,
-                'deviceType': 'mobile',
-                'type': type,
-                'data': commandData,
-              }),
-            );
-
-            if (mounted) {
-              // 응답 파싱 실패 시에도 대기 상태 유지 (파싱 오류 ≠ 전송 실패)
-              Map<String, dynamic>? responseData;
-              if (response.body.isNotEmpty) {
-                try {
-                  responseData =
-                      jsonDecode(response.body) as Map<String, dynamic>?;
-                } catch (_) {
-                  responseData = null;
-                }
-              }
-              final success = response.statusCode == 200 &&
-                  (responseData?['success'] == true);
-              final responseMeta =
-                  responseData?['data'] as Map<String, dynamic>? ?? {};
-              final policyDecision =
-                  responseMeta['policyDecision']?.toString() ?? '';
-              final approvalId = responseMeta['approvalId']?.toString();
-              final riskLevel = responseMeta['riskLevel']?.toString() ?? '';
-
-              setState(() {
-                if (success) {
-                  _messages.add(MessageItem('✅ Message sent — waiting for response…',
-                      type: MessageType.system));
-                  // _isWaitingForResponse는 이미 true, 유지
-                } else if (policyDecision == 'approval_required') {
-                  _messages.add(MessageItem(
-                      '⏳ Approval required: $approvalId (risk: $riskLevel)',
-                      type: MessageType.system));
-                  _isWaitingForResponse = false;
-                } else if (policyDecision == 'deny') {
-                  _messages.add(MessageItem(
-                      '🚫 Policy blocked: ${responseData?['error'] ?? 'command denied'}',
-                      type: MessageType.system));
-                  _isWaitingForResponse = false;
-                } else {
-                  _messages.add(MessageItem(
-                      '❌ Send failed: ${responseData?['error'] ?? 'HTTP ${response.statusCode}'}',
-                      type: MessageType.system));
-                  _isWaitingForResponse = false;
-                }
-              });
-
-              if (policyDecision == 'approval_required') {
-                _loadCommandApprovals(silent: true);
-                _loadCommandEvents(silent: true);
-              }
-              _scrollToBottom();
-            }
-          } catch (e) {
-            if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Send error: $e')),
-              );
-              setState(() {
-                _isWaitingForResponse = false;
-                _messages
-                    .add(MessageItem('Send error: $e', type: MessageType.system));
-              });
-            }
-          }
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Send error: $e')),
-        );
-        setState(() {
-          _isWaitingForResponse = false;
-          _messages.add(MessageItem('Send error: $e', type: MessageType.system));
-        });
-      }
+    // 자동 모드이고 프롬프트인 경우 텍스트를 분석하여 모드 미리 감지
+    String? finalModeForCommand;
+    if (prompt == true && text != null && mode == 'auto') {
+      final detectedMode = _detectAgentMode(text);
+      finalModeForCommand = detectedMode ?? 'agent'; // 감지되지 않으면 기본 Agent 모드
+    } else if (mode != 'auto') {
+      finalModeForCommand = mode;
     }
+
+    final commandData = {
+      'type': type,
+      'id': DateTime.now().microsecondsSinceEpoch.toString(),
+      'deadline': DateTime.now().add(const Duration(minutes: 1)).millisecondsSinceEpoch,
+      if (text != null) 'text': text,
+      if (command != null) 'command': command,
+      if (args != null) 'args': args,
+      if (prompt != null) 'prompt': prompt,
+      if (terminal != null) 'terminal': terminal,
+      if (execute != null) 'execute': execute,
+      if (action != null) 'action': action,
+      if (newSession != null) 'newSession': newSession,
+      if (clientId != null) 'clientId': clientId,
+      if (sessionId != null) 'sessionId': sessionId,
+      if (relaySessionId != null) 'relaySessionId': relaySessionId,
+      if (limit != null) 'limit': limit,
+      // 자동 모드일 때도 감지된 모드를 전달하여 히스토리에 저장되도록 함
+      if (finalModeForCommand != null) 'agentMode': finalModeForCommand,
+      if (backend.isNotEmpty) 'agentBackend': backend,
+      if (requestId != null) 'requestId': requestId,
+      if (historyId != null) 'historyId': historyId,
+    };
+
+    // 프롬프트 전송 시 사용자 프롬프트를 별도로 기록하고 응답 대기 상태 설정
+    if (prompt == true && execute == true && text != null) {
+      setState(() {
+        _isWaitingForResponse = true;
+        final promptItem = MessageItem(
+          text,
+          type: MessageType.userPrompt,
+          agentMode: finalModeForCommand ?? mode, // 감지된 모드 또는 선택된 모드
+        );
+        _lastUserPrompt = promptItem;
+        _messages.add(promptItem);
+      });
+    }
+
+    final result = await _conn.send(commandData);
+    if (!mounted) return;
+    setState(() {
+      if (result.policyDecision == 'approval_required') {
+        _messages.add(MessageItem(
+            '⏳ Approval required: ${result.approvalId} (risk: ${result.riskLevel})',
+            type: MessageType.system));
+        _isWaitingForResponse = false;
+      } else if (result.policyDecision == 'deny') {
+        _messages.add(MessageItem(
+            '🚫 Policy blocked: ${result.error ?? 'command denied'}',
+            type: MessageType.system));
+        _isWaitingForResponse = false;
+      } else if (result.error != null) {
+        _messages.add(MessageItem('❌ Send failed: ${result.error}',
+            type: MessageType.system));
+        _isWaitingForResponse = false;
+      } else {
+        _messages.add(MessageItem(
+            _conn.isLocal
+                ? '✅ Message sent to local server'
+                : '✅ Message sent — waiting for response…',
+            type: MessageType.system));
+      }
+    });
+    if (result.policyDecision == 'approval_required') {
+      _loadCommandApprovals(silent: true);
+      _loadCommandEvents(silent: true);
+    }
+    _scrollToBottom();
   }
 
   void _scrollToBottom() {
@@ -2441,6 +1514,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _conn
+      ..onInbound = _handleInbound
+      ..onSystem = _onSystem
+      ..onConnected = _onConnected
+      ..askPairingCode = (({required bool relay}) =>
+          relay ? _showPinDialog() : _showLocalPairDialog())
+      ..isBusy = (() => _chats.running || _chats.awaitingReply || _isWaitingForResponse)
+      ..addListener(_onConnectionChanged);
     _loadConnectionSettings();
     // 설정에서 기본 에이전트 모드 적용
     _selectedAgentMode = AppSettings().defaultAgentMode;
@@ -2562,22 +1643,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
-    if (state == AppLifecycleState.resumed) {
-      // 앱이 다시 활성화되었을 때 연결 상태 확인 및 UI 갱신
-      if (mounted) {
-        // 연결 상태 확인
-        _checkConnectionState();
-        // UI 강제 갱신 - Future.microtask를 사용하여 다음 프레임에서 실행
-        Future.microtask(() {
-          if (mounted) {
-            setState(() {
-              // 상태 갱신으로 UI 다시 렌더링
-            });
-          }
-        });
-      }
-    } else if (state == AppLifecycleState.paused) {
-      // 앱이 백그라운드로 갔을 때는 특별한 처리가 필요 없음
+    // Hidden apps stop polling the relay and watching chats; resuming catches up.
+    final visible = state == AppLifecycleState.resumed ||
+        state == AppLifecycleState.inactive;
+    _conn.setVisible(visible);
+    _chats.setVisible(visible);
+    if (state == AppLifecycleState.resumed && mounted) {
+      Future.microtask(() {
+        if (mounted) setState(() {});
+      });
     }
   }
 
@@ -2616,19 +1690,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _refreshCommandMetaIfStale(
-      {Duration minInterval = const Duration(seconds: 6)}) async {
-    if (!_isConnected || _connectionType != ConnectionType.relay) return;
-    final now = DateTime.now();
-    if (_lastCommandMetaRefreshAt != null &&
-        now.difference(_lastCommandMetaRefreshAt!) < minInterval) {
-      return;
-    }
-    _lastCommandMetaRefreshAt = now;
-    await _loadCommandApprovals(silent: true);
-    await _loadCommandEvents(silent: true);
-  }
-
   Future<void> _loadCommandApprovals({bool silent = false}) async {
     if (!_isConnected || _sessionId == null) return;
     if (_connectionType != ConnectionType.relay) return;
@@ -2639,9 +1700,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
 
     try {
-      final uri = Uri.parse('$kRelayServerUrl/api/command-approvals')
-          .replace(queryParameters: {'sessionId': _sessionId});
-      final response = await http.get(uri, headers: _relayHeaders());
+      final response = await _conn.relayGet('/api/command-approvals', {});
+      if (response == null) {
+        if (mounted) setState(() => _loadingCommandApprovals = false);
+        return;
+      }
       final body = response.body.isNotEmpty
           ? jsonDecode(response.body) as Map<String, dynamic>
           : <String, dynamic>{};
@@ -2699,9 +1762,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
 
     try {
-      final uri = Uri.parse('$kRelayServerUrl/api/command-events').replace(
-          queryParameters: {'sessionId': _sessionId, 'limit': '$limit'});
-      final response = await http.get(uri, headers: _relayHeaders());
+      final response = await _conn.relayGet('/api/command-events', {'limit': '$limit'});
+      if (response == null) {
+        if (mounted) setState(() => _loadingCommandEvents = false);
+        return;
+      }
       final body = response.body.isNotEmpty
           ? jsonDecode(response.body) as Map<String, dynamic>
           : <String, dynamic>{};
@@ -2753,17 +1818,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (_connectionType != ConnectionType.relay) return;
 
     try {
-      final response = await http.post(
-        Uri.parse('$kRelayServerUrl/api/resolve-command-approval'),
-        headers: _relayHeaders(),
-        body: jsonEncode({
-          'sessionId': _sessionId,
-          'approvalId': approvalId,
-          'action': action,
-          'resolvedBy': _deviceId,
-          'reason': 'resolved via mobile app',
-        }),
-      );
+      final response = await _conn.relayPost('/api/resolve-command-approval', {
+        'approvalId': approvalId,
+        'action': action,
+        'resolvedBy': _deviceId,
+        'reason': 'resolved via mobile app',
+      });
+      if (response == null) return;
       final body = response.body.isNotEmpty
           ? jsonDecode(response.body) as Map<String, dynamic>
           : <String, dynamic>{};
@@ -2856,51 +1917,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  // 연결 상태 확인 및 필요시 재연결
-  void _checkConnectionState() {
-    if (_connectionType == ConnectionType.local ||
-        _connectionType == ConnectionType.tunnel) {
-      // 로컬/터널 연결: WebSocket 상태 확인
-      if (_localWebSocket == null && _isConnected) {
-        if (mounted) {
-          setState(() {
-            _isConnected = false;
-            _messages.add(MessageItem(
-                '⚠️ Local connection lost, please reconnect',
-                type: MessageType.system));
-          });
-        }
-      }
-    } else {
-      // 릴레이 연결: 세션 ID 확인
-      if (_sessionId == null && _isConnected) {
-        // 세션이 null인데 연결 상태가 true면 상태 불일치
-        if (mounted) {
-          setState(() {
-            _isConnected = false;
-            _messages.add(MessageItem('⚠️ Connection lost, please reconnect',
-                type: MessageType.system));
-          });
-        }
-      } else if (_sessionId != null && !_isConnected) {
-        // 세션이 있는데 연결 상태가 false면 상태 불일치
-        if (mounted) {
-          setState(() {
-            _isConnected = true;
-          });
-        }
-      }
-    }
-  }
-
   @override
   void dispose() {
     _scrollController.removeListener(_updateScrollButtonVisibility);
     WidgetsBinding.instance.removeObserver(this);
     AppSettings().removeListener(_onAppSettingsChanged);
-    _stopPolling();
-    _stopReconnect(); // Phase 5: cancel reconnect timer to prevent post-dispose callbacks
-    _localWebSocket?.sink.close();
+    _conn.removeListener(_onConnectionChanged);
+    _conn.dispose();
+    _chats.dispose();
     _commandController.dispose();
     _sessionIdController.dispose();
     _localIpController.dispose();
@@ -3083,21 +2107,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Widget _buildCompactBody() {
     return Column(
       children: [
-        Expanded(
-          child: _selectedAgentBackend == 'cdp'
-              ? AgentControlCenter(
-                  connected: _isConnected,
-                  store: _cdpStore,
-                  onRefresh: _refreshCdpSessions,
-                  onReconnect: () {
-                    _stopReconnect();
-                    _connect();
-                  },
-                  sendCommand: _sendCdpControlCommand,
-                )
-              : _buildMessageListWithScrollButtons(),
-        ),
-        if (_selectedAgentBackend != 'cdp')
+        Expanded(child: _buildMessageListWithScrollButtons()),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           decoration: BoxDecoration(
@@ -3231,7 +2241,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 compact: narrow,
                 onChanged: (v) {
                   setState(() => _selectedAgentBackend = v);
-                  if (v == 'cdp') _refreshCdpSessions();
+                  if (v == 'cdp') _refreshAgents();
                 },
               ),
             ),
@@ -3249,18 +2259,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             : 'Relay')),
               ),
             ),
-            IconButton(
-              icon: Icon(
-                _isCompactView
-                    ? Icons.fullscreen_rounded
-                    : Icons.view_agenda_outlined,
-                size: 20,
+            if (_selectedAgentBackend == 'cdp')
+              IconButton(
+                icon: const Icon(Icons.link_off_rounded, size: 20),
+                tooltip: 'Disconnect',
+                onPressed: _disconnect,
+              )
+            else
+              IconButton(
+                icon: Icon(
+                  _isCompactView
+                      ? Icons.fullscreen_rounded
+                      : Icons.view_agenda_outlined,
+                  size: 20,
+                ),
+                tooltip: _isCompactView ? 'Full view' : 'Focus mode',
+                onPressed: () {
+                  setState(() => _isCompactView = !_isCompactView);
+                },
               ),
-              tooltip: _isCompactView ? 'Full view' : 'Focus mode',
-              onPressed: () {
-                setState(() => _isCompactView = !_isCompactView);
-              },
-            ),
           ] else
             const Padding(
               padding: EdgeInsets.only(right: 8),
@@ -3287,6 +2304,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       body: SafeArea(
         child: !_isConnected
           ? _buildConnectionLanding()
+          : _selectedAgentBackend == 'cdp'
+          ? Listener(
+              onPointerDown: (_) => _conn.markActive(),
+              child: AgentsShell(store: _chats),
+            )
           : _isCompactView
           ? _buildCompactBody()
           : LayoutBuilder(
@@ -4262,16 +3284,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                 borderRadius:
                                     BorderRadius.circular(Cr.radiusLg),
                               ),
-                              child: AgentControlCenter(
-                                connected: _isConnected,
-                                store: _cdpStore,
-                                onRefresh: _refreshCdpSessions,
-                                onReconnect: () {
-                                  _stopReconnect();
-                                  _connect();
-                                },
-                                sendCommand: _sendCdpControlCommand,
-                              ),
+                              child: AgentsShell(store: _chats),
                             ),
                           ),
                         )

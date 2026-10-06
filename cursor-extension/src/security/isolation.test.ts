@@ -76,14 +76,61 @@ test("Telegram routes only attributed replies; sync off removes pending routing"
   assert.deepEqual(sent, []);
 });
 
-test("Telegram unsafe approval and stop routes cannot invoke backends", async () => {
+test("Telegram approve codes are bound to one request, need a confirm from the same user, and expire", async () => {
   const { bridge, sent } = fixture();
+  const routed: any[] = [];
+  bridge.commandRouter = { handleCommand: async (c: any) => { routed.push(c); } };
   const state = bridge.getState(1, 1);
-  for (const command of ["/approve", "/reject", "/stop"]) {
+  for (const command of ["/approve", "/reject", "/confirm", "/approve_abcdef", "/confirm_abcdef"]) {
     await bridge.dispatch(1, 1, state, command);
   }
-  assert.equal(sent.length, 3);
-  assert.ok(sent.every(x => x.text.includes("disabled")));
+  assert.equal(routed.length, 0);
+
+  sent.length = 0;
+  bridge.onComposerState({ chatId: "chat-1", title: "T", pending: { id: "req-abc", command: "npm test", detail: "" } });
+  bridge.onComposerState({ chatId: "chat-1", title: "T", pending: { id: "req-abc", command: "npm test", detail: "" } });
+  assert.deepEqual(sent.map(x => x.chat), [1, 2]);
+  const code = sent[0].text.match(/\/approve_([a-f0-9]{6})/)![1];
+  assert.equal(sent[1].text.match(/\/approve_([a-f0-9]{6})/)![1], code);
+
+  await bridge.dispatch(1, 1, state, `/approve_${code}`);
+  assert.equal(routed.length, 0);
+  await bridge.dispatch(2, 2, bridge.getState(2, 2), `/confirm_${code}`);
+  assert.equal(routed.length, 0);
+  await bridge.dispatch(1, 1, state, `/confirm_${code}`);
+  assert.equal(routed.length, 1);
+  assert.deepEqual(
+    { type: routed[0].type, chatId: routed[0].chatId, requestId: routed[0].requestId, confirmed: routed[0].confirmed, clientId: routed[0].clientId },
+    { type: "approve_action", chatId: "chat-1", requestId: "req-abc", confirmed: true, clientId: "telegram:1:1" }
+  );
+  await bridge.dispatch(1, 1, state, `/confirm_${code}`);
+  assert.equal(routed.length, 1);
+
+  sent.length = 0;
+  bridge.onComposerState({ chatId: "chat-1", title: "T", pending: null });
+  bridge.onComposerState({ chatId: "chat-1", title: "T", pending: { id: "req-def", command: "ls", detail: "" } });
+  const code2 = sent[0].text.match(/\/reject_([a-f0-9]{6})/)![1];
+  bridge.approvalCodes.get(code2).expiresAt = Date.now() - 1;
+  await bridge.dispatch(1, 1, state, `/reject_${code2}`);
+  await bridge.dispatch(1, 1, state, `/confirm_${code2}`);
+  assert.equal(routed.length, 1);
+  assert.match(sent.at(-2)!.text, /expired/);
+});
+
+test("Telegram /stop, /model and /newchat go through the command router", async () => {
+  const { bridge } = fixture();
+  const routed: any[] = [];
+  bridge.commandRouter = { handleCommand: async (c: any) => { routed.push(c); } };
+  const state = bridge.getState(1, 1);
+  state.backend = "cdp";
+  await bridge.dispatch(1, 1, state, "/stop");
+  await bridge.dispatch(1, 1, state, "/model GPT-5");
+  await bridge.dispatch(1, 1, state, "/newchat");
+  assert.deepEqual(routed.map(c => [c.type, c.model, c.clientId]), [
+    ["agent_stop", undefined, "telegram:1:1"],
+    ["set_model", "GPT-5", "telegram:1:1"],
+    ["new_chat", undefined, "telegram:1:1"],
+  ]);
 });
 
 test("Telegram /open opens only an item from the caller's history list", async () => {
@@ -344,4 +391,54 @@ test("router responses preserve each concurrent request's recipient", async () =
     assert.equal(reply.correlationId, reply.clientId);
     assert.equal(reply.targetDeviceId, `device-${reply.clientId}`);
   }
+});
+
+test("remote approve/reject is bound to the open chat's exact request, confirmed, gated and audited", async () => {
+  const CHAT = "aaaaaaaa-1111-2222-3333-444444444444";
+  const audit: string[] = [];
+  const resolved: Array<[string, boolean]> = [];
+  let enabled = true;
+  const replies: any[] = [];
+  const router = new CommandRouter({}, {send: (raw: string) => replies.push(JSON.parse(raw))},
+    {appendLine: (l: string) => audit.push(l)});
+  router.log = () => {};
+  router.setChatServices({
+    index: {}, diff: {}, watcher: {},
+    remoteActionsEnabled: () => enabled,
+    agents: () => ({
+      attached: true,
+      composerState: async () => ({ok: true, state: {chatId: CHAT}}),
+      resolve: async (requestId: string, approve: boolean) => {
+        resolved.push([requestId, approve]);
+        return requestId === "req-abc123" ? {ok: true, label: "Run"} : {ok: false, error: "That request is no longer pending"};
+      },
+    }),
+  });
+  const send = async (extra: Record<string, unknown>) => {
+    await router.handleCommand({
+      type: "approve_action", id: "c1", clientId: "relay:S1", senderDeviceId: "phone",
+      chatId: CHAT, requestId: "req-abc123", confirmed: true, ...extra,
+    });
+    return replies.filter((r) => r.type === "command_result").at(-1);
+  };
+
+  assert.equal((await send({confirmed: undefined})).success, false);
+  assert.equal((await send({requestId: undefined})).success, false);
+  assert.equal((await send({requestId: "Allow"})).success, false);
+  assert.equal((await send({chatId: "bbbbbbbb-1111-2222-3333-444444444444"})).success, false);
+  assert.deepEqual(resolved, []);
+
+  assert.equal((await send({requestId: "req-stale1"})).success, false);
+  assert.equal((await send({type: "reject_action"})).success, true);
+  assert.equal((await send({})).success, true);
+  assert.deepEqual(resolved, [["req-stale1", true], ["req-abc123", false], ["req-abc123", true]]);
+
+  enabled = false;
+  assert.equal((await send({})).success, false);
+  assert.equal(resolved.length, 3);
+
+  const lines = audit.filter((l) => l.includes("[Audit]"));
+  assert.equal(lines.length, 8);
+  assert.ok(lines.every((l) => l.includes("channel=relay") && !l.includes("phone")));
+  assert.ok(lines.at(-1)!.includes("result=refused disabled"));
 });
