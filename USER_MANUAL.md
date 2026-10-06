@@ -204,12 +204,14 @@ Extension이 정상적으로 활성화되면 상태 표시줄 우측 하단에 �
 
 | 상태 | 의미 |
 |------|------|
-| ☁️ **Cursor Remote: 비활성** | WebSocket 서버 실행 중, 로컬/릴레이 클라이언트 미연결 |
-| ☁️ **Cursor Remote: Connected** | 클라이언트 연결됨 (릴레이 연결 시 세션 ID 표시 가능) |
-| 🚫 **Cursor Remote: Stopped** | 서버 중지됨 |
+| 📡 **Remote :8766** | 서버 실행 중 (포트 표시), 연결된 기기 없음. `●` 표시는 이 창에서 Telegram 봇 실행 중 |
+| 📡 **Remote · 1 device** | 기기 연결됨 (릴레이 연결 시 `relay <세션 ID>` 표시) |
+| 🚫 **Remote off** | 서버 중지됨 |
+
+상태 표시줄 항목을 클릭하면 기기 페어링, Telegram, 터널, 로그 등 모든 작업 메뉴가 열립니다.
 
 **상태 표시줄이 안 보인다면:**
-- 명령 팔레트 (`Cmd+Shift+P`)에서 "Start Cursor Remote Server" 실행
+- 명령 팔레트 (`Cmd+Shift+P`)에서 "Cursor Remote: Start Server" 실행
 
 ### Cursor IDE 설정
 
@@ -271,8 +273,8 @@ JSON 형식으로 직접 편집하려면:
 ### Step 1: Extension 실행 확인
 
 1. Cursor IDE 실행
-2. 상태 표시줄에서 "Cursor Remote: 비활성" 또는 "Cursor Remote: Connected" 확인
-3. 안 보이면: `Cmd+Shift+P` → "Start Cursor Remote Server"
+2. 상태 표시줄에서 "Remote :8766" 또는 "Remote · 1 device" 확인
+3. 안 보이면: `Cmd+Shift+P` → "Cursor Remote: Start Server"
 
 ### Step 2: PC IP와 Extension 포트 확인
 
@@ -302,7 +304,7 @@ JSON 형식으로 직접 편집하려면:
 
 **성공 시:**
 - 모바일 앱: 연결 상태 아이콘이 녹색으로 변경
-- Cursor Extension: "Cursor Remote: Connected" 표시
+- Cursor Extension: "Remote · 1 device" 표시
 - Output 패널: `Client connected to Cursor Remote` 로그 출력
 
 ### 포트 정보
@@ -395,7 +397,7 @@ vercel env add UPSTASH_REDIS_REST_TOKEN
 ### Step 1: Extension 실행 확인
 
 1. Cursor IDE 실행
-2. 상태 표시줄에서 "Cursor Remote: 비활성" 또는 "Cursor Remote: Connected" 확인
+2. 상태 표시줄에서 "Remote :8766" 또는 "Remote · 1 device" 확인
 
 ### Step 2: Extension이 릴레이 모드로 연결
 
@@ -643,11 +645,11 @@ npm run compile
 
 1. Cursor IDE 재시작
 2. 명령 팔레트에서 "Developer: Reload Window" 실행
-3. 그래도 안 되면: `Cmd+Shift+P` → "Start Cursor Remote Server"
+3. 그래도 안 되면: `Cmd+Shift+P` → "Cursor Remote: Start Server"
 
 #### 상태 표시줄이 보이지 않는 경우
 
-1. `Cmd+Shift+P` → "Start Cursor Remote Server" 실행
+1. `Cmd+Shift+P` → "Cursor Remote: Start Server" 실행
 2. Output 패널 확인: `View` → `Output` → "Cursor Remote" 선택
 3. 에러 메시지가 있으면 해당 섹션 참조
 
@@ -897,7 +899,7 @@ WebSocket error: ...
 ### 자주 묻는 질문
 
 **Q: Extension이 자동으로 시작되지 않아요**
-> A: `Cmd+Shift+P` → "Start Cursor Remote Server" 실행
+> A: `Cmd+Shift+P` → "Cursor Remote: Start Server" 실행
 
 **Q: 세션 코드는 어디서 확인하나요?**
 > A: Extension 상태줄 "Cursor Remote"를 클릭해 입력/연결합니다. 이미 연결된 세션 ID는 연결 정보 패널 또는 상태줄 텍스트에서 확인할 수 있습니다.

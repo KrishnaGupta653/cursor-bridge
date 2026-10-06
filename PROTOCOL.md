@@ -1,5 +1,10 @@
 # Cursor Remote 통신 프로토콜
 
+> Phase 2 containment is in progress. Local WebSocket now requires v2 pairing;
+> remote shell, stop and approval actions are disabled. Read the
+> [security migration guide](SECURITY_MIGRATION.md) before following older examples.
+> Relay capabilities are implemented; full runtime validation remains outstanding.
+
 ## 개요
 
 Cursor Remote는 WebSocket 기반 양방향 통신을 사용합니다. 모바일/웹 클라이언트와 Cursor Extension 간의 메시지 교환 규칙을 정의합니다.

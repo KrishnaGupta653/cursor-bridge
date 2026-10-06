@@ -1,5 +1,10 @@
 # Cursor Remote 📱
 
+> Phase 2 containment is in progress. Local WebSocket now requires v2 pairing;
+> remote shell, stop and approval actions are disabled. Read the
+> [security migration guide](SECURITY_MIGRATION.md) before following older examples.
+> Relay capabilities are implemented; full runtime validation remains outstanding.
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![GitHub Sponsors](https://img.shields.io/badge/Sponsor-♥-ea4aaa?logo=github)](https://github.com/sponsors/jaloveeye)
 [![Version](https://img.shields.io/badge/version-0.3.6-blue.svg)](https://github.com/jaloveeye/cursor-remote)
@@ -229,11 +234,11 @@ npm run compile
 
 1. **Launch Cursor IDE**
 2. **Extension auto-activates** (check for cloud icon in status bar)
-3. **Or manually start**: Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`) → "Start Cursor Remote Server"
+3. **Or manually start**: Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`) → "Cursor Remote: Start Server"
 
 #### 2.3 Verify Activation
 
-- Check status bar for "Cursor Remote: Connected" or "Cursor Remote: 비활성"
+- Check status bar for "Remote :8766" (ready) or "Remote · 1 device" (connected); click it for all actions
 - Check Output panel for "Cursor Remote extension is now active!" message
 
 ---
@@ -873,11 +878,11 @@ npm run compile
 
 1. **Cursor IDE 실행**
 2. **Extension 자동 활성화** (상태 표시줄에 구름 아이콘 확인)
-3. **또는 수동 시작**: 명령 팔레트 (`Cmd+Shift+P` / `Ctrl+Shift+P`) → "Start Cursor Remote Server"
+3. **또는 수동 시작**: 명령 팔레트 (`Cmd+Shift+P` / `Ctrl+Shift+P`) → "Cursor Remote: Start Server"
 
 #### 2.3 활성화 확인
 
-- 상태 표시줄에 "Cursor Remote: Connected" 또는 "Cursor Remote: 비활성" 표시 확인
+- 상태 표시줄에 "Remote :8766" (준비됨) 또는 "Remote · 1 device" (연결됨) 표시 확인
 - Output 패널에서 "Cursor Remote extension is now active!" 메시지 확인
 
 ---
