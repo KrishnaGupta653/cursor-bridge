@@ -34,7 +34,7 @@ fi
 section "CDP (agent session control)"
 CDP_BIND="$(lsof -nP -iTCP:"$CDP_PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $9}' | head -1)"
 if [[ -z "$CDP_BIND" ]]; then
-  fail "Nothing on :$CDP_PORT — start Cursor via start-cursor-remote-stack.sh (adds --remote-debugging-port)"
+  fail "Nothing on :$CDP_PORT — in Cursor run \"Cursor Remote: Restart Cursor with Session Control\" (or start-cursor-remote-stack.sh)"
 elif [[ "$CDP_BIND" == 127.0.0.1:* ]]; then
   pass "CDP listening on $CDP_BIND (localhost only)"
 else

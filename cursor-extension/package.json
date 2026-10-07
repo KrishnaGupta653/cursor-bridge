@@ -221,8 +221,18 @@
         "category": "Cursor Remote"
       },
       {
+        "command": "cursorRemote.newRelaySession",
+        "title": "Start New Relay Session",
+        "category": "Cursor Remote"
+      },
+      {
         "command": "cursorRemote.revokeRelaySession",
         "title": "Revoke Relay Session",
+        "category": "Cursor Remote"
+      },
+      {
+        "command": "cursorRemote.restartWithSessionControl",
+        "title": "Restart Cursor with Session Control",
         "category": "Cursor Remote"
       }
     ]

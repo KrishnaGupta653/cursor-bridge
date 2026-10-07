@@ -7,7 +7,16 @@ import * as vscode from "vscode";
 import * as https from "https";
 import * as http from "http";
 import { URL } from "url";
-import { randomUUID } from "crypto";
+import { randomInt, randomUUID } from "crypto";
+
+const SESSION_ID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+/** Six characters, as typed on the phone; ambiguous letters and digits are left out. */
+export function newRelaySessionId(): string {
+  let id = "";
+  for (let i = 0; i < 6; i++) id += SESSION_ID_ALPHABET[randomInt(SESSION_ID_ALPHABET.length)];
+  return id;
+}
 
 export interface RelayMessage {
   type: string;
@@ -34,6 +43,7 @@ export class RelayClient {
   private outputChannel: vscode.OutputChannel;
   private onMessageCallback: ((message: string) => void) | null = null;
   private onSessionConnectedCallback: (() => void) | null = null;
+  private onSessionExpiredCallback: ((expired: string, next: string) => void) | null = null;
   /** 복수 세션 발견 시 사용자 선택용. (sessions) => 선택한 sessionId 또는 null */
   private onSessionsDiscoveredCallback:
     | ((sessions: { sessionId: string }[]) => Promise<string | null>)
@@ -101,6 +111,11 @@ export class RelayClient {
     this.onSessionConnectedCallback = callback;
   }
 
+  /** Called when a saved relay login expired and a new session ID replaced it. */
+  setOnSessionExpired(callback: (expired: string, next: string) => void) {
+    this.onSessionExpiredCallback = callback;
+  }
+
   /**
    * Set callback for when multiple sessions are discovered (user picks one).
    * If not set or returns null, first session is used.
@@ -135,6 +150,11 @@ export class RelayClient {
       pin != null && typeof pin === "string" && pin.trim() ? pin.trim() : null;
     this.targetSessionId = trimmed;
     await this.connectToSession(trimmed, this.targetPin ?? undefined);
+    // An expired session was just replaced by a new ID: connect to that now so pairing can continue.
+    const replacement = this.targetSessionId;
+    if (!this.isConnected && !this.pcInUse && replacement && replacement !== trimmed) {
+      await this.connectToSession(replacement, this.targetPin ?? undefined);
+    }
     if (!this.pcInUse && !this.pollInterval) this.startPolling();
   }
 
@@ -457,6 +477,25 @@ export class RelayClient {
     return `cursorRemote.relay.v2:${this.relayServerUrl}:${sid}`;
   }
 
+  /**
+   * Drops the current session (revoking it on the relay so paired phones lose access) and
+   * connects to a brand-new one. Returns the new session ID, or null if it could not connect.
+   */
+  async startNewSession(): Promise<string | null> {
+    if (this.isConnected) {
+      try { await this.disconnectSession(); } catch { /* already revoked or expired */ }
+    }
+    this.stop();
+    this.capabilityToken = null;
+    await this.connectToSessionById(newRelaySessionId());
+    return this.isConnectedToSession() ? this.sessionId : null;
+  }
+
+  /** Whether this Mac holds a login for `sid`, so it can reconnect without creating a session. */
+  async hasCredential(sid: string): Promise<boolean> {
+    return !!(await this.secrets?.get(this.credentialKey(sid.trim().toUpperCase())));
+  }
+
   async createMobilePairingCode(): Promise<string> {
     if (!this.isConnected || !this.sessionId) throw new Error("Connect the extension to a relay session first");
     const result = await this.httpRequestWithStatus(`${this.relayServerUrl}/api/pair`, "POST", { sessionId: this.sessionId });
@@ -500,6 +539,21 @@ export class RelayClient {
         if (result.statusCode === 0) {
           retryLater();
           this.logError(`Could not reach the relay server ${this.relayServerUrl} (network, proxy or certificate problem); retrying.`);
+          return;
+        }
+        // Relay logins last 24 hours, and a session ID that was ever used can never be claimed
+        // again (no takeovers). Either way, start a fresh session that the phone pairs with.
+        const expired = endpoint === "connect" && result.statusCode === 401;
+        const taken = endpoint === "session" && result.statusCode === 409;
+        if (expired || taken) {
+          if (expired) await this.secrets?.delete(this.credentialKey(sid));
+          this.capabilityToken = null;
+          const next = newRelaySessionId();
+          this.targetSessionId = next;
+          this.log(expired
+            ? `Relay session ${sid} expired (sessions last 24 hours). Starting new session ${next}; pair the phone again.`
+            : `Relay session ID ${sid} is already taken. Starting new session ${next} instead; use that ID on the phone.`);
+          this.onSessionExpiredCallback?.(sid, next);
           return;
         }
         if ([400, 401, 403, 409].includes(result.statusCode)) this.pcInUse = true;

@@ -67,9 +67,26 @@ class _AgentChatPaneState extends State<AgentChatPane> {
   bool _stickToBottom = true;
   int _pendingNew = 0;
   int _lastCount = 0;
+  int _lastTail = 0;
   String? _lastChat;
 
+  /// Returning the same widget instance lets Flutter skip rebuilding an unchanged message,
+  /// so a streaming reply does not re-render the markdown of every visible item.
+  final Map<String, (ChatItem, Widget)> _itemViews = {};
+
   ChatStore get store => widget.store;
+
+  Widget _itemView(ChatItem item) {
+    final cached = _itemViews[item.id];
+    if (cached != null &&
+        (identical(cached.$1, item) || (cached.$1.text == item.text && cached.$1.work == null && item.work == null))) {
+      return cached.$2;
+    }
+    final view = _ItemView(item: item, onOpenFile: _openDiff);
+    if (_itemViews.length > 400) _itemViews.clear();
+    _itemViews[item.id] = (item, view);
+    return view;
+  }
 
   @override
   void initState() {
@@ -97,19 +114,25 @@ class _AgentChatPaneState extends State<AgentChatPane> {
   }
 
   void _onStore() {
-    final count = store.thread?.items.length ?? 0;
+    final items = store.thread?.items ?? const <ChatItem>[];
+    final count = items.length;
+    // The last answer grows in place while it streams; follow that too, not just new items.
+    final tail = items.isEmpty ? 0 : items.last.text.length;
     final chat = store.selectedChatId;
     if (chat != _lastChat) {
       _lastChat = chat;
       _lastCount = count;
+      _lastTail = tail;
+      _itemViews.clear();
       _stickToBottom = true;
       _pendingNew = 0;
       WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToEnd());
       return;
     }
-    if (count == _lastCount) return;
+    if (count == _lastCount && tail == _lastTail) return;
     final grew = count > _lastCount;
     _lastCount = count;
+    _lastTail = tail;
     if (_stickToBottom) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToEnd());
     } else if (grew && mounted) {
@@ -246,7 +269,7 @@ class _AgentChatPaneState extends State<AgentChatPane> {
               );
             }
             final index = i - head;
-            if (index < items.length) return _ItemView(item: items[index], onOpenFile: _openDiff);
+            if (index < items.length) return _itemView(items[index]);
             if (pending != null && index == items.length) {
               return Opacity(opacity: 0.6, child: _UserBubble(text: pending));
             }
@@ -849,7 +872,7 @@ class _Composer extends StatelessWidget {
                             tooltip: 'Stop',
                             style: IconButton.styleFrom(backgroundColor: Cr.surfaceHover),
                             icon: const Icon(Icons.stop_rounded, size: 18),
-                            onPressed: store.stop,
+                            onPressed: composer == null || composer.canStop ? store.stop : null,
                           )
                         else
                           ValueListenableBuilder<TextEditingValue>(

@@ -155,7 +155,9 @@ class _AgentsSidebarState extends State<AgentsSidebar> {
             if (!store.sidebarLive && store.chats.isNotEmpty)
               const Padding(
                 padding: EdgeInsets.fromLTRB(14, 0, 14, 6),
-                child: Text('Agents window not attached — showing chats saved on the Mac.',
+                child: Text(
+                    'Live view off — showing chats saved on the Mac. To control agents, open the Agents window '
+                    'or run "Cursor Remote: Restart Cursor with Session Control" on the Mac.',
                     style: TextStyle(color: Cr.textFaint, fontSize: 11.5)),
               ),
             Expanded(
@@ -170,7 +172,12 @@ class _AgentsSidebarState extends State<AgentsSidebar> {
                         child: Center(
                           child: store.loadingChats
                               ? const CircularProgressIndicator(strokeWidth: 2)
-                              : const Text('No chats yet.', style: TextStyle(color: Cr.textSecondary)),
+                              : Text(
+                                  store.sidebarLive
+                                      ? 'No chats yet. Tap New Chat to start one.'
+                                      : 'No chats found on the Mac. Open the Cursor Agents window there, then pull to refresh.',
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(color: Cr.textSecondary)),
                         ),
                       ),
                     if (sections.isEmpty && store.chats.isNotEmpty)

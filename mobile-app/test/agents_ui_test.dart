@@ -205,4 +205,50 @@ void main() {
     expect(find.text('Reject this request?'), findsOneWidget);
     expect(find.textContaining('rm -rf build', findRichText: true), findsWidgets);
   });
+
+  test('failures clear only their own spinner; a lost delta reloads the chat', () async {
+    final failing = ChatStore(send: (c) async => c['type'] == 'list_chats' ? 'Not connected' : null);
+    await failing.refreshChats();
+    expect(failing.loadingChats, isFalse);
+    failing.dispose();
+
+    final (store, sent) = fakeStore();
+    await store.selectChat(chatA);
+    final staleId = sent.last['id'] as String;
+    await store.selectChat(chatB);
+    store.applyInbound({'type': 'command_result', 'correlationId': staleId, 'success': false, 'error': 'gone'});
+    expect(store.thread!.loading, isTrue, reason: 'a failure for chat A must not end chat B\'s load');
+
+    store.applyInbound({
+      'type': 'chat', 'chatId': chatB, 'total': 2, 'hasOlder': false,
+      'items': [item(0, 'user', 'hi'), item(1, 'assistant', 'there')],
+    });
+    sent.clear();
+    store.applyInbound({'type': 'chat_delta', 'chatId': chatB, 'fromSeq': 5, 'total': 6, 'items': [item(5, 'assistant', 'late')]});
+    expect(store.thread!.items.length, 2);
+    expect(sent.where((c) => c['type'] == 'get_chat').length, 1);
+    store.applyInbound({'type': 'chat_delta', 'chatId': chatB, 'fromSeq': 5, 'total': 6, 'items': [item(5, 'assistant', 'late')]});
+    expect(sent.where((c) => c['type'] == 'get_chat').length, 1, reason: 'one reload at a time');
+    store.dispose();
+  });
+
+  test('a draft never shows the previous chat\'s approval and follows the new chat once it has an ID', () async {
+    final (store, sent) = fakeStore();
+    store.applyInbound({
+      'type': 'composer_state', 'chatId': chatA,
+      'state': {'chatId': chatA, 'running': false, 'pending': {'id': 'req-1', 'chatId': chatA, 'command': 'rm -rf /'}},
+    });
+    store.startNewChat();
+    expect(store.liveComposer, isNull);
+
+    await store.sendPrompt('build it');
+    final promptId = sent.last['id'] as String;
+    store.applyInbound({'type': 'command_result', 'correlationId': promptId, 'success': true, 'data': {'chatId': chatC}});
+    await Future<void>.delayed(Duration.zero);
+    expect(store.draft, isFalse);
+    expect(store.selectedChatId, chatC);
+    expect(store.pendingPrompt, 'build it', reason: 'the prompt stays visible until the chat shows it');
+    expect(store.awaitingReply, isTrue);
+    store.dispose();
+  });
 }

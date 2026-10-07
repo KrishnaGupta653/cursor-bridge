@@ -92,3 +92,94 @@ test("relay client recovers from a failed poll instead of going silent", async (
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
 });
+
+test("an expired relay login is dropped and replaced by a new session to pair", async () => {
+  const requests: Array<{ path: string; sessionId: string }> = [];
+  const server = createServer(async (req, res) => {
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
+    const body = raw ? JSON.parse(raw) : {};
+    requests.push({ path: req.url!.split("?")[0], sessionId: body.sessionId });
+    res.setHeader("Content-Type", "application/json");
+    if (req.url === "/api/connect") {
+      res.statusCode = 401;
+      res.end(JSON.stringify({ success: false, error: "CREDENTIAL_INVALID_OR_EXPIRED" }));
+      return;
+    }
+    res.statusCode = req.url === "/api/session" ? 201 : 200;
+    res.end(JSON.stringify({ success: true, protocolVersion: 2, data: { token: "n".repeat(43), sessionId: body.sessionId, messages: [] } }));
+  });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const url = `http://127.0.0.1:${address.port}`;
+  const secrets = new Map<string, string>([[`cursorRemote.relay.v2:${url}:OLD123`, JSON.stringify({ token: "o".repeat(43), deviceId: "pc-1" })]]);
+  const vault = { get: async (k: string) => secrets.get(k), store: async (k: string, v: string) => { secrets.set(k, v); },
+    delete: async (k: string) => { secrets.delete(k); } };
+  const client = new RelayClient(url, { appendLine() {} } as any, vault as any);
+  const expired: string[][] = [];
+  let announced = 0;
+  client.setOnSessionExpired((old, next) => expired.push([old, next]));
+  client.setOnSessionConnected(() => { announced++; });
+  try {
+    // Pair Relay Client connects by ID and must come back connected so pairing can continue.
+    await client.connectToSessionById("OLD123");
+    assert.equal(expired.length, 1);
+    const [old, next] = expired[0];
+    assert.equal(old, "OLD123");
+    assert.match(next, /^[A-Z2-9]{6}$/);
+    assert.ok(![...secrets.keys()].some((k) => k.endsWith(":OLD123")), "the expired credential is deleted");
+    assert.equal(client.isConnectedToSession(), true);
+    assert.equal(client.getSessionId(), next);
+    assert.equal(announced, 1, "the new session is announced so the user can pair the phone");
+    assert.deepEqual(requests.slice(0, 2).map((r) => [r.path, r.sessionId]), [["/api/connect", "OLD123"], ["/api/session", next]]);
+  } finally {
+    client.stop();
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+test("a taken session ID is swapped for a fresh one, and a new session revokes the old", async () => {
+  const requests: Array<{ path: string; sessionId: string }> = [];
+  const taken = new Set(["KRISHN"]);
+  const server = createServer(async (req, res) => {
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
+    const body = raw ? JSON.parse(raw) : {};
+    const path = req.url!.split("?")[0];
+    requests.push({ path, sessionId: body.sessionId });
+    res.setHeader("Content-Type", "application/json");
+    if (path === "/api/session" && taken.has(body.sessionId)) {
+      res.statusCode = 409;
+      res.end(JSON.stringify({ success: false, error: "LEGACY_SESSION_REQUIRES_NEW_ID" }));
+      return;
+    }
+    if (path === "/api/session") taken.add(body.sessionId);
+    res.statusCode = path === "/api/session" ? 201 : 200;
+    res.end(JSON.stringify({ success: true, protocolVersion: 2, data: { token: "n".repeat(43), sessionId: body.sessionId, messages: [] } }));
+  });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const url = `http://127.0.0.1:${address.port}`;
+  const secrets = new Map<string, string>();
+  const vault = { get: async (k: string) => secrets.get(k), store: async (k: string, v: string) => { secrets.set(k, v); },
+    delete: async (k: string) => { secrets.delete(k); } };
+  const client = new RelayClient(url, { appendLine() {} } as any, vault as any);
+  try {
+    await client.connectToSessionById("KRISHN");
+    const first = client.getSessionId();
+    assert.equal(client.isConnectedToSession(), true, "pairing can continue on the replacement");
+    assert.notEqual(first, "KRISHN");
+    assert.equal(await client.hasCredential(first!), true);
+
+    const second = await client.startNewSession();
+    assert.ok(second && second !== first);
+    assert.equal(client.getSessionId(), second);
+    assert.equal(await client.hasCredential(first!), false, "the old session's login is dropped");
+    assert.ok(requests.some((r) => r.path === "/api/disconnect" && r.sessionId === first), "the old session is revoked on the relay");
+  } finally {
+    client.stop();
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});

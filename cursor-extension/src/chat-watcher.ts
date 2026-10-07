@@ -23,6 +23,8 @@ interface Watch extends Subscriber {
 
 interface ReplyWait extends Subscriber {
   chatId: string | null;
+  /** For a new chat: the chat that was open before, which the reply must not bind to. */
+  previousChatId: string | null;
   baseline: number;
   startedAt: number;
   idleChecks: number;
@@ -47,9 +49,14 @@ const MAX_WATCHES = 50;
 const WATCH_TTL_MS = 10 * 60 * 1000;
 /** Each relay push costs a function call and several Redis commands; coalesce transcript growth. */
 const RELAY_DELTA_MS = 4000;
+const MAX_REPLIES_PER_SUBSCRIBER = 4;
 
 function key(s: Subscriber): string {
   return `${s.clientId}\u0000${s.targetDeviceId || ""}`;
+}
+
+function replyKey(s: Subscriber, correlationId?: string): string {
+  return `${key(s)}\u0000${correlationId || ""}`;
 }
 
 function isRelay(s: Subscriber): boolean {
@@ -108,14 +115,28 @@ export class ChatWatcher {
     this.stopIfIdle();
   }
 
-  /** Deliver one `chat_response` to `sub` when the agent finishes the prompt it was just sent. */
-  awaitReply(sub: Subscriber, chatId: string | null, correlationId?: string): void {
+  /**
+   * Deliver one `chat_response` to `sub` when the agent finishes the prompt it is about to be sent.
+   * Call before sending, so the prompt itself falls after the baseline.
+   */
+  awaitReply(
+    sub: Subscriber,
+    chatId: string | null,
+    correlationId?: string,
+    previousChatId: string | null = null,
+    nowMs: number = Date.now()
+  ): void {
     const baseline = chatId ? this.options.index.since(chatId, 0)?.total ?? 0 : 0;
-    this.replies.set(key(sub), {
-      ...sub,
+    const prefix = key(sub) + "\u0000";
+    const mine = [...this.replies.keys()].filter((k) => k.startsWith(prefix));
+    for (const k of mine.slice(0, Math.max(0, mine.length - MAX_REPLIES_PER_SUBSCRIBER + 1))) this.replies.delete(k);
+    this.replies.set(replyKey(sub, correlationId), {
+      clientId: sub.clientId,
+      targetDeviceId: sub.targetDeviceId,
       chatId,
+      previousChatId: chatId ? null : previousChatId,
       baseline,
-      startedAt: Date.now(),
+      startedAt: nowMs,
       idleChecks: 0,
       correlationId,
     });
@@ -123,8 +144,8 @@ export class ChatWatcher {
     this.ensureTimer();
   }
 
-  forgetReply(sub: Subscriber): void {
-    this.replies.delete(key(sub));
+  forgetReply(sub: Subscriber, correlationId?: string): void {
+    this.replies.delete(replyKey(sub, correlationId));
     this.stopIfIdle();
   }
 
@@ -247,12 +268,14 @@ export class ChatWatcher {
 
   private checkReplies(state: ComposerState | null, now: number): void {
     for (const [k, r] of this.replies) {
-      if (!r.chatId && state?.chatId) {
+      // A new chat only gets a sidebar row once its first prompt lands; until then the
+      // previously open chat may still look active and must not be mistaken for it.
+      if (!r.chatId && state?.chatId && state.chatId !== r.previousChatId) {
         r.chatId = state.chatId;
         r.baseline = 0;
       }
       const latest = r.chatId ? this.options.index.since(r.chatId, r.baseline) : null;
-      const answer = latest ? lastAnswer(latest.items) : "";
+      const answer = latest ? answerToPrompt(latest.items) : "";
       const sameChatIdle = state ? !state.running && (!r.chatId || state.chatId === r.chatId) : false;
       r.idleChecks = sameChatIdle && answer && !state?.pending ? r.idleChecks + 1 : 0;
       const timedOut = now - r.startedAt > REPLY_TIMEOUT_MS;
@@ -272,10 +295,14 @@ export class ChatWatcher {
   }
 }
 
-function lastAnswer(items: ChatItem[]): string {
+/** The answer to the newest prompt in `items`; empty until that prompt and an answer after it exist. */
+function answerToPrompt(items: ChatItem[]): string {
   for (let i = items.length - 1; i >= 0; i--) {
     if (items[i].role === "user") return "";
-    if (items[i].role === "assistant" && items[i].text.trim()) return items[i].text;
+    if (items[i].role === "assistant" && items[i].text.trim()) {
+      for (let j = i - 1; j >= 0; j--) if (items[j].role === "user") return items[i].text;
+      return "";
+    }
   }
   return "";
 }

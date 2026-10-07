@@ -179,3 +179,51 @@ describe("AgentsWindow approve/reject", () => {
     assert.equal(older.run.clicks, 0);
   });
 });
+
+describe("AgentsWindow sendPrompt", () => {
+  /** A composer that clears when Cursor takes the prompt, from Enter or from the send button. */
+  function composer(opts: { enterSubmits: boolean; buttonSubmits: boolean }) {
+    const log: string[] = [];
+    let text = "";
+    const page: Evaluator = {
+      evaluate: async <T>(expression: string) => {
+        if (expression.includes("function pageFocusEditor")) return { ok: true } as T;
+        if (expression.includes("function pageEditorText")) return { ok: true, text } as T;
+        if (expression.includes("function pageSubmit")) {
+          log.push("button");
+          if (opts.buttonSubmits) text = "";
+          return { ok: true } as T;
+        }
+        throw new Error("unexpected script");
+      },
+      send: async (method: string, params?: any) => {
+        if (method === "Input.insertText") text += params.text;
+        if (method === "Input.dispatchKeyEvent" && params.type === "keyDown") {
+          log.push("enter");
+          if (opts.enterSubmits) text = "";
+        }
+        return undefined;
+      },
+    };
+    return { agents: new AgentsWindow(() => page), log };
+  }
+
+  it("presses Enter and stops once the composer empties", async () => {
+    const { agents, log } = composer({ enterSubmits: true, buttonSubmits: true });
+    assert.deepEqual(await agents.sendPrompt("run the tests", 1), { ok: true });
+    assert.deepEqual(log, ["enter"]);
+  });
+
+  it("falls back to the send button when Enter is ignored", async () => {
+    const { agents, log } = composer({ enterSubmits: false, buttonSubmits: true });
+    assert.deepEqual(await agents.sendPrompt("run the tests", 1), { ok: true });
+    assert.deepEqual(log, ["enter", "button"]);
+  });
+
+  it("reports failure when Cursor keeps the prompt", async () => {
+    const { agents } = composer({ enterSubmits: false, buttonSubmits: false });
+    const r = await agents.sendPrompt("run the tests", 1);
+    assert.equal(r.ok, false);
+    assert.match(String(!r.ok && r.error), /did not accept/);
+  });
+});

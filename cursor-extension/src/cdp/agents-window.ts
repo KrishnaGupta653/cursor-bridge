@@ -312,6 +312,16 @@ function pageEditorText(S: typeof SELECTORS) {
   return { ok: !!editor, text: editor ? String(editor.innerText || "") : "" };
 }
 
+function pageSubmit(S: typeof SELECTORS) {
+  const root = document.querySelector(S.composerRoot);
+  const submit = root ? root.querySelector(S.submit) : null;
+  if (!submit || submit.disabled || /stop/i.test(String(submit.getAttribute("aria-label") || ""))) {
+    return { ok: false, error: "Send button not available" };
+  }
+  submit.click();
+  return { ok: true };
+}
+
 function pageStop(S: typeof SELECTORS) {
   const root = document.querySelector(S.composerRoot);
   const submit = root ? root.querySelector(S.submit) : document.querySelector(S.submit);
@@ -385,7 +395,10 @@ async function pageSetMode(S: typeof SELECTORS, mode: string) {
   const option = (Array.from(document.querySelectorAll('[role="listbox"] [role="option"]')) as any[])
     .find((o) => clean(o.innerText).toLowerCase().startsWith(mode.toLowerCase() + " ") || clean(o.innerText).toLowerCase() === mode.toLowerCase());
   if (!option) {
-    (document.activeElement || document.body).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", keyCode: 27, bubbles: true, cancelable: true }));
+    for (let i = 0; i < 4 && document.querySelector('[role="listbox"], [role="menu"]'); i++) {
+      (document.activeElement || document.body).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", keyCode: 27, bubbles: true, cancelable: true }));
+      await sleep(200);
+    }
     return { ok: false, error: "Mode not offered by Cursor: " + mode };
   }
   option.click();
@@ -475,23 +488,37 @@ export class AgentsWindow {
     return this.run(call(pageSetMode, SELECTORS, want));
   }
 
-  /** Types into the composer with trusted input events, checks it landed, then presses Enter. */
-  async sendPrompt(text: string): Promise<ActionResult> {
+  /**
+   * Types into the composer with trusted input events, checks it landed, presses Enter, and
+   * confirms Cursor took it (the composer empties); falls back to the send button once.
+   */
+  async sendPrompt(text: string, settleMs = 150): Promise<ActionResult> {
     const page = this.page();
     if (!page) return { ok: false, error: "Cursor Agents window is not attached (open it in Cursor)" };
     const focus = await this.run<ActionResult>(call(pageFocusEditor, SELECTORS));
     if (!focus.ok) return focus;
+    const probe = text.trim().slice(0, 40).replace(/\s+/g, " ");
+    const stillTyped = async () => {
+      const typed = await this.run<{ ok: boolean; text: string }>(call(pageEditorText, SELECTORS));
+      return !!typed.ok && "text" in typed && typed.text.replace(/\s+/g, " ").includes(probe);
+    };
+    const accepted = async () => {
+      for (let i = 0; i < 6; i++) {
+        await new Promise((r) => setTimeout(r, settleMs));
+        if (!(await stillTyped())) return true;
+      }
+      return false;
+    };
     try {
       await page.send("Input.insertText", { text });
-      const typed = await this.run<{ ok: boolean; text: string }>(call(pageEditorText, SELECTORS));
-      const probe = text.trim().slice(0, 40).replace(/\s+/g, " ");
-      if (!typed.ok || !("text" in typed) || !typed.text.replace(/\s+/g, " ").includes(probe)) {
-        return { ok: false, error: "Text did not reach the Cursor composer" };
-      }
+      if (!(await stillTyped())) return { ok: false, error: "Text did not reach the Cursor composer" };
       const key = { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 };
       await page.send("Input.dispatchKeyEvent", { type: "keyDown", ...key, text: "\r" });
       await page.send("Input.dispatchKeyEvent", { type: "keyUp", ...key });
-      return { ok: true };
+      if (await accepted()) return { ok: true };
+      const clicked = await this.run<ActionResult>(call(pageSubmit, SELECTORS));
+      if (clicked.ok && (await accepted())) return { ok: true };
+      return { ok: false, error: "Cursor did not accept the prompt; it is still in the composer on your Mac" };
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }

@@ -41,10 +41,13 @@ class ChatStore extends ChangeNotifier {
   String? error;
 
   final Map<String, String> _sent = {};
+  /// The chat each outstanding `get_chat` was for, so a late failure only touches that chat.
+  final Map<String, String> _sentChat = {};
   final Map<String, Completer<FileDiff>> _diffs = {};
   Timer? _renewTimer;
   Timer? _searchDebounce;
   bool _visible = true;
+  bool _resyncing = false;
   int _seq = 0;
 
   String _nextId() => 'app-${DateTime.now().microsecondsSinceEpoch}-${_seq++}';
@@ -52,7 +55,12 @@ class ChatStore extends ChangeNotifier {
   Future<String?> _command(String type, [Map<String, dynamic> fields = const {}]) async {
     final id = _nextId();
     _sent[id] = type;
-    if (_sent.length > 200) _sent.remove(_sent.keys.first);
+    if (type == 'get_chat' && fields['chatId'] != null) _sentChat[id] = fields['chatId'].toString();
+    if (_sent.length > 200) {
+      final oldest = _sent.keys.first;
+      _sent.remove(oldest);
+      _sentChat.remove(oldest);
+    }
     final err = await send({
       'type': type,
       'id': id,
@@ -61,9 +69,22 @@ class ChatStore extends ChangeNotifier {
     });
     if (err != null) {
       _sent.remove(id);
+      _settle(type, _sentChat.remove(id));
       _fail(err);
     }
     return err == null ? id : null;
+  }
+
+  /// Clears the spinner a command started once it fails, whether at send time or in its reply.
+  void _settle(String type, String? chatId) {
+    if (type == 'list_chats') loadingChats = false;
+    if (type == 'list_models') loadingModels = false;
+    final t = thread;
+    if (type == 'get_chat' && t != null && chatId == t.chatId) {
+      t.loading = false;
+      t.loadingOlder = false;
+      _resyncing = false;
+    }
   }
 
   void _fail(String message) {
@@ -77,11 +98,12 @@ class ChatStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// The composer state, only when it describes the chat on screen.
+  /// The composer state, only when it describes the chat on screen. A draft has no chat yet,
+  /// so a state that names one (the chat open before New Chat) is never shown for it.
   ComposerState? get liveComposer {
     final c = composer;
     if (c == null) return null;
-    if (draft) return c;
+    if (draft) return c.chatId == null ? c : null;
     return c.chatId != null && c.chatId == selectedChatId ? c : null;
   }
 
@@ -124,13 +146,18 @@ class ChatStore extends ChangeNotifier {
 
   // ---- Chat ----------------------------------------------------------------
 
-  Future<void> selectChat(String chatId) async {
-    if (chatId == selectedChatId && !draft && thread != null) return;
+  /// Opens [chatId]. [keepPrompt] carries an in-flight prompt over, for a new chat that just got its ID.
+  Future<void> selectChat(String chatId, {bool keepPrompt = false}) async {
+    final t = thread;
+    final failedBefore = t != null && !t.loading && t.items.isEmpty;
+    if (chatId == selectedChatId && !draft && t != null && !failedBefore) return;
     final row = chats.where((c) => c.id == chatId).firstOrNull;
     selectedChatId = chatId;
     draft = false;
-    pendingPrompt = null;
-    awaitingReply = false;
+    if (!keepPrompt) {
+      pendingPrompt = null;
+      awaitingReply = false;
+    }
     error = null;
     thread = ChatThread(chatId: chatId, title: row?.title ?? '', repoName: row?.group ?? '', loading: true);
     notifyListeners();
@@ -193,8 +220,8 @@ class ChatStore extends ChangeNotifier {
 
   /// Approve or reject exactly [request]; the extension refuses if it changed.
   Future<void> resolve(PendingRequest request, {required bool approve}) async {
-    final chatId = request.chatId ?? composer?.chatId ?? selectedChatId;
-    if (chatId == null) {
+    final chatId = request.chatId ?? selectedChatId;
+    if (chatId == null || (selectedChatId != null && chatId != selectedChatId)) {
       _fail('This request is not tied to a chat. Review it in Cursor.');
       return;
     }
@@ -260,6 +287,7 @@ class ChatStore extends ChangeNotifier {
     }
     _diffs.clear();
     _sent.clear();
+    _sentChat.clear();
     chats = [];
     thread = null;
     composer = null;
@@ -290,8 +318,12 @@ class ChatStore extends ChangeNotifier {
         break;
       case 'composer_state':
         if (data['state'] is Map) {
-          composer = ComposerState.fromJson(Map<String, dynamic>.from(data['state']));
-          if (!composer!.running && awaitingReply && pendingPrompt == null) awaitingReply = false;
+          final state = ComposerState.fromJson(Map<String, dynamic>.from(data['state']));
+          // A watch can still report the previous chat for a moment after switching.
+          final watched = data['chatId']?.toString();
+          if (!draft && watched != null && watched != selectedChatId) return true;
+          composer = state;
+          if (!state.running && awaitingReply && pendingPrompt == null) awaitingReply = false;
         }
         break;
       case 'models':
@@ -372,6 +404,8 @@ class ChatStore extends ChangeNotifier {
         .map((f) => FileEdit.fromJson(Map<String, dynamic>.from(f)))
         .toList();
     t.loading = false;
+    final prompt = pendingPrompt;
+    if (prompt != null && items.any((i) => i.role == 'user' && i.text.trim() == prompt)) pendingPrompt = null;
     unawaited(_command('watch_chat', {'chatId': t.chatId, 'fromTotal': t.total}));
   }
 
@@ -383,7 +417,15 @@ class ChatStore extends ChangeNotifier {
         .map((i) => ChatItem.fromJson(Map<String, dynamic>.from(i)))
         .toList();
     final fromSeq = data['fromSeq'] is int ? data['fromSeq'] as int : t.total;
-    t.applyDelta(fromSeq, data['total'] is int ? data['total'] as int : t.total, items);
+    if (t.loading) return;
+    if (!t.applyDelta(fromSeq, data['total'] is int ? data['total'] as int : t.total, items)) {
+      // A delta was lost (relay hiccup): reload instead of showing a hole in the chat.
+      if (!_resyncing) {
+        _resyncing = true;
+        unawaited(resume());
+      }
+      return;
+    }
     final prompt = pendingPrompt;
     if (prompt != null && items.any((i) => i.role == 'user' && i.text.trim() == prompt)) {
       pendingPrompt = null;
@@ -394,26 +436,30 @@ class ChatStore extends ChangeNotifier {
     final type = _sent[correlationId] ?? data['command_type']?.toString() ?? '';
     final ok = data['success'] == true;
     if (type != 'agent_prompt') _sent.remove(correlationId);
-    if (!ok) {
-      final message = (data['error_message'] ?? data['error'] ?? 'Command failed').toString();
-      if (type == 'get_file_diff') {
-        _diffs.remove(correlationId)?.completeError(StateError(message));
-        return;
+    final forChat = _sentChat.remove(correlationId);
+    if (ok) {
+      // A new chat gets its ID once Cursor takes the first prompt: follow it live from here.
+      final result = data['data'] is Map ? Map<String, dynamic>.from(data['data']) : const <String, dynamic>{};
+      final newChatId = result['chatId']?.toString();
+      if (type == 'agent_prompt' && draft && newChatId != null && newChatId.isNotEmpty) {
+        unawaited(selectChat(newChatId, keepPrompt: true));
+        unawaited(refreshChats());
       }
-      if (type == 'agent_prompt') {
-        _sent.remove(correlationId);
-        awaitingReply = false;
-        pendingPrompt = null;
-      }
-      if (type == 'list_chats') loadingChats = false;
-      if (type == 'list_models') loadingModels = false;
-      if (type == 'get_chat') {
-        thread?.loading = false;
-        thread?.loadingOlder = false;
-      }
-      if (type == 'watch_chat' || type == 'unwatch_chat') return;
-      error = message;
+      return;
     }
+    final message = (data['error_message'] ?? data['error'] ?? 'Command failed').toString();
+    if (type == 'get_file_diff') {
+      _diffs.remove(correlationId)?.completeError(StateError(message));
+      return;
+    }
+    if (type == 'agent_prompt') {
+      _sent.remove(correlationId);
+      awaitingReply = false;
+      pendingPrompt = null;
+    }
+    _settle(type, forChat);
+    if (type == 'watch_chat' || type == 'unwatch_chat') return;
+    error = message;
   }
 
   @override

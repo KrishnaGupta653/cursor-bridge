@@ -18,7 +18,14 @@ export interface ChatServices {
   watcher: ChatWatcher;
   agents: () => AgentsWindow | null;
   remoteActionsEnabled: () => boolean;
+  /** Whether Cursor was started with session control (CDP) reachable. */
+  sessionControl?: () => boolean;
 }
+
+export const SESSION_CONTROL_OFF =
+  "Session control is off on your Mac. In Cursor, run “Cursor Remote: Restart Cursor with Session Control”, then try again.";
+export const AGENTS_WINDOW_CLOSED =
+  "The Cursor Agents window isn't open on your Mac. Open it in Cursor, then try again.";
 
 export function channelOf(clientId: string | undefined): "relay" | "telegram" | "local" {
   if (clientId?.startsWith("relay:")) return "relay";
@@ -93,6 +100,7 @@ export class CommandRouter {
     }
 
     const commandId = command.id || Date.now().toString();
+    command.id = commandId;
     this.log(
       `HandleCommand: type=${command.type}, clientId=${
         command.clientId || "none"
@@ -592,8 +600,7 @@ export class CommandRouter {
     if (!state) {
       return {
         success: false,
-        error:
-          "No Cursor Agent session available. Enable CDP and launch Cursor with --remote-debugging-port=9222.",
+        error: SESSION_CONTROL_OFF,
       };
     }
     this.wsServer.send(
@@ -680,9 +687,10 @@ export class CommandRouter {
   }
 
   private requireAgents(): AgentsWindow {
-    const agents = this.requireChat().agents();
+    const chat = this.requireChat();
+    const agents = chat.agents();
     if (!agents || !agents.attached) {
-      throw new Error("Cursor Agents window is not attached. Open it in Cursor (with session control on) and try again.");
+      throw new Error(chat.sessionControl && !chat.sessionControl() ? SESSION_CONTROL_OFF : AGENTS_WINDOW_CLOSED);
     }
     return agents;
   }
@@ -854,19 +862,35 @@ export class CommandRouter {
   private async handleChatPrompt(command: CommandMessage, text: string): Promise<CommandResult> {
     const chat = this.requireChat();
     const agents = this.requireAgents();
-    const opened = command.newChat === true ? await agents.newChat()
+    const isNew = command.newChat === true;
+    let previousChatId: string | null = null;
+    if (isNew) {
+      const before = await agents.composerState();
+      previousChatId = before.ok ? before.state.chatId : null;
+    }
+    const opened = isNew ? await agents.newChat()
       : await agents.ensureChat(command.chatId, typeof command.group === "string" ? command.group : "");
     if (!opened.ok) return { success: false, error: opened.error };
-    const chatId = command.newChat === true ? null : (command.chatId as string);
-    if (command.clientId) {
-      chat.watcher.awaitReply({ clientId: command.clientId, targetDeviceId: command.senderDeviceId }, chatId, command.id);
-    }
+    let chatId = isNew ? null : (command.chatId as string);
+    const sub = { clientId: command.clientId as string, targetDeviceId: command.senderDeviceId };
+    if (command.clientId) chat.watcher.awaitReply(sub, chatId, command.id, previousChatId);
     const sent = await agents.sendPrompt(text);
-    this.audit(command, sent.ok, command.newChat === true ? "new-chat" : "");
+    this.audit(command, sent.ok, isNew ? "new-chat" : "");
     if (!sent.ok) {
-      if (command.clientId) chat.watcher.forgetReply({ clientId: command.clientId, targetDeviceId: command.senderDeviceId });
+      if (command.clientId) chat.watcher.forgetReply(sub, command.id);
       return { success: false, error: sent.error };
     }
+    // The new chat's row appears once Cursor accepts the first prompt; report it so the client can follow it live.
+    if (isNew) chatId = await this.newChatId(agents, previousChatId);
     return { success: true, message: "Prompt sent to Cursor", data: { chatId } };
+  }
+
+  private async newChatId(agents: AgentsWindow, previousChatId: string | null): Promise<string | null> {
+    for (let i = 0; i < 10; i++) {
+      const state = await agents.composerState();
+      if (state.ok && state.state.chatId && state.state.chatId !== previousChatId) return state.state.chatId;
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    return null;
   }
 }

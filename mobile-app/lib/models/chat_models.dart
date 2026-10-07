@@ -197,7 +197,10 @@ class ChatThread {
 
   int? get firstSeq => items.isEmpty ? null : items.first.seq;
 
-  void applyDelta(int fromSeq, int newTotal, List<ChatItem> delta) {
+  /// Returns false, changing nothing, when items between what we hold and [fromSeq] are missing.
+  bool applyDelta(int fromSeq, int newTotal, List<ChatItem> delta) {
+    final next = items.isEmpty ? 0 : items.last.seq + 1;
+    if (fromSeq > next && (items.isNotEmpty || total > 0)) return false;
     items = [
       ...items.where((i) => i.seq < fromSeq),
       ...delta,
@@ -210,6 +213,7 @@ class ChatThread {
       }
     }
     filesChanged = edits.values.toList();
+    return true;
   }
 
   void prependOlder(List<ChatItem> older, bool more) {
@@ -316,7 +320,7 @@ class FileDiff {
 
   /// git | transcript
   final String source;
-  const FileDiff({required this.path, required this.diff, this.truncated = false, this.source = 'git'});
+  FileDiff({required this.path, required this.diff, this.truncated = false, this.source = 'git'});
 
   factory FileDiff.fromJson(Map<String, dynamic> j) => FileDiff(
         path: _str(j['path']),
@@ -325,7 +329,7 @@ class FileDiff {
         source: _str(j['source']).isEmpty ? 'git' : _str(j['source']),
       );
 
-  List<DiffLine> get lines => parseUnifiedDiff(diff);
+  late final List<DiffLine> lines = parseUnifiedDiff(diff);
 }
 
 final _hunkHeader = RegExp(r'^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@');

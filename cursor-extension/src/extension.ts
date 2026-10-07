@@ -9,6 +9,7 @@ import { StatusBarManager } from "./status-bar";
 import { RelayClient } from "./relay-client";
 import { CONFIG } from "./config";
 import { CdpManager } from "./cdp/cdp-manager";
+import { claimOnce, cursorBinary, scheduleRelaunchWithCdp } from "./cdp/relaunch";
 import { ChatWatcher } from "./chat-watcher";
 import { TranscriptIndex } from "./transcripts/transcript-index";
 import { WorkspaceDiff } from "./transcripts/workspace-diff";
@@ -290,6 +291,7 @@ export async function activate(context: vscode.ExtensionContext) {
     agents: () => cdpManager?.agents ?? null,
     remoteActionsEnabled: () =>
       vscode.workspace.getConfiguration("cursorRemote").get<string>("remoteActions", "enabled") !== "disabled",
+    sessionControl: () => !!cdpManager?.getStatus().connected,
   });
   wsServer.onClientClosed((clientId) => chatWatcher?.forgetClient(clientId));
 
@@ -526,8 +528,9 @@ export async function activate(context: vscode.ExtensionContext) {
       }
       const sid = await vscode.window.showInputBox({
         title: "Cursor Remote: Relay Session ID",
-        prompt: "Make up a new 6-character ID to create a session, or reuse one you created before. Enter the same ID in the app.",
+        prompt: "Press Enter to reuse your last session, or type any new 6-character ID (a taken ID is swapped for a fresh one).",
         placeHolder: "3ZUESK",
+        value: context.globalState.get<string>("cursorRemote.sessionId") ?? "",
         validateInput: (value) => {
           const v = value?.trim().toUpperCase() ?? "";
           if (!v) return "Please enter a session ID.";
@@ -841,6 +844,7 @@ export async function activate(context: vscode.ExtensionContext) {
         relayConnected
           ? { label: "$(key) Pair relay device", description: `session ${relayClient?.getSessionId()}`, run: cmd("cursorRemote.pairRelayClient") }
           : { label: "$(plug) Connect to relay…", run: () => connectRelayFlow() },
+        { label: "$(refresh) Start new relay session", description: "Drops the old one", run: cmd("cursorRemote.newRelaySession") },
         { label: "Troubleshooting", kind: vscode.QuickPickItemKind.Separator },
         { label: "$(output) Show log", run: () => outputChannel.show(true) },
         { label: "$(debug-restart) Restart server", description: "Signs out paired devices", run: cmd("cursorRemote.restartLocalServer") },
@@ -911,6 +915,16 @@ export async function activate(context: vscode.ExtensionContext) {
   );
 
   relayClient = new RelayClient(relayServerUrl(), outputChannel, context.secrets);
+  const showPairingCode = async () => {
+    try {
+      const code = await relayClient!.createMobilePairingCode();
+      await vscode.env.clipboard.writeText(code);
+      await vscode.window.showInputBox({
+        title: `Relay session ${relayClient!.getSessionId()} — pairing code copied (single use, expires in 5 minutes)`,
+        value: code, ignoreFocusOut: true,
+        prompt: "In the app, enter the session ID above and this code. Keep the code private." });
+    } catch { vscode.window.showErrorMessage("Connect to an authenticated relay session before pairing."); }
+  };
   context.subscriptions.push(
     vscode.commands.registerCommand("cursorRemote.pairRelayClient", async () => {
       if (!relayClient!.isConnectedToSession()) {
@@ -925,13 +939,25 @@ export async function activate(context: vscode.ExtensionContext) {
           return;
         }
       }
-      try {
-        const code = await relayClient!.createMobilePairingCode();
-        await vscode.env.clipboard.writeText(code);
-        await vscode.window.showInputBox({ title: "Relay pairing code — copied to clipboard, single use, expires in 5 minutes",
-          value: code, ignoreFocusOut: true,
-          prompt: "Copy into the mobile relay pairing dialog. Keep this code private." });
-      } catch { vscode.window.showErrorMessage("Connect to an authenticated relay session before pairing."); }
+      await showPairingCode();
+    }),
+    vscode.commands.registerCommand("cursorRemote.newRelaySession", async () => {
+      const pick = await vscode.window.showWarningMessage(
+        "Start a new relay session? The current session is revoked and phones must pair again.",
+        { modal: true },
+        "Start New Session"
+      );
+      if (pick !== "Start New Session") return;
+      pairingAfterConnect = true;
+      const sid = await relayClient!.startNewSession().finally(() => { pairingAfterConnect = false; });
+      statusBarManager?.refresh();
+      updateConnectionsView();
+      if (!sid) {
+        vscode.window.showErrorMessage("Could not start a relay session. Check the Cursor Remote output for the reason.");
+        return;
+      }
+      await context.globalState.update("cursorRemote.sessionId", sid);
+      await showPairingCode();
     }),
     vscode.commands.registerCommand("cursorRemote.revokeRelaySession", async () => {
       const pick = await vscode.window.showWarningMessage(
@@ -970,6 +996,10 @@ export async function activate(context: vscode.ExtensionContext) {
           "Pair relay device"
         )
         .then((pick) => pick && vscode.commands.executeCommand("cursorRemote.pairRelayClient"));
+    });
+    relayClient.setOnSessionExpired((expired, next) => {
+      void context.globalState.update("cursorRemote.sessionId", next);
+      outputChannel.appendLine(`[Relay] Session ${expired} can't be used; switched to new session ${next}.`);
     });
     // 복수 세션 발견 시 사용자가 선택할 수 있도록 QuickPick 표시
     relayClient.setOnSessionsDiscovered(async (sessions) => {
@@ -1025,11 +1055,49 @@ export async function activate(context: vscode.ExtensionContext) {
     updateConnectionsView();
   })();
   // Session control (CDP) is optional and slow to attach; never delay the servers for it.
-  void serversReady.then(() =>
-    startOrRefreshCdp("activate").catch((e) =>
-      outputChannel.appendLine(`[CDP] Start failed: ${e instanceof Error ? e.message : String(e)}`)
-    )
+  const restartWithSessionControl = async () => {
+    const bin = cursorBinary(vscode.env.appRoot);
+    const port = cdpManager?.getStatus().port ?? CONFIG.CDP_PORT;
+    if (!bin) {
+      vscode.window.showErrorMessage(
+        `Quit Cursor and start it from a terminal with --remote-debugging-address=127.0.0.1 --remote-debugging-port=${port}.`
+      );
+      return;
+    }
+    scheduleRelaunchWithCdp(bin, port);
+    outputChannel.appendLine(`[CDP] Restarting Cursor with session control on 127.0.0.1:${port}`);
+    await vscode.commands.executeCommand("workbench.action.quit");
+  };
+  context.subscriptions.push(
+    vscode.commands.registerCommand("cursorRemote.restartWithSessionControl", async () => {
+      if (cdpManager?.getStatus().connected) {
+        vscode.window.showInformationMessage("Cursor Remote: session control is already on; no restart needed.");
+        return;
+      }
+      const choice = await vscode.window.showWarningMessage(
+        "Cursor will quit and reopen with session control on, so your phone and Telegram can see and control agents. You'll be asked about unsaved files first.",
+        { modal: true },
+        "Restart Cursor"
+      );
+      if (choice === "Restart Cursor") await restartWithSessionControl();
+    })
   );
+
+  void serversReady.then(async () => {
+    try {
+      await startOrRefreshCdp("activate");
+    } catch (e) {
+      outputChannel.appendLine(`[CDP] Start failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    const status = cdpManager?.getStatus();
+    if (!status?.enabled || status.connected || !claimOnce("cdp-offer", 2 * 60 * 1000)) return;
+    const choice = await vscode.window.showWarningMessage(
+      "Cursor Remote: session control is off because Cursor was opened normally. Your phone and Telegram can read chats but can't send, stop or approve.",
+      "Restart Cursor with Session Control",
+      "Not Now"
+    );
+    if (choice === "Restart Cursor with Session Control") await restartWithSessionControl();
+  });
 
   // Keep :8766 alive — if the listener dies, live chat sync to phone breaks.
   const wsWatchdog = setInterval(() => {

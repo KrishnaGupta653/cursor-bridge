@@ -77,6 +77,8 @@ const MAX_COMMAND = 300;
 const MAX_NOTES = 6;
 const MAX_SNIPPET = 20000;
 const DEFAULT_PAGE = 40;
+const LIST_REUSE_MS = 2000;
+const PARSE_CACHE_SIZE = 20;
 const ID_RE = /^[A-Za-z0-9-]{8,80}$/;
 
 const EDIT_TOOLS = new Set(["StrReplace", "Write", "Delete", "ApplyPatch", "EditNotebook"]);
@@ -428,6 +430,7 @@ export class TranscriptIndex {
   private parsed = new Map<string, ParsedChat>();
   private repoCache = new Map<string, string | null>();
   private nameCache = new Map<string, string>();
+  private scannedAt = 0;
 
   constructor(private readonly root: string = projectsRoot()) {}
 
@@ -451,12 +454,27 @@ export class TranscriptIndex {
 
   /** All chats, newest first. Only the first 64 KB of each file is read, and only when it changed. */
   list(options: { limit?: number; offset?: number; query?: string } = {}): { chats: ChatSummary[]; total: number } {
+    // Searching re-lists on every keystroke; a scan stats every transcript, so reuse a recent one.
+    if (Date.now() - this.scannedAt >= LIST_REUSE_MS) this.scan();
+    const q = options.query?.trim().toLowerCase();
+    const all = [...this.summaries.values()]
+      .map((s) => s.summary)
+      .filter((s) => !q || s.title.toLowerCase().includes(q) || s.repoName.toLowerCase().includes(q))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const offset = Math.max(0, options.offset || 0);
+    const limit = Math.min(500, Math.max(1, options.limit || 200));
+    return { chats: all.slice(offset, offset + limit), total: all.length };
+  }
+
+  private scan(): void {
+    this.scannedAt = Date.now();
     const seen = new Set<string>();
     let projects: string[] = [];
     try {
       projects = fs.readdirSync(this.root);
     } catch {
-      return { chats: [], total: 0 };
+      this.summaries.clear();
+      return;
     }
     for (const project of projects) {
       const dir = path.join(this.root, project, "agent-transcripts");
@@ -501,18 +519,10 @@ export class TranscriptIndex {
       }
     }
     for (const id of [...this.summaries.keys()]) if (!seen.has(id)) this.summaries.delete(id);
-    const q = options.query?.trim().toLowerCase();
-    const all = [...this.summaries.values()]
-      .map((s) => s.summary)
-      .filter((s) => !q || s.title.toLowerCase().includes(q) || s.repoName.toLowerCase().includes(q))
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    const offset = Math.max(0, options.offset || 0);
-    const limit = Math.min(500, Math.max(1, options.limit || 200));
-    return { chats: all.slice(offset, offset + limit), total: all.length };
   }
 
   summary(chatId: string): ChatSummary | null {
-    if (!this.summaries.has(chatId)) this.list({ limit: 1 });
+    if (!this.summaries.has(chatId) && this.findFile(chatId)) this.scan();
     return this.summaries.get(chatId)?.summary || null;
   }
 
@@ -571,10 +581,15 @@ export class TranscriptIndex {
       return null;
     }
     const prev = this.parsed.get(chatId);
-    if (prev && prev.mtimeMs === st.mtimeMs && prev.size === st.size) return prev;
+    // Re-inserting keeps the map in least-recently-used order, so watched chats are never evicted.
+    this.parsed.delete(chatId);
+    if (prev && prev.mtimeMs === st.mtimeMs && prev.size === st.size) {
+      this.parsed.set(chatId, prev);
+      return prev;
+    }
     const result = { ...parseTranscript(chatId, fs.readFileSync(file, "utf8")), mtimeMs: st.mtimeMs, size: st.size };
     this.parsed.set(chatId, result);
-    if (this.parsed.size > 20) this.parsed.delete(this.parsed.keys().next().value!);
+    if (this.parsed.size > PARSE_CACHE_SIZE) this.parsed.delete(this.parsed.keys().next().value!);
     return result;
   }
 

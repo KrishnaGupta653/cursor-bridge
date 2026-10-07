@@ -1335,7 +1335,7 @@ export class TelegramBridge {
         if (!sessions.length) {
           await this.sendText(
             chatId,
-            "No Cursor windows found.\nCursor must run with --remote-debugging-port=9222 and cursorRemote.enableCdp on. Or use /new to chat through the Cursor CLI."
+            "No Cursor windows found. Session control is probably off.\nOn your Mac, run “Cursor Remote: Restart Cursor with Session Control”. Or use /new to chat through the Cursor CLI."
           );
           return;
         }

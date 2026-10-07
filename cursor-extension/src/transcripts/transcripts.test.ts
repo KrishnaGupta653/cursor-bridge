@@ -231,3 +231,63 @@ test("relay deltas are coalesced and a pending approval only reaches watchers of
   assert.equal(last.fromSeq, 5);
   watcher.dispose();
 });
+
+test("replies bind to the new chat, wait for an answer to the prompt, and never replace each other", async () => {
+  type Item = { seq: number; id: string; role: string; text: string };
+  const chats: Record<string, Item[]> = {
+    [CHAT_A]: [
+      { seq: 0, id: "a0", role: "user", text: "old question" },
+      { seq: 1, id: "a1", role: "assistant", text: "OLD ANSWER" },
+    ],
+    [CHAT_B]: [],
+  };
+  const index = {
+    since: (chatId: string, from: number) =>
+      chats[chatId] ? { total: chats[chatId].length, mtimeMs: chats[chatId].length, items: chats[chatId].slice(from) } : null,
+  };
+  const add = (chatId: string, role: string, text: string) =>
+    chats[chatId].push({ seq: chats[chatId].length, id: `${chatId}:${chats[chatId].length}`, role, text });
+  let state: any = { chatId: CHAT_A, running: false, pending: null };
+  const sent: any[] = [];
+  const watcher = new ChatWatcher({
+    index: index as any,
+    composerState: async () => ({ ok: true, state }),
+    send: (p) => sent.push(p),
+    logError: () => {},
+    tickMs: 60_000,
+  });
+  const phone = { clientId: "local-1" };
+  const replies = () => sent.filter((p) => p.type === "chat_response");
+  let t = 3_000_000;
+  const ticks = async (n: number) => {
+    for (let i = 0; i < n; i++) await watcher.tick((t += 2500));
+  };
+
+  // New chat: the previous chat still looks active and idle with an answer; that must not count.
+  watcher.awaitReply(phone, null, "p1", CHAT_A, t);
+  await ticks(4);
+  assert.equal(replies().length, 0);
+
+  // The new chat appears; its prompt has no answer yet, so nothing resolves.
+  state = { chatId: CHAT_B, running: true, pending: null };
+  add(CHAT_B, "user", "hello");
+  await ticks(3);
+  assert.equal(replies().length, 0);
+
+  add(CHAT_B, "assistant", "NEW ANSWER");
+  state = { chatId: CHAT_B, running: false, pending: null };
+  await ticks(3);
+  assert.deepEqual(replies().map((r) => [r.correlationId, r.chatId, r.text]), [["p1", CHAT_B, "NEW ANSWER"]]);
+
+  // Two prompts back to back in one chat: both get an answer.
+  sent.length = 0;
+  watcher.awaitReply(phone, CHAT_B, "p2", null, t);
+  add(CHAT_B, "user", "two");
+  watcher.awaitReply(phone, CHAT_B, "p3", null, t);
+  add(CHAT_B, "user", "three");
+  add(CHAT_B, "assistant", "DONE");
+  await ticks(3);
+  assert.deepEqual(replies().map((r) => r.correlationId).sort(), ["p2", "p3"]);
+  assert.ok(replies().every((r) => r.text === "DONE"));
+  watcher.dispose();
+});
