@@ -1,10 +1,10 @@
-# Phase 2 containment migration (in progress)
+# Phase 2 containment migration
 
-These changes are **PARTIALLY SUPPORTED**. They do not complete Phase 2 or
-establish production readiness. Relay capability authentication is implemented
-and covered by a local Redis integration test. Supabase runtime validation remains
-outstanding; its security migration must be applied before using that backend.
-Flutter startup is currently blocking Web-client validation in this workspace.
+This guide records the migration from the pre-v2 clients. For the current
+protocol see [PROTOCOL.md](PROTOCOL.md). Since 0.5.0 the relay runs on Upstash
+Redis only (the Supabase backend, SSE stream and approval endpoints were removed),
+and stop, approve and reject are available again as request-bound remote actions
+behind `cursorRemote.remoteActions`.
 
 ## Local WebSocket and tunnel pairing
 
@@ -90,19 +90,10 @@ passes `--force`. CLI permission-interaction behavior still needs live validatio
 
 ## Relay protocol v2
 
-The relay keeps its existing storage choice: `SUPABASE_URL` selects Supabase;
-otherwise it uses Upstash Redis. This implementation does not switch or deploy
-that configuration.
-
-- **Redis:** security records use separate `security:v2:*` keys and atomic
-  SET-NX/Lua operations. No database migration is needed. The new relay code
-  must be deployed together with compatible clients.
-- **Supabase:** apply `relay-server/supabase/security.sql` as the database owner
-  after the existing schema, then deploy. `SUPABASE_SERVICE_ROLE_KEY` is required;
-  an anonymous key cannot access credential records. The table uses RLS and the
-  RPC is restricted to the service role. Schedule the expiry-cleanup statement
-  documented in that migration. Missing configuration/migration fails closed.
-  This path has typecheck/static coverage but has not been run against PostgreSQL.
+The relay stores everything in Upstash Redis (`UPSTASH_REDIS_REST_URL`,
+`UPSTASH_REDIS_REST_TOKEN`). Security records use separate `security:v2:*` keys
+and atomic SET-NX/Lua operations. No database migration is needed. The relay
+must be deployed together with compatible clients.
 
 Create/connect the session **from Cursor first**. An unused session ID creates
 an owner credential; an existing v2 session requires its saved credential.
@@ -143,8 +134,8 @@ Protocol outline (placeholders only):
   `deviceType: "mobile"`, and `pairingCode`. Returns `data.token` and the
   authoritative `data.deviceId`. Reconnect uses Bearer authentication instead
   of another pairing code. Responses include `protocolVersion: 2`.
-- Send, poll, heartbeat, SSE, session reads, command metadata, pairing and
-  disconnect verify membership before touching queues. Contradictory session,
+- Send, poll, session reads, pairing and disconnect verify membership before
+  touching queues. Contradictory session,
   device or role fields are rejected. Heartbeat and invitation issuance require
   the PC role. Targeted sends must target a member of the same session.
 - Public discovery/debug enumeration returns `PUBLIC_DISCOVERY_DISABLED`.

@@ -10,9 +10,9 @@ fi
 
 branch=$(git branch --show-current 2>/dev/null)
 case "$branch" in
-  main|develop)
+  main|develop|dev)
     echo ""
-    echo "⚠️  Git Flow 규칙 위반: main 또는 develop 브랜치에서 직접 커밋할 수 없습니다."
+    echo "⚠️  Git Flow 규칙 위반: main, develop 또는 dev 브랜치에서 직접 커밋할 수 없습니다."
     echo ""
     echo "먼저 feature/bugfix 브랜치를 생성하세요:"
     echo "  git flow feature start <feature-name>   # 새 기능"

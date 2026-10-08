@@ -1,207 +1,152 @@
-# Cursor Remote 통신 프로토콜
+# Cursor Remote Protocol (v2)
 
-> Phase 2 containment is in progress. Local WebSocket now requires v2 pairing;
-> remote shell, stop and approval actions are disabled. Read the
-> [security migration guide](SECURITY_MIGRATION.md) before following older examples.
-> Relay capabilities are implemented; full runtime validation remains outstanding.
+This document describes how the phone/web app, the relay server and the Cursor
+extension talk to each other. Every message is JSON. Version 1 clients
+(unauthenticated WebSocket, PIN or session-ID-only relay access, SSE stream,
+relay approval endpoints) are rejected.
 
-## 개요
+## Architecture
 
-Cursor Remote는 WebSocket 기반 양방향 통신을 사용합니다. 모바일/웹 클라이언트와 Cursor Extension 간의 메시지 교환 규칙을 정의합니다.
-
-## 아키텍처
-
-### 로컬 모드
+### Local mode (same Wi-Fi)
 
 ```
-Mobile/Web App (Flutter)
-    ↕ WebSocket (포트 8766)
-Cursor Extension (TypeScript)
-    ↕ Process
-Cursor CLI (agent)
+Phone / Web app  ⇄  WebSocket ws://<Mac IP>:8766  ⇄  Cursor extension  ⇄  CDP 127.0.0.1:9222  ⇄  Cursor Agents window
 ```
 
-- 클라이언트가 Extension의 WebSocket 서버(8766)에 직접 연결합니다.
-- PC 서버는 사용하지 않습니다.
+- The extension listens on port 8766 (8767, 8768… for more Cursor windows).
+- CDP (Chrome DevTools Protocol) stays on `127.0.0.1`. The app never talks to CDP.
 
-### 릴레이 모드 (원격)
+### Relay mode (any network)
 
 ```
-Mobile/Web App  ←→  Relay Server  ←→  Extension (RelayClient)
-                        ↑
-                   세션 ID로 연결
+Phone / Web app  ⇄  HTTPS relay (Vercel + Upstash Redis)  ⇄  Cursor extension (RelayClient)
 ```
 
-- 클라이언트가 릴레이 서버에 세션 생성 후 연결합니다.
-- Extension의 RelayClient가 세션을 자동 감지하여 연결합니다.
-- PC 서버는 사용하지 않습니다.
+- Both sides poll the relay over HTTPS. There is no SSE stream and no WebSocket at the relay.
+- The Mac creates the session; phones join it with a pairing code.
 
-## 메시지 형식
+## Local WebSocket handshake
 
-모든 메시지는 JSON 형식입니다.
+1. On connect the extension sends `{"type": "auth_required", "protocolVersion": 2}`.
+2. The first message from the app must authenticate, or the socket is closed (code 4001).
+   - First pairing, with the one-time code from **Cursor Remote: Pair Client** (single use, expires after 5 minutes):
 
-### 기본 구조
+     ```json
+     { "type": "pair", "protocolVersion": 2, "secret": "<pairing code>" }
+     ```
+
+   - Reconnect with the saved device token:
+
+     ```json
+     { "type": "authenticate", "protocolVersion": 2, "token": "<device token>" }
+     ```
+
+3. The extension answers `{"type": "authenticated", "protocolVersion": 2, "scope": "control", "clientId": "...", "expiresAt": <ms>, "token": "..."}`.
+   `token` is present only after `pair`. Device tokens last 24 hours and are stored hashed on the Mac.
+   **Cursor Remote: Revoke All Paired Clients** signs every device out.
+4. `{"type": "ping"}` is answered with `{"type": "pong"}` and is not a command.
+
+Browsers must also come from an origin listed in `cursorRemote.allowedWebSocketOrigins`.
+Each connection is rate-limited (120 messages per minute).
+
+## Command envelope
+
+Every command, local or relayed, carries:
+
+| Field | Meaning |
+|-------|---------|
+| `type` | One of the allowed commands below. Anything else fails closed. |
+| `id` | Unique per device token (max 128 characters). A repeated `id` is rejected as `duplicate`. |
+| `deadline` | Expiry as epoch milliseconds, at most 5 minutes ahead. Expired commands are dropped. |
+
+The extension replies with a `command_result` for the same `id`:
 
 ```json
-{
-  "type": "message_type",
-  "id": "unique_message_id",
-  "data": { ... },
-  "success": true,
-  "error": "error_message"
-}
+{ "type": "command_result", "id": "c-42", "command_type": "get_chat", "success": true, "duration_ms": 31 }
+{ "type": "command_result", "id": "c-43", "command_type": "agent_prompt", "success": false, "error": "Open a chat first: prompts need a chatId or newChat" }
 ```
 
-## 메시지 타입
+Replies and live updates carry the `clientId` (and, over the relay, the `targetDeviceId`) of the
+device that asked. Nothing is broadcast to other devices.
 
-### 클라이언트 → Extension
+## Allowed commands
 
-#### 1. `insert_text`
+### Reading chats (Agents window)
 
-프롬프트에 텍스트를 삽입하고 실행합니다.
+| Type | Fields | Reply |
+|------|--------|-------|
+| `list_chats` | — | `chats` |
+| `get_chat` | `chatId` | `chat` (paged items) |
+| `watch_chat` | `chatId`, `fromTotal` | live `chat_delta` and `composer_state` |
+| `unwatch_chat` | — | — |
+| `get_composer_state` | — | `composer_state` |
+| `list_models` | — | `models` |
+| `get_file_diff` | `chatId`, `path` | `file_diff` (read-only, contained to the chat's repository) |
 
-```json
-{
-  "type": "insert_text",
-  "id": "1234567890",
-  "text": "Hello, World!",
-  "prompt": true,
-  "execute": true,
-  "newSession": false,
-  "agentMode": "agent",
-  "clientId": "optional-client-id"
-}
-```
+A watch lapses after 10 minutes unless the app sends `watch_chat` again; the app renews it while
+the chat is open. A `chat_delta` carries `fromSeq` and `total`; on a gap the app reloads the chat once.
 
-**응답:**
+### Prompting
 
-```json
-{
-  "id": "1234567890",
-  "type": "command_result",
-  "success": true,
-  "command_type": "insert_text"
-}
-```
+| Type | Fields | Notes |
+|------|--------|-------|
+| `agent_prompt` | `text`, `chatId` or `newChat: true` | Types into that exact Agents-window chat and presses Enter. Refused if the Mac's composer already has a draft. |
+| `cli_prompt` / `insert_text` (`prompt: true`) | `text` | Runs the Cursor CLI (`agent`) instead of the Agents window. |
 
-#### 2. `get_chat_history`
+When the agent finishes, the asking device gets one `chat_response` with the final answer
+(`correlationId` and `chatId` included).
 
-대화 히스토리를 조회합니다.
+### Remote actions
 
-```json
-{
-  "type": "get_chat_history",
-  "id": "1234567891",
-  "clientId": "optional",
-  "sessionId": "optional",
-  "limit": 50
-}
-```
+`open_chat`, `new_chat`, `set_model` (`model`), `set_mode` (`mode`: Agent, Ask, Plan, Debug,
+Multitask), `agent_stop`, `stop_prompt`, `approve_action` and `reject_action`.
 
-#### 3. `get_session_info`
+- All of them are turned off when `cursorRemote.remoteActions` is `disabled`.
+- Every attempt, allowed or refused, is written to the **Cursor Remote** output as an `[Audit]` line.
+- `approve_action` / `reject_action` need the `chatId`, the exact pending `requestId`
+  (`req-…`, taken from that chat's `composer_state`) and `confirmed: true`, which the app sets
+  only after the user confirms on the phone.
 
-현재 세션 정보를 조회합니다.
+### Not allowed
 
-```json
-{
-  "type": "get_session_info",
-  "id": "1234567892",
-  "clientId": "optional"
-}
-```
+`execute_command`, terminal input, editor insertion, window-level `sessionId` prompts and any raw
+CDP method are rejected with a `command_result` error.
 
-#### 4. `execute_command`
+## Relay API
 
-Cursor IDE 명령을 실행합니다.
+Base URL: `https://cursor-remote-rela.vercel.app` (or your own deployment). All endpoints answer
+`{ "success": bool, "data": …, "error": …, "timestamp": ms }`; session endpoints add `"protocolVersion": 2`.
+Authenticated calls send `Authorization: Bearer <capability token>`.
 
-```json
-{
-  "type": "execute_command",
-  "id": "1234567893",
-  "command": "workbench.action.files.save",
-  "args": []
-}
-```
+| Endpoint | Who | Purpose |
+|----------|-----|---------|
+| `POST /api/session` | Mac, no token | Create session `{ sessionId, deviceId, deviceType: "pc" }`. Returns the Mac's token. `409` if the ID was ever used. |
+| `POST /api/connect` | Mac with token, or phone with pairing code | Reconnect, or join with `{ sessionId, deviceId, deviceType: "mobile", pairingCode }`. A phone can join only while the Mac is polling. |
+| `POST /api/pair` | Mac | Create a pairing code (single use, 5 minutes). |
+| `POST /api/send` | both | Queue `{ sessionId, deviceId, deviceType, type, data }`. Bodies over 256 KB from a phone (4 MB from the Mac) get `413`. |
+| `GET /api/poll` | both | Fetch queued messages. Each poll also marks the device as seen. |
+| `POST /api/disconnect` | both | Revoke this device's token. From the Mac it ends the session for everyone. |
+| `GET /api/session` | both | Session record. |
+| `GET /api/health` | anyone | `{ "status": "healthy" }` only. |
+| `GET /api/store` | both | Storage label (always Upstash Redis). |
 
-### Extension → 클라이언트
+Rules the relay enforces:
 
-#### 1. `connected`
+- Sessions last 24 hours. A session ID can never be claimed again; recovery always uses a new ID.
+- Capability tokens are 256-bit random values; the relay stores only their hashes.
+- Pairing codes are single use and expire after 5 minutes. A failed join does not use up the code.
+- Queued messages expire after 5 minutes. A reply with `targetDeviceId` goes only to that phone.
+- A phone that has not polled for about 2 minutes stops receiving messages and is pruned.
+- The Mac counts as connected while it keeps polling (the extension polls every 2 s while a phone
+  is active and every 25 s when idle; the relay allows 2 minutes).
+- Failed authentication is rate-limited per client IP.
 
-연결 성공 메시지
+`/api/heartbeat`, `/api/sessions-with-mobile` and `/api/debug-sessions` remain only for extensions
+older than 0.5.0: heartbeat is no longer needed, and discovery/debug always answer `403`.
 
-```json
-{
-  "type": "connected",
-  "message": "Connected to Cursor Remote"
-}
-```
+## Ports
 
-#### 2. `command_result`
-
-명령 실행 결과
-
-```json
-{
-  "id": "1234567890",
-  "type": "command_result",
-  "success": true,
-  "command_type": "get_chat_history",
-  "data": { ... }
-}
-```
-
-#### 3. `chat_response`
-
-CLI 응답 (AI 답변)
-
-```json
-{
-  "type": "chat_response",
-  "text": "안녕하세요! 무엇을 도와드릴까요?",
-  "timestamp": "2026-01-28T06:00:00.000Z",
-  "source": "cli",
-  "sessionId": "uuid",
-  "clientId": "relay-client"
-}
-```
-
-#### 4. `log`
-
-실시간 로그 (선택)
-
-```json
-{
-  "type": "log",
-  "level": "info",
-  "message": "...",
-  "timestamp": "...",
-  "source": "extension"
-}
-```
-
-## 연결 흐름
-
-### 로컬 모드
-
-1. Extension: WebSocket 서버 시작 (포트 8766)
-2. 클라이언트: `ws://<PC_IP>:8766` 연결
-3. 메시지: 클라이언트 ↔ Extension 직접 교환
-
-### 릴레이 모드
-
-1. Extension: RelayClient 시작, 세션 대기
-2. 클라이언트: 릴레이 서버에 세션 생성 후 연결
-3. Extension: 세션 자동 감지 후 연결
-4. 메시지: 클라이언트 ↔ 릴레이 서버 ↔ Extension
-
-## 포트 정보
-
-| 포트 | 프로토콜 | 용도 |
-|------|----------|------|
-| 8766 | WebSocket | Extension WebSocket 서버 (로컬 모드 클라이언트 연결) |
-
-## 보안 고려사항
-
-- 로컬 모드: 같은 네트워크 내에서만 사용 권장
-- 릴레이 모드: HTTPS 릴레이 서버 경유
-- 프로덕션에서는 인증·암호화 적용 권장
+| Port | Protocol | Purpose |
+|------|----------|---------|
+| 8766+ | WebSocket | App ⇄ extension in local mode |
+| 9222 | CDP (loopback only) | Extension ⇄ Cursor's own windows |

@@ -2034,15 +2034,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       },
       onHostChanged: (_) => _saveConnectionSettings(),
       onPortChanged: (_) => _saveConnectionSettings(),
-      onCopySession: () async {
-        final id = _sessionIdController.text.trim();
-        if (id.isEmpty) return;
-        await Clipboard.setData(ClipboardData(text: id));
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Session ID copied')),
-        );
-      },
       onRetry: () {
         _stopReconnect();
         _connect();
@@ -2256,7 +2247,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                   padding: const EdgeInsets.all(14),
                                   margin: const EdgeInsets.only(bottom: 14),
                                   decoration: BoxDecoration(
-                                    gradient: LinearGradient(
+                                    gradient: const LinearGradient(
                                       begin: Alignment.topLeft,
                                       end: Alignment.bottomRight,
                                       colors: [

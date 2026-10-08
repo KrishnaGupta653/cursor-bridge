@@ -9,7 +9,6 @@ import { CursorSession } from "./cursor-session";
 import { rankTargets } from "./cursor-target";
 import {
   AgentHistoryPayload,
-  AgentMessage,
   CdpStatusPayload,
   CdpTargetInfo,
   CursorSessionSnapshot,
@@ -199,16 +198,6 @@ export class CdpManager {
           this.options.log(`[CDP] Cursor session detected: ${session.title}`);
           const { snapshot } = await session.refresh();
           this.options.log(`[CDP] Session state: ${snapshot.state}`);
-          this.options.broadcast({
-            type: "agent_state",
-            sessionId: session.id,
-            state: snapshot.state,
-            messages: snapshot.messages,
-            plan: snapshot.plan,
-            pendingApproval: snapshot.pendingApproval,
-            title: snapshot.title,
-            extractionNotes: snapshot.extractionNotes,
-          });
         } catch (e) {
           this.options.logError(
             `[CDP] Failed to attach target ${t.id}`,
@@ -231,14 +220,6 @@ export class CdpManager {
       this.activeSessionId = [...this.sessions.keys()][0];
     }
 
-    this.options.broadcast({
-      type: "cdp_targets",
-      targets: this.targets,
-    });
-    this.options.broadcast({
-      type: "sessions",
-      sessions: this.listSessions(),
-    });
     await this.refreshAgentHistory().catch((e) =>
       this.options.logError("[CDP] History scrape failed", e)
     );
@@ -330,10 +311,6 @@ export class CdpManager {
         note: "No Cursor Agents window attached for history scrape",
       };
       this.historySourceSessionId = null;
-      this.options.broadcast({
-        type: "agent_history",
-        ...this.history,
-      });
       return this.history;
     }
     const payload = await session.extractAgentHistory();
@@ -342,11 +319,6 @@ export class CdpManager {
     this.options.log(
       `[CDP] Agent history scraped: ${payload.count} items (${payload.support})`
     );
-    this.options.broadcast({
-      type: "agent_history",
-      sessionId: session.id,
-      ...payload,
-    });
     return payload;
   }
 
@@ -375,24 +347,7 @@ export class CdpManager {
       await new Promise((r) => setTimeout(r, 600));
       await session.refresh();
       await new Promise((r) => setTimeout(r, 700));
-      const { snapshot } = await session.refresh();
-      this.options.broadcast({
-        type: "agent_state",
-        sessionId: session.id,
-        state: snapshot.state,
-        messages: snapshot.messages,
-        plan: snapshot.plan,
-        pendingApproval: snapshot.pendingApproval,
-        title: snapshot.title,
-        workspace: snapshot.workspace || item.group,
-        latestMessage: snapshot.latestMessage,
-        fileChanges: snapshot.fileChanges,
-        activity: snapshot.activity,
-        extractionNotes: [
-          ...(snapshot.extractionNotes || []),
-          `Opened history: ${item.title}`,
-        ],
-      });
+      await session.refresh();
     }
     return result;
   }
@@ -446,69 +401,7 @@ export class CdpManager {
       });
       this.startPolling();
     }
-    if (result.ok) {
-      this.options.broadcast({
-        type: "agent_state_changed",
-        sessionId: session.id,
-        state: "RUNNING",
-      });
-      // Optimistic user message echo for mobile UI
-      const userMsg: AgentMessage = {
-        id: `local-${Date.now()}`,
-        role: "user",
-        text,
-        timestamp: new Date().toISOString(),
-        status: "sent",
-      };
-      this.options.broadcast({
-        type: "agent_message",
-        sessionId: session.id,
-        message: userMsg,
-      });
-    }
     return { ...result, sessionId: session.id };
-  }
-
-  async approveAction(
-    sessionId?: string,
-    _requestId?: string
-  ): Promise<{ ok: boolean; error?: string }> {
-    const session = sessionId
-      ? this.sessions.get(sessionId)
-      : this.getActiveSession();
-    if (!session) return { ok: false, error: "No active Cursor session" };
-    const result = await session.resolvePermission(true);
-    if (result.ok) {
-      this.options.log(`[CDP] Permission approved (${result.label || "button"})`);
-      this.options.broadcast({
-        type: "permission_resolved",
-        sessionId: session.id,
-        approved: true,
-        label: result.label,
-      });
-    }
-    return result;
-  }
-
-  async rejectAction(
-    sessionId?: string,
-    _requestId?: string
-  ): Promise<{ ok: boolean; error?: string }> {
-    const session = sessionId
-      ? this.sessions.get(sessionId)
-      : this.getActiveSession();
-    if (!session) return { ok: false, error: "No active Cursor session" };
-    const result = await session.resolvePermission(false);
-    if (result.ok) {
-      this.options.log(`[CDP] Permission rejected (${result.label || "button"})`);
-      this.options.broadcast({
-        type: "permission_resolved",
-        sessionId: session.id,
-        approved: false,
-        label: result.label,
-      });
-    }
-    return result;
   }
 
   private startPolling() {

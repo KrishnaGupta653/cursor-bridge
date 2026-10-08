@@ -5,6 +5,31 @@ All notable changes to the "Cursor Remote" extension will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-10-08
+
+### Added
+- **세션 제어 재시작**: `Cursor Remote: Restart Cursor with Session Control` 명령으로 Agents 창 제어(CDP, 127.0.0.1 전용)를 켠 채 Cursor를 다시 엽니다
+- **Cursor 재시작 후 릴레이 자동 재연결**: 저장된 세션이 있으면 한 창만 마지막 세션에 다시 연결합니다. 다른 창에서 릴레이 명령을 실행하면 이미 연결된 창이 있다고 알려줍니다
+- **새 릴레이 세션 버튼**: 릴레이가 세션을 거절하면 폴링을 멈추고 `Start New Relay Session` 버튼이 있는 알림을 표시합니다
+- **앱**: 끊겼을 때 화면을 유지하고 "Reconnecting…" 배너 표시, 전송 실패 시 입력한 텍스트 복원
+
+### Changed
+- **릴레이**: Upstash Redis 전용. 세션 24시간, 페어링 코드 5분 일회용(접속 실패 시 소모되지 않음), 토큰은 해시로만 저장, 메시지 5분 후 만료, 응답은 요청한 휴대폰에만 전달, 약 2분간 폴링하지 않은 휴대폰은 세션에서 제외
+- **릴레이 연결 유지**: Extension이 더 이상 `/api/heartbeat`를 호출하지 않습니다. 폴링만으로 Mac 연결 상태가 갱신됩니다
+- **승인·거절·중지**: 화면에 표시된 바로 그 요청에만 적용되며, `cursorRemote.remoteActions`로 끌 수 있고 모든 원격 작업이 `[Audit]` 로그에 남습니다
+- **프롬프트 전송**: 여러 요청이 동시에 와도 각 채팅에 정확히 들어가도록 순서대로 처리하고, Mac 입력창에 작성 중인 내용이 있으면 덮어쓰지 않고 거절합니다
+- **Agents 창**: 늦게 열리거나 다시 열린 Agents 창을 자동으로 다시 찾고, CDP 재연결을 포기하지 않고 계속 시도합니다
+- **Telegram**: 모든 명령이 정책·`remoteActions`·감사 로그를 거치며, `allowedChatIds`가 필요하고, Mac이 깨어날 때 오래된 메시지를 다시 실행하지 않습니다
+- **CLI 기록**: 워크스페이스 대신 Extension 전용 저장소에 0600 권한으로 저장
+- 로컬 Wi-Fi 명령을 릴레이 휴대폰으로 전달하지 않습니다
+
+### Removed
+- `Cursor Remote: Check Relay Server` 명령, 릴레이 세션 자동 탐색 및 디버그 요청
+- 인증 없는 localhost `POST /hook` 서버와 규칙 관리 기능
+- 편집기에 텍스트를 직접 넣는 IDE 모드와 예전 CDP 승인 클릭 스크립트
+- 릴레이의 Supabase 저장소, SSE 스트림(`/api/stream`), 승인 API, PIN 접속
+- 앱의 예전 "Command approvals" 패널
+
 ## [0.4.0] - 2026-02-03
 
 ### Added

@@ -430,39 +430,6 @@ export const FIND_COMPOSER_AND_SUBMIT_SCRIPT = (text: string) => {
   })()`;
 };
 
-export const CLICK_APPROVAL_SCRIPT = (approve: boolean) => {
-  const want = approve ? "approve" : "reject";
-  return `(() => {
-    const want = ${JSON.stringify(want)};
-    const buttons = Array.from(document.querySelectorAll('button, [role="button"], a'));
-    const score = (label) => {
-      const t = (label || '').toLowerCase();
-      if (want === 'approve') {
-        if (/^(approve|allow|accept|run|continue|yes)$/i.test(t.trim())) return 10;
-        if (/approve|allow|accept|run command|accept and/i.test(t)) return 6;
-        if (/reject|deny|cancel|no/i.test(t)) return -5;
-      } else {
-        if (/^(reject|deny|cancel|no)$/i.test(t.trim())) return 10;
-        if (/reject|deny|cancel/i.test(t)) return 6;
-        if (/approve|allow|accept|run/i.test(t)) return -5;
-      }
-      return 0;
-    };
-    let best = null;
-    let bestScore = 0;
-    for (const b of buttons) {
-      const label = (b.innerText || b.getAttribute('aria-label') || b.getAttribute('title') || '').trim();
-      const s = score(label);
-      if (s > bestScore) { bestScore = s; best = b; }
-    }
-    if (!best || bestScore <= 0) {
-      return { ok: false, error: 'No matching approval button found', support: 'NOT_CURRENTLY_ACCESSIBLE' };
-    }
-    best.click();
-    return { ok: true, label: (best.innerText || '').trim().slice(0, 80), support: 'PARTIALLY_SUPPORTED' };
-  })()`;
-};
-
 /**
  * Best-effort scrape of Cursor Agents sidebar history (Pinned + Repositories).
  * PARTIALLY_SUPPORTED — DOM can change; only visible items are returned.

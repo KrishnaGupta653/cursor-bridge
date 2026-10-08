@@ -938,7 +938,7 @@ class _Chip extends StatelessWidget {
                       fontSize: 12,
                       fontWeight: FontWeight.w500)),
             ),
-            Icon(Icons.expand_more_rounded, size: 14, color: Cr.textFaint),
+            const Icon(Icons.expand_more_rounded, size: 14, color: Cr.textFaint),
           ]),
         ),
       ),

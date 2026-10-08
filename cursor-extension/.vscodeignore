@@ -4,7 +4,9 @@ src/**
 .gitignore
 tsconfig.json
 .vscodeignore
-*.map
+**/*.map
 .DS_Store
 *.vsix
 ../**
+out/**/*.test.js
+python/__pycache__/**

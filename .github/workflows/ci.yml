@@ -4,8 +4,13 @@ on:
   push:
     branches:
       - main
-      - master
+      - dev
+      - "feature/**"
+      - "bugfix/**"
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   node-workspaces:
@@ -13,10 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -30,15 +35,43 @@ jobs:
       - name: Build pc-server
         run: npm --workspace pc-server run build
 
+  extension-vsix:
+    name: Extension VSIX
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install root workspace deps
+        run: npm ci
+
+      - name: Package VSIX
+        working-directory: cursor-extension
+        run: npx --yes @vscode/vsce@3 package --no-dependencies --allow-missing-repository --skip-license -o "$RUNNER_TEMP/cursor-remote-extension.vsix"
+
+      - name: Upload VSIX
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cursor-remote-extension-vsix
+          path: ${{ runner.temp }}/cursor-remote-extension.vsix
+          if-no-files-found: error
+          retention-days: 14
+
   relay-typecheck:
     name: Relay Type Check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -68,10 +101,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           flutter-version: "3.47.2"
           channel: stable

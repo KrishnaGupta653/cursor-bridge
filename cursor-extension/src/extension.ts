@@ -286,10 +286,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }),
   );
 
-  // CLI mode is always enabled (IDE mode is deprecated)
-  const useCLIMode = true;
-
-  commandHandler = new CommandHandler(outputChannel, wsServer, useCLIMode, context.globalStorageUri.fsPath);
+  commandHandler = new CommandHandler(outputChannel, wsServer, context.globalStorageUri.fsPath);
   commandRouter = new CommandRouter(commandHandler, wsServer, outputChannel);
   const transcriptIndex = new TranscriptIndex();
   chatWatcher = new ChatWatcher({
@@ -432,18 +429,10 @@ export async function activate(context: vscode.ExtensionContext) {
       outputChannel.appendLine(
         `[${new Date().toLocaleTimeString()}] Client connected - Ready to receive commands`
       );
-      // 연결 상태 전송
-      if (wsServer) {
-        wsServer.sendConnectionStatus();
-      }
     } else {
       outputChannel.appendLine(
         `[${new Date().toLocaleTimeString()}] Client disconnected`
       );
-      // 연결 상태 전송
-      if (wsServer) {
-        wsServer.sendConnectionStatus();
-      }
     }
   });
 
@@ -494,22 +483,6 @@ export async function activate(context: vscode.ExtensionContext) {
   const stopCommand = vscode.commands.registerCommand("cursorRemote.stop", stopServer);
   const toggleCommand = vscode.commands.registerCommand("cursorRemote.toggle", () =>
     wsServer?.isRunning() ? stopServer() : startServer()
-  );
-
-  /** 연결 정보 뷰 (상태바 클릭 시 표시 - Git Graph처럼) */
-  const checkRelayServerCommand = vscode.commands.registerCommand(
-    "cursorRemote.checkRelayServer",
-    async () => {
-      if (relayClient) {
-        await relayClient.checkServerStatus();
-        outputChannel.show();
-      } else {
-        outputChannel.appendLine(
-          `[${new Date().toLocaleTimeString()}] [Relay] ⚠️ Relay client not initialized`
-        );
-        outputChannel.show();
-      }
-    }
   );
 
   const connectToRelaySessionByIdCommand = vscode.commands.registerCommand(
@@ -896,7 +869,6 @@ export async function activate(context: vscode.ExtensionContext) {
     startCommand,
     stopCommand,
     toggleCommand,
-    checkRelayServerCommand,
     connectToRelaySessionByIdCommand,
     setRelaySessionIdCommand,
     startCloudflareTunnelCommand,
@@ -998,21 +970,6 @@ export async function activate(context: vscode.ExtensionContext) {
     relayClient.setOnSessionExpired((expired, next) => {
       void context.globalState.update("cursorRemote.sessionId", next);
       outputChannel.appendLine(`[Relay] Session ${expired} can't be used; switched to new session ${next}.`);
-    });
-    // 복수 세션 발견 시 사용자가 선택할 수 있도록 QuickPick 표시
-    relayClient.setOnSessionsDiscovered(async (sessions) => {
-      const picked = await vscode.window.showQuickPick(
-        sessions.map((s) => ({
-          label: s.sessionId,
-          description: "Session ID",
-        })),
-        {
-          title: "Cursor Remote: Select Relay Session",
-          placeHolder:
-            "Multiple sessions are waiting. Select the one connected from mobile.",
-        }
-      );
-      return picked?.label ?? null;
     });
   }
   // 상태바 즉시 표시 (서버/릴레이 시작 전에 한 번 그려서 늦게 뜨는 현상 완화)

@@ -25,12 +25,11 @@
 Cursor Remote는 모바일 기기에서 PC의 Cursor IDE를 원격으로 제어할 수 있는 시스템입니다.
 
 **주요 기능:**
-- 📝 모바일에서 Cursor IDE에 텍스트 입력
-- ⚡ Cursor IDE 명령 원격 실행
-- 🤖 AI 응답 실시간 확인
-- 📊 작업 결과 모바일에서 확인
+- 📱 Cursor **Agents 창**의 채팅 목록·실시간 응답·변경 파일을 휴대폰에서 확인
+- 📝 특정 채팅에 프롬프트 전송, 모델·모드 변경, 에이전트 중지
+- ✅ 화면에 표시된 바로 그 요청만 승인·거절 (확인 탭 필요, 감사 로그 기록)
 - 🌍 릴레이 모드로 어디서든 연결 (같은 네트워크 불필요)
-- 🔐 세션 ID 저장/재사용, Heartbeat 기반 연결 관리
+- 🔐 5분짜리 일회용 페어링 코드, 24시간 릴레이 세션
 
 ### 시스템 구성
 
@@ -230,43 +229,41 @@ Extension이 정상적으로 활성화되면 상태 표시줄 우측 하단에 �
 
 설정이 열리면 검색창에 `Cursor Remote` 또는 `cursorRemote`를 입력하세요.
 
-**설정 항목:**
-- **"Cursor Remote: Use CLI Mode"** - CLI 모드 활성화/비활성화
+**주요 설정 항목:**
+- **Cursor Remote: Enable Cdp** (`cursorRemote.enableCdp`) - 세션 제어 허용 (Agents 창 제어에 필요)
+- **Cursor Remote: Remote Actions** (`cursorRemote.remoteActions`) - `disabled`이면 휴대폰·텔레그램의 채팅 열기/새 채팅, 모델·모드 변경, 중지, 승인·거절을 모두 끔
+- **Cursor Remote: Relay Server Url** (`cursorRemote.relayServerUrl`) - 직접 배포한 릴레이를 쓸 때만 설정
+- **Cursor Remote: Allowed Web Socket Origins** - 로컬 모드에서 허용할 브라우저 출처
 
-#### 설정 파일 직접 편집 (고급)
+#### 세션 제어 켜기 (필수)
 
-JSON 형식으로 직접 편집하려면:
-1. `Cmd+Shift+P` → "Preferences: Open User Settings (JSON)"
-2. 다음 설정 추가:
+Extension은 `127.0.0.1:9222`의 Chrome DevTools Protocol로 Cursor Agents 창을 제어합니다. 이 포트는
+네트워크에 노출되지 않습니다.
 
-```json
-{
-  "cursorRemote.useCLIMode": true
-}
-```
+1. 설정에서 **Cursor Remote: Enable Cdp**를 켭니다:
 
-#### 설정 확인
+   ```json
+   {
+     "cursorRemote.enableCdp": true
+   }
+   ```
 
-**Output 패널 확인:**
-- `View` → `Output` (또는 `Cmd + Shift + U`)
-- 드롭다운에서 "Cursor Remote" 선택
-- 다음 메시지 확인:
-  - CLI 모드: `[Cursor Remote] CLI mode is enabled`
-  - IDE 모드: `[Cursor Remote] IDE mode is enabled`
+2. `Cmd+Shift+P` → **Cursor Remote: Restart Cursor with Session Control**. 저장하지 않은 파일을 확인한
+   뒤 Cursor가 종료되고 세션 제어가 켜진 상태로 다시 열립니다.
+
+세션 제어가 꺼져 있으면 휴대폰에서 채팅은 읽을 수 있지만 전송·중지·승인은 할 수 없습니다. Cursor를
+일반적으로 열었다면 Extension이 재시작을 한 번 제안합니다.
 
 ---
 
 ## 5. 로컬 서버 연결 방법
 
-### 아키텍처 (현재)
+### 아키텍처
 
 ```
-┌─────────────┐     WebSocket (ws://<PC_IP>:<PORT>)     ┌─────────────┐
-│   Mobile    │◄────────────────────────────────────────►│  Cursor IDE │
-│     App     │                                          │  Extension  │
-└─────────────┘                                          └─────────────┘
+휴대폰 / 웹 앱  ⇄  WebSocket ws://<Mac IP>:8766  ⇄  Cursor Extension  ⇄  CDP 127.0.0.1:9222  ⇄  Agents 창
 
-※ 기본 포트는 8766, 충돌 시 Extension이 8767~8776 중 사용 가능한 포트로 자동 시작
+※ 기본 포트는 8766, Cursor 창이 여러 개면 8767~8776 사용
 ※ PC와 모바일이 같은 Wi-Fi 네트워크에 있어야 합니다
 ```
 
@@ -276,211 +273,100 @@ JSON 형식으로 직접 편집하려면:
 2. 상태 표시줄에서 "Remote :8766" 또는 "Remote · 1 device" 확인
 3. 안 보이면: `Cmd+Shift+P` → "Cursor Remote: Start Server"
 
-### Step 2: PC IP와 Extension 포트 확인
+### Step 2: 기기 페어링
 
-1. PC의 로컬 IP 확인:
-   ```bash
-   # macOS/Linux
-   ifconfig | grep "inet " | grep -v 127.0.0.1
-
-   # Windows
-   ipconfig | findstr IPv4
-   ```
-2. Cursor IDE Output 패널(`View` → `Output` → "Cursor Remote")에서 다음 로그 확인:
-   - `WebSocket server started on port 8766` (기본)
-   - 또는 `포트 8766가 사용 중이어서 포트 8767...` 후 실제 시작 포트
-
-> 📝 **메모**: IP와 실제 포트를 모바일 앱에 동일하게 입력해야 연결됩니다.
+1. 상태 표시줄 클릭 → **Pair a device** (또는 `Cmd+Shift+P` → **Cursor Remote: Pair Client**)
+2. 일회용 코드가 클립보드에 복사되고, 입력할 주소와 포트가 함께 표시됩니다
+3. 코드는 **한 번만** 쓸 수 있고 **5분** 후 만료됩니다
 
 ### Step 3: 모바일 앱 연결
 
-1. 모바일 앱 실행
-2. **연결 모드**: "로컬 서버" 선택
-3. **서버 주소**: Extension이 실행 중인 PC의 IP 입력 (예: `192.168.0.10`)
-4. **포트**: Extension 실제 포트 입력 (기본 `8766`)
-5. **Connect** 버튼 클릭
+1. 앱에서 **Local** 선택
+2. **Mac address**: Cursor가 실행 중인 Mac의 IP (예: `192.168.0.10`, macOS에서는 `ipconfig getifaddr en0`)
+3. **Port**: Extension 실제 포트 (기본 `8766`)
+4. **Connect** → 페어링 코드 붙여넣기
+
+페어링된 기기는 24시간 동안 코드 없이 다시 연결됩니다. **Cursor Remote: Revoke All Paired Clients**로
+모든 기기를 로그아웃시킬 수 있습니다.
+
+> 📝 브라우저에서 접속할 때는 웹 앱 출처가 `cursorRemote.allowedWebSocketOrigins`에 있어야 합니다
+> (Pair Client가 현재 출처 추가를 제안합니다). `https://` 웹 앱은 로컬 `ws://` 연결을 열 수 없으므로
+> 릴레이를 사용하세요.
 
 ### Step 4: 연결 확인
 
-**성공 시:**
-- 모바일 앱: 연결 상태 아이콘이 녹색으로 변경
-- Cursor Extension: "Remote · 1 device" 표시
-- Output 패널: `Client connected to Cursor Remote` 로그 출력
+- 모바일 앱: Agents 사이드바(채팅 목록) 표시
+- Cursor 상태 표시줄: "Remote · 1 device"
+- Output 패널: `Client connected` 로그
 
 ### 포트 정보
 
 | 포트 | 프로토콜 | 용도 |
 |------|----------|------|
-| 8766 | WebSocket | 모바일 앱 ↔ Extension (기본 포트, 충돌 시 8767~8776 자동 대체) |
+| 8766 | WebSocket | 모바일 앱 ↔ Extension (기본 포트, Cursor 창이 여러 개면 8767~8776) |
+| 9222 | CDP (127.0.0.1 전용) | Extension ↔ Cursor 창 |
 
 ---
 
 ## 6. 릴레이 서버 연결 방법
 
-### 아키텍처 (0.3.6+)
+### 아키텍처
 
 ```
-┌─────────────┐                    ┌─────────────────┐                    ┌─────────────┐
-│   Mobile    │◄── HTTP/SSE ──────►│  Vercel Relay   │◄── HTTP/Polling ──►│  Cursor IDE │
-│     App     │    (인터넷)         │     Server      │    (인터넷)         │  Extension  │
-└─────────────┘                    │                 │                    │ (RelayClient│
-       │                           │  ┌───────────┐  │                    │  + CLI)     │
-       │                           │  │  Upstash  │  │                    └─────────────┘
-       │                           │  │   Redis   │  │                           │
-       │                           │  └───────────┘  │                           │
-       │                           └─────────────────┘                           │
-       │                                   │                                     │
-       └───────── Session ID (예: ABC123) ─┴─────────────────────────────────────┘
+휴대폰 / 웹 앱  ⇄  HTTPS 폴링  ⇄  Vercel 릴레이 (Upstash Redis)  ⇄  HTTPS 폴링  ⇄  Cursor Extension
 
 ※ PC와 모바일이 다른 네트워크에 있어도 연결 가능
-※ Extension이 직접 릴레이 서버에 연결 (Heartbeat로 연결 유지)
+※ 기본 릴레이: https://cursor-remote-rela.vercel.app
 ```
 
-### 익스텐션: 세션 ID 입력·저장
+### Step 1: Mac에서 세션 연결
 
-- **입력 시점**: 상태줄의 **"Cursor Remote"** 를 클릭하거나 명령 팔레트의 **"Cursor Remote: 세션 ID로 릴레이 연결"** 을 실행하면 세션 ID 6자를 입력할 수 있습니다.
-- **저장**: 연결에 사용한 세션 ID는 **globalState**에 저장되어, 다음 입력 시 기본값으로 재사용됩니다.
-- **변경**: 명령 팔레트의 **"Cursor Remote: 릴레이 세션 ID 설정 (다음 시작 시 사용)"** 으로 저장 값을 바꿀 수 있습니다. 단, 릴레이 연결 자체는 현재 수동으로 시작해야 합니다.
-- **중복 사용**: 같은 세션 ID를 **다른 PC(다른 Cursor 창)** 에서 쓰면, 릴레이 서버가 **409 "Session already in use by another PC"** 를 반환합니다. 다른 PC를 닫거나, 모바일에서 새 세션을 만든 뒤 그 세션 ID를 사용하세요.
+1. 상태 표시줄 클릭 → **Connect to relay…** (또는 `Cmd+Shift+P` → **Cursor Remote: Connect to Relay by Session ID**)
+2. 6자리 영숫자 세션 ID 입력 (예: `ABC123`). Enter만 누르면 마지막 세션 ID를 재사용합니다
+3. 연결되면 "connected to relay session" 알림이 표시됩니다
 
-### 세션 ID 연속성
+### Step 2: 휴대폰 페어링
 
-- 세션 ID는 **릴레이 서버 TTL(기본 24시간)** 동안 유효합니다. 같은 ID로 24시간 이내에는 재접속 가능합니다.
-- **24시간 경과 후**에는 세션이 만료되므로, 모바일에서 **새 세션을 생성**한 뒤 익스텐션에 그 세션 ID를 설정(또는 "세션 ID로 릴레이 연결")해야 합니다.
-- 즉, "같은 세션 ID를 영구적으로 보장"하는 구조는 아니며, **만료 전까지** 연속성이 유지됩니다.
+1. `Cmd+Shift+P` → **Cursor Remote: Pair Relay Client**
+2. 페어링 코드가 복사되고 세션 ID와 함께 표시됩니다. 코드는 **한 번만** 쓸 수 있고 **5분** 후 만료됩니다
+3. 앱에서 **Relay** 선택 → 세션 ID 입력 → 페어링 코드 붙여넣기
 
-### 사전 준비: 릴레이 서버 배포 (한 번만)
+### 세션 규칙
 
-> 💡 이미 배포된 릴레이 서버가 있다면 이 단계는 건너뛰세요.
-> 기본 제공 서버: `https://relay.jaloveeye.com`
+| 항목 | 동작 |
+|------|------|
+| 세션 유효기간 | **24시간**. 이후 또는 이미 사용된 ID이면 Extension이 새 무작위 ID로 바꾸고, 휴대폰을 다시 페어링합니다. 한 번 쓴 ID는 다시 쓸 수 없습니다. |
+| 페어링 코드 | 일회용, 5분 후 만료. 접속에 실패해도 코드는 소모되지 않습니다 |
+| 자격 증명 | 256비트 capability 토큰, 릴레이에는 해시만 저장 |
+| 메시지 | 5분 후 만료, 응답은 요청한 휴대폰에만 전달 |
+| Mac 연결 상태 | Extension이 폴링할 때마다 갱신 (휴대폰 사용 중 2초, 유휴 시 25초 간격). 2분 넘게 폴링이 없으면 휴대폰이 새로 참여할 수 없습니다 |
+| 휴대폰 | 약 2분간 폴링하지 않은 휴대폰은 세션에서 제외됩니다 |
+| Cursor 재시작 | 한 창이 마지막 세션에 자동으로 다시 연결됩니다. 다른 창에서 릴레이 명령을 실행하면 이미 다른 창이 연결되어 있다고 알려줍니다 |
 
-#### A. Upstash Redis 설정
-
-1. [Upstash Console](https://console.upstash.com) 접속 및 회원가입
-2. "Create Database" 클릭
-3. 데이터베이스 이름 입력 (예: `cursor-remote-relay`)
-4. 리전 선택 (가까운 곳 권장)
-5. 생성 후 **REST API** 섹션에서 다음 정보 복사:
-   - `UPSTASH_REDIS_REST_URL`
-   - `UPSTASH_REDIS_REST_TOKEN`
-
-#### B. Vercel에 릴레이 서버 배포
-
-```bash
-# Vercel CLI 설치 (처음 한 번만)
-npm install -g vercel
-
-# 릴레이 서버 디렉토리로 이동
-cd relay-server
-
-# 의존성 설치
-npm install
-
-# Vercel 로그인
-vercel login
-
-# 배포
-vercel --prod
-```
-
-**환경변수 설정:**
-```bash
-vercel env add UPSTASH_REDIS_REST_URL
-# 프롬프트에서 Upstash URL 입력
-
-vercel env add UPSTASH_REDIS_REST_TOKEN
-# 프롬프트에서 Upstash Token 입력
-```
-
-배포 완료 후 URL을 확인하세요 (예: `https://your-relay.vercel.app`)
-
-### Step 1: Extension 실행 확인
-
-1. Cursor IDE 실행
-2. 상태 표시줄에서 "Remote :8766" 또는 "Remote · 1 device" 확인
-
-### Step 2: Extension이 릴레이 모드로 연결
-
-> **0.3.6 이후**: 릴레이 연결은 Extension이 직접 수행합니다 (PC 서버 없음).
-
-#### 연결 시작
-
-1. Cursor IDE 실행 및 Extension 활성화
-2. 상태줄의 **"Cursor Remote"** 클릭 (또는 명령 팔레트의 **"Cursor Remote: 세션 ID로 릴레이 연결"** 실행)
-3. 6자리 영숫자 세션 ID 입력 (예: `ABC123`)
-4. 필요하면 PIN(4~6자리 숫자) 입력
-5. Extension이 해당 세션 ID로 릴레이 서버에 연결을 시도합니다
-
-**연결 성공 예시 (Output 패널):**
-```
-[Cursor Remote] Starting relay client...
-[Cursor Remote] Target session ID: ABC123
-[Cursor Remote] ✅ 익스텐션은 릴레이 서버를 통해 세션 ABC123에 접속했습니다.
-[Cursor Remote] 💓 Heartbeat 시작 (30초마다, 2분 무응답 시 연결 해제로 간주)
-```
-
-#### 세션 ID 변경
+### 명령어
 
 | 명령어 | 설명 |
 |--------|------|
-| `Cursor Remote: 세션 ID로 릴레이 연결` | 다른 세션에 **즉시** 연결 (성공 시 저장됨) |
-| `Cursor Remote: 릴레이 세션 ID 설정 (다음 시작 시 사용)` | 저장된 세션 ID 변경 (다음 입력 시 기본값으로 사용) |
-| `Cursor Remote: 릴레이 서버 상태 확인` | 릴레이 서버 상태 및 세션 수 확인 |
+| `Cursor Remote: Connect to Relay by Session ID` | 이 Mac을 릴레이 세션에 연결 |
+| `Cursor Remote: Pair Relay Client` | 휴대폰용 일회용 코드 생성 |
+| `Cursor Remote: Start New Relay Session` | 현재 세션을 폐기하고 새 세션 시작 (휴대폰 다시 페어링) |
+| `Cursor Remote: Revoke Relay Session` | 현재 세션 폐기 |
+| `Cursor Remote: Set Relay Session ID` | 저장된 세션 ID 변경 |
 
-#### Heartbeat 및 세션 해제
+### Mac 깨어 있게 하기
 
-- Extension이 30초마다 heartbeat를 전송합니다
-- **2분간 heartbeat가 없으면** 서버가 해당 PC를 연결 끊김으로 간주합니다
-- 이후 같은 세션 ID로 다른 PC가 연결할 수 있습니다
-- Cursor 창을 닫으면 자동으로 세션이 해제됩니다 (2분 후)
+Mac이 깨어 있고 온라인일 때만 휴대폰이 Cursor에 접근할 수 있습니다. 자리를 비울 때는 터미널에서 다음을
+실행하세요 (Ctrl+C로 종료):
 
-### Step 3: 모바일 앱 연결
-
-1. 모바일 앱 실행
-2. **연결 모드**: "릴레이 서버" 선택
-3. **릴레이 서버 URL**: 배포한 릴레이 서버 주소 입력
-   - 기본: `https://relay.jaloveeye.com`
-4. **세션 ID**: Extension에 입력한 **동일한 6자리 코드** 입력 (예: `ABC123`)
-5. **Connect** 버튼 클릭
-
-### Step 4: 연결 확인
-
-**성공 시:**
-- 모바일 앱: 연결 상태 아이콘이 녹색으로 변경
-- Extension Output 패널: "Mobile client connected via relay" 또는 폴링 메시지 확인
-
-### 세션 충돌 (409 에러)
-
-같은 세션 ID를 **다른 PC(다른 Cursor 창)**에서 사용하면 다음 에러가 발생합니다:
-
-```
-Session already in use by another PC
+```bash
+caffeinate -dimsu
 ```
 
-**해결 방법:**
-1. 다른 PC/Cursor 창을 닫습니다
-2. 또는 모바일에서 새 세션을 생성한 뒤 해당 세션 ID를 사용합니다
-3. 기존 PC가 2분 이상 비활성 상태이면 자동으로 세션이 해제됩니다
+### 직접 릴레이 배포하기 (선택)
 
-### 릴레이 서버 API 엔드포인트
-
-| 엔드포인트 | 메서드 | 설명 |
-|-----------|--------|------|
-| `/api/health` | GET | 서버 상태 확인 |
-| `/api/session` | POST | 새 세션 생성 |
-| `/api/connect` | POST | 세션에 연결 (PC 연결 시 세션 자동 생성 가능) |
-| `/api/heartbeat` | GET | PC "살아있음" 신호 (sessionId, deviceId 쿼리) |
-| `/api/send` | POST | 메시지 전송 |
-| `/api/poll` | GET | 메시지 폴링 |
-| `/api/stream` | GET | SSE 스트림 연결 |
-| `/api/debug-sessions` | GET | 서버 상태 확인 (세션 수, PC 연결 현황) |
-
-### 세션 및 메시지 유효 기간
-
-| 항목 | 유효 기간 |
-|------|----------|
-| 세션 | 24시간 |
-| 메시지 | 5분 |
+기본 릴레이 대신 직접 배포하려면 [relay-server/README.md](./relay-server/README.md)를 따르세요
+(Upstash Redis + Vercel, 환경변수 `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`). 그 다음 Cursor
+설정의 `cursorRemote.relayServerUrl`과 앱의 릴레이 URL을 바꿉니다.
 
 ---
 
@@ -495,30 +381,21 @@ flutter build apk        # Android
 flutter build ios        # iOS
 ```
 
-### 앱 설정 화면
+### 앱 연결 화면
 
-앱 실행 후 설정에서 다음을 구성:
-
-| 설정 항목 | 로컬 서버 모드 | 릴레이 서버 모드 |
-|----------|---------------|-----------------|
-| 연결 모드 | Local | Relay |
-| 서버 주소 | PC IP (예: 192.168.0.10) | 릴레이 URL |
-| 세션 코드 | - (불필요) | 6자리 코드 |
-| 포트 | Extension 포트 (기본 8766) | - (불필요) |
+| 항목 | Local | Relay |
+|------|-------|-------|
+| 입력 | Mac IP + 포트 (기본 8766) | 세션 ID (6자리) |
+| 페어링 | **Pair Client** 코드 | **Pair Relay Client** 코드 |
+| 웹 앱 (https) | 사용 불가 | 사용 가능 |
 
 ### 기본 사용법
 
-1. **텍스트 전송**
-   - 텍스트 입력 후 "Send" 버튼
-   - Cursor IDE 에디터에 텍스트 삽입됨
-
-2. **명령 실행**
-   - "Save", "Undo", "Redo" 등 명령 버튼 클릭
-   - Cursor IDE에서 해당 명령 실행됨
-
-3. **AI 프롬프트 전송**
-   - 프롬프트 입력 후 "Ask AI" 버튼
-   - AI 응답이 앱에 표시됨
+1. **채팅 선택**: Agents 사이드바에서 채팅을 엽니다. 새 응답은 실시간으로 표시됩니다
+2. **프롬프트 전송**: 입력창에 입력 후 전송. Mac의 입력창에 작성 중인 내용이 있으면 덮어쓰지 않고 거절됩니다
+3. **모델·모드 변경, 중지**: 채팅 화면 상단/입력창의 메뉴 사용
+4. **승인·거절**: 에이전트가 요청을 기다리면 카드가 표시됩니다. 확인 단계를 거친 뒤 그 요청에만 적용됩니다
+5. 모든 원격 작업은 Cursor의 **Cursor Remote** 출력에 `[Audit]` 줄로 기록됩니다
 
 ---
 
@@ -773,44 +650,32 @@ agent -p --output-format json --force 'test'
 
 **증상:**
 ```
-Failed to connect to relay
-Poll failed: ...
+Could not reach the relay server ... retrying.
+Relay request failed (HTTP ...)
 ```
 
 **해결:**
 ```bash
 # 1. 서버 상태 확인
-curl https://relay.jaloveeye.com/api/health
-
-# 정상 응답:
-# {"success":true,"data":{"status":"healthy","version":"1.0.0","redis":{"urlSet":true,"tokenSet":true}}}
-
-# 2. 인터넷 연결 확인
-ping google.com
+curl https://cursor-remote-rela.vercel.app/api/health
+# 정상 응답: {"success":true,"data":{"status":"healthy"},...}
 ```
 
-#### 세션 만료 또는 없음
+2. 회사 프록시(Zscaler 등) 환경이면 Node가 루트 인증서를 신뢰하는지 확인
+3. Output 패널의 HTTP 상태 코드 확인
+
+#### 세션 만료 또는 거절
 
 **증상:**
 ```
-Session not found
-세션이 만료되었습니다
+Relay session ABC123 expired (sessions last 24 hours). Starting new session ...
+the relay refused session ABC123 ... and stopped trying
 ```
 
 **해결:**
-1. Extension 상태줄 "Cursor Remote" 클릭 후 세션 ID(6자리) 입력
-2. 모바일 앱에서 새 세션 코드 입력
-3. 세션은 24시간 후 자동 만료됨
-
-#### SSE 연결이 자주 끊기는 경우
-
-**원인:** Vercel Serverless 타임아웃 제한
-- Free 플랜: 10초
-- Pro 플랜: 60초
-
-**해결:**
-- 앱이 자동으로 재연결 시도함
-- 연결 끊김이 잦으면 로컬 서버 모드 사용 권장
+1. 만료 시 Extension이 자동으로 새 세션 ID로 바꿉니다. **Pair Relay Client**로 휴대폰을 다시 페어링하세요
+2. 거절 알림의 **Start New Relay Session** 버튼을 누르면 새 세션과 페어링 코드가 만들어집니다
+3. 휴대폰이 `PC_MUST_CONNECT_FIRST`를 받으면 Mac이 잠들었거나 Cursor가 꺼진 상태입니다
 
 ---
 
@@ -901,14 +766,14 @@ WebSocket error: ...
 **Q: Extension이 자동으로 시작되지 않아요**
 > A: `Cmd+Shift+P` → "Cursor Remote: Start Server" 실행
 
-**Q: 세션 코드는 어디서 확인하나요?**
-> A: Extension 상태줄 "Cursor Remote"를 클릭해 입력/연결합니다. 이미 연결된 세션 ID는 연결 정보 패널 또는 상태줄 텍스트에서 확인할 수 있습니다.
+**Q: 세션 ID는 어디서 확인하나요?**
+> A: 상태 표시줄 텍스트(`relay <세션 ID>`), **Show Connection Info** 패널, 또는 **Pair Relay Client** 창 제목에 표시됩니다.
 
 **Q: 로컬 모드와 릴레이 모드 중 뭘 써야 하나요?**
 > A: 같은 Wi-Fi면 로컬 모드 (빠름), 다른 네트워크면 릴레이 모드 사용
 
-**Q: CLI 모드와 IDE 모드의 차이는?**
-> A: CLI 모드는 `agent` 명령어 사용, IDE 모드는 편집기에 직접 삽입. CLI 모드 권장.
+**Q: Agents 창 제어와 CLI 모드의 차이는?**
+> A: Agents 창 제어(세션 제어)는 Cursor에 이미 열린 채팅에 프롬프트를 보냅니다. CLI 모드는 `agent` 명령으로 별도 대화를 실행합니다. 편집기에 텍스트를 직접 넣는 IDE 모드는 제거되었습니다.
 
 ---
 
@@ -916,26 +781,22 @@ WebSocket error: ...
 
 ### 로컬 서버 빠른 시작
 
-```bash
-# 1. Extension 설치
-cd cursor-extension && npm install && npm run compile
-
-# 2. Cursor IDE 실행 및 Extension 로드
-
-# 3. 모바일 앱에서 로컬 서버 선택
-# 4. PC IP + Extension 포트(기본 8766) 입력 후 연결
+```text
+1. Extension 설치 → 설정에서 cursorRemote.enableCdp 켜기
+2. Cursor Remote: Restart Cursor with Session Control
+3. 상태 표시줄 → Pair a device (코드 복사됨)
+4. 앱: Local → Mac IP + 포트(기본 8766) → Connect → 코드 붙여넣기
 ```
 
 ### 릴레이 서버 빠른 시작
 
-```bash
-# 1. Extension 설치
-cd cursor-extension && npm install && npm run compile
-
-# 2. Cursor IDE 실행 및 Extension 로드
-
-# 3. Extension 상태줄 "Cursor Remote" 클릭 후 세션 ID 입력
-# 4. 모바일 앱에서 Relay 모드 선택 후 같은 세션 ID 입력
+```text
+1. Extension 설치 → 설정에서 cursorRemote.enableCdp 켜기
+2. Cursor Remote: Restart Cursor with Session Control
+3. 상태 표시줄 → Connect to relay… → 6자리 세션 ID
+4. Cursor Remote: Pair Relay Client (코드 복사됨)
+5. 앱: Relay → 세션 ID → 코드 붙여넣기
+6. 자리를 비울 때: caffeinate -dimsu
 ```
 
 ### 포트 요약
@@ -949,4 +810,4 @@ cd cursor-extension && npm install && npm run compile
 ---
 
 **작성 시간**: 2026년 1월 21일  
-**수정 시간**: 2026년 2월 2일 (릴레이 모드 세션 ID 입력/저장, Heartbeat 방식 반영)
+**수정 시간**: 2026년 10월 8일 (0.5.0: 세션 제어, 페어링 코드, 24시간 릴레이 세션, 프로토콜 v2)

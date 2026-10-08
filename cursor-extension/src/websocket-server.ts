@@ -473,21 +473,6 @@ export class WebSocketServer {
     };
   }
 
-  // 연결 상태를 클라이언트에 전송
-  sendConnectionStatus() {
-    const status = this.getConnectionStatus();
-    const statusMessage = JSON.stringify({
-      type: "connection_status",
-      status: status.isRunning ? "connected" : "disconnected",
-      source: "extension",
-      message: status.isRunning
-        ? `WebSocket server running on port ${status.port} (${status.clientCount} client(s))`
-        : "WebSocket server not running",
-      data: status,
-    });
-    this.send(statusMessage);
-  }
-
   /**
    * Set relay client for forwarding messages to relay server
    */

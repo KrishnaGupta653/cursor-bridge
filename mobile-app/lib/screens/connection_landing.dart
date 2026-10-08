@@ -14,14 +14,9 @@ class ConnectionLandingPage extends StatelessWidget {
   final FocusNode? sessionFocus;
   final bool connecting;
   final bool reconnecting;
-  final bool waitingForPc;
-  final String? pairingSessionId;
   final String? error;
   final List<ConnectionHistoryItem> recent;
   final VoidCallback onConnect;
-  final VoidCallback? onCancelPairing;
-  final VoidCallback? onCopySession;
-  final VoidCallback? onShareSession;
   final VoidCallback? onRetry;
   final VoidCallback? onUseLocal;
   final void Function(ConnectionHistoryItem) onSelectRecent;
@@ -42,14 +37,9 @@ class ConnectionLandingPage extends StatelessWidget {
     required this.recent,
     required this.onConnect,
     required this.onSelectRecent,
-    this.waitingForPc = false,
-    this.pairingSessionId,
     this.hostFocus,
     this.sessionFocus,
     this.error,
-    this.onCancelPairing,
-    this.onCopySession,
-    this.onShareSession,
     this.onRetry,
     this.onUseLocal,
     this.onDeleteRecent,
@@ -59,10 +49,6 @@ class ConnectionLandingPage extends StatelessWidget {
   });
 
   bool get _busy => connecting || reconnecting;
-  bool get _pairing =>
-      waitingForPc &&
-      pairingSessionId != null &&
-      pairingSessionId!.trim().isNotEmpty;
 
   @override
   Widget build(BuildContext context) {
@@ -95,7 +81,7 @@ class ConnectionLandingPage extends StatelessWidget {
                 const SizedBox(height: 32),
                 _ModePicker(
                   value: connectionType,
-                  enabled: !_busy && !_pairing,
+                  enabled: !_busy,
                   onChanged: onTypeChanged,
                 ),
                 const SizedBox(height: 28),
@@ -123,25 +109,15 @@ class ConnectionLandingPage extends StatelessWidget {
                               onConnect: onConnect,
                               onHostChanged: onHostChanged,
                             )
-                          : (_pairing
-                              ? _RelayPairingPanel(
-                                  key: const ValueKey('pairing'),
-                                  sessionId: pairingSessionId!,
-                                  onCopy: onCopySession,
-                                  onShare: onShareSession,
-                                  onCancel: onCancelPairing,
-                                )
-                              : _RelaySetupPanel(
-                                  key: const ValueKey('relay'),
-                                  sessionIdController: sessionIdController,
-                                  sessionFocus: sessionFocus,
-                                  busy: _busy,
-                                  onJoin: onConnect,
-                                )),
+                          : _RelaySetupPanel(
+                              key: const ValueKey('relay'),
+                              sessionIdController: sessionIdController,
+                              sessionFocus: sessionFocus,
+                              busy: _busy,
+                              onJoin: onConnect,
+                            ),
                 ),
-                if (error != null &&
-                    error!.isNotEmpty &&
-                    !_pairing) ...[
+                if (error != null && error!.isNotEmpty) ...[
                   const SizedBox(height: 16),
                   _ErrorBanner(message: error!),
                   const SizedBox(height: 8),
@@ -164,7 +140,7 @@ class ConnectionLandingPage extends StatelessWidget {
                     ],
                   ),
                 ],
-                if (recent.isNotEmpty && !_pairing) ...[
+                if (recent.isNotEmpty) ...[
                   const SizedBox(height: 36),
                   _RecentSection(
                     items: recent,
@@ -751,224 +727,6 @@ class _RelaySetupPanel extends StatelessWidget {
           ),
         ),
       ],
-    );
-  }
-}
-
-/// Active pairing: Session ID + QR + steps + waiting for Mac.
-class _RelayPairingPanel extends StatefulWidget {
-  final String sessionId;
-  final VoidCallback? onCopy;
-  final VoidCallback? onShare;
-  final VoidCallback? onCancel;
-
-  const _RelayPairingPanel({
-    super.key,
-    required this.sessionId,
-    this.onCopy,
-    this.onShare,
-    this.onCancel,
-  });
-
-  @override
-  State<_RelayPairingPanel> createState() => _RelayPairingPanelState();
-}
-
-class _RelayPairingPanelState extends State<_RelayPairingPanel>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _pulse;
-
-  @override
-  void initState() {
-    super.initState();
-    _pulse = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1400),
-    )..repeat(reverse: true);
-  }
-
-  @override
-  void dispose() {
-    _pulse.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final id = widget.sessionId.trim().toUpperCase();
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        FadeTransition(
-          opacity: Tween(begin: 0.55, end: 1.0).animate(_pulse),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-            decoration: BoxDecoration(
-              color: Cr.warning.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Cr.warning.withValues(alpha: 0.35)),
-            ),
-            child: const Row(
-              children: [
-                SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: Cr.warning,
-                  ),
-                ),
-                SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    'Waiting for Cursor on your Mac…',
-                    style: TextStyle(
-                      color: Cr.text,
-                      fontSize: 13.5,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(height: 20),
-        Container(
-          padding: const EdgeInsets.fromLTRB(16, 20, 16, 20),
-          decoration: BoxDecoration(
-            color: Cr.surface,
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: Cr.border),
-          ),
-          child: Column(
-            children: [
-              const Text(
-                'SESSION ID',
-                style: TextStyle(
-                  color: Cr.textFaint,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 1.2,
-                ),
-              ),
-              const SizedBox(height: 10),
-              SelectableText(
-                id,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: Cr.accent,
-                  fontSize: 36,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 6,
-                  height: 1.1,
-                ),
-              ),
-            // QR omitted (no qr_flutter dependency)
-              const SizedBox(height: 8),
-              const Text(
-                'Type this ID in Cursor',
-                style: TextStyle(color: Cr.textFaint, fontSize: 12),
-              ),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: widget.onCopy,
-                      icon: const Icon(Icons.copy_rounded, size: 18),
-                      label: const Text('Copy'),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: Cr.text,
-                        side: const BorderSide(color: Cr.border),
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: FilledButton.tonalIcon(
-                      onPressed: widget.onShare,
-                      icon: const Icon(Icons.ios_share_rounded, size: 18),
-                      label: const Text('Share'),
-                      style: FilledButton.styleFrom(
-                        backgroundColor: Cr.accentSoft,
-                        foregroundColor: Cr.accent,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 20),
-        const _PairingSteps(),
-        const SizedBox(height: 16),
-        TextButton(
-          onPressed: widget.onCancel,
-          style: TextButton.styleFrom(foregroundColor: Cr.textFaint),
-          child: const Text('Cancel pairing'),
-        ),
-      ],
-    );
-  }
-}
-
-class _PairingSteps extends StatelessWidget {
-  const _PairingSteps();
-
-  @override
-  Widget build(BuildContext context) {
-    const steps = [
-      (Icons.check_circle_rounded, Cr.success, 'Session created on this phone'),
-      (
-        Icons.looks_two_rounded,
-        Cr.accent,
-        'On Mac: Cmd+Shift+P → “Connect to Relay by Session ID”'
-      ),
-      (Icons.looks_3_rounded, Cr.textSecondary, 'Paste the Session ID (PIN optional)'),
-      (Icons.looks_4_rounded, Cr.textSecondary, 'This app connects automatically'),
-    ];
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Cr.surface,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Cr.borderSubtle),
-      ),
-      child: Column(
-        children: [
-          for (var i = 0; i < steps.length; i++) ...[
-            if (i > 0) const SizedBox(height: 10),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(steps[i].$1, size: 18, color: steps[i].$2),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    steps[i].$3,
-                    style: TextStyle(
-                      color: i == 0 ? Cr.text : Cr.textSecondary,
-                      fontSize: 13,
-                      height: 1.35,
-                      fontWeight: i == 0 ? FontWeight.w600 : FontWeight.w400,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ],
-      ),
     );
   }
 }

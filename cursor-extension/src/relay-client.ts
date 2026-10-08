@@ -68,10 +68,6 @@ export class RelayClient {
   private onRejectedCallback: ((sid: string, statusCode: number) => void) | null = null;
   private onTargetGoneCallback: ((clientId: string) => void) | null = null;
   private connectInFlight: Promise<void> | null = null;
-  /** 복수 세션 발견 시 사용자 선택용. (sessions) => 선택한 sessionId 또는 null */
-  private onSessionsDiscoveredCallback:
-    | ((sessions: { sessionId: string }[]) => Promise<string | null>)
-    | null = null;
   /** 익스텐션 시작 시 사용자가 입력한 세션 ID (이 세션만 연결 시도) */
   private targetSessionId: string | null = null;
   /** PC가 설정한 PIN (모바일은 이 PIN을 알아야 접속 가능, 메모리에만 보관) */
@@ -85,18 +81,13 @@ export class RelayClient {
   /** Bumped on every (re)start and stop so only the newest poll loop reschedules itself. */
   private pollGeneration = 0;
   private lastActivityAt = 0;
-  private lastSessionDiscoveryTime: number = 0;
   private lastPollHeartbeatTime: number = 0;
   private lastNoSessionHeartbeatTime: number = 0; // 세션 없을 때 폴링 동작 확인용
-  private readonly SESSION_DISCOVERY_INTERVAL = 5000; // 5초마다 세션 탐지 (빠른 연결용)
   private readonly POLL_INTERVAL = 2000; // 2초마다 폴링 (while the phone is active)
   /** Each relay poll costs several Redis commands, so poll slowly once the phone goes quiet. */
   private readonly IDLE_POLL_INTERVAL = 25_000;
   private readonly ACTIVE_WINDOW_MS = 3 * 60 * 1000;
   private readonly POLL_HEARTBEAT_INTERVAL = 30000; // 30초마다 폴링 동작 로그
-  /** 연결 유지용 heartbeat (2분 무heartbeat 시 서버가 연결 끊김으로 간주) */
-  private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-  private readonly HEARTBEAT_INTERVAL_MS = 30 * 1000; // 30초마다 heartbeat
 
   constructor(relayServerUrl: string, outputChannel: vscode.OutputChannel, private secrets?: vscode.SecretStorage) {
     this.relayServerUrl = relayServerUrl;
@@ -148,16 +139,6 @@ export class RelayClient {
   /** Called with the client ID of a phone the relay no longer delivers to (it left the session). */
   setOnTargetGone(callback: (clientId: string) => void) {
     this.onTargetGoneCallback = callback;
-  }
-
-  /**
-   * Set callback for when multiple sessions are discovered (user picks one).
-   * If not set or returns null, first session is used.
-   */
-  setOnSessionsDiscovered(
-    callback: (sessions: { sessionId: string }[]) => Promise<string | null>
-  ) {
-    this.onSessionsDiscoveredCallback = callback;
   }
 
   /**
@@ -238,7 +219,6 @@ export class RelayClient {
 
   /** Ends the current poll loop; anything still running for it sees a newer generation and gives up. */
   private haltPolling(): void {
-    this.clearHeartbeat();
     this.pollGeneration++;
     if (this.pollInterval) {
       clearTimeout(this.pollInterval);
@@ -246,36 +226,8 @@ export class RelayClient {
     }
   }
 
-  private clearHeartbeat(): void {
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
-      this.heartbeatInterval = null;
-    }
-  }
-
-  /** 서버에 "살아있음" 신호 전송 (2분간 없으면 연결 끊김으로 간주 → 같은 세션 ID 재사용 가능) */
-  private async sendHeartbeat(): Promise<void> {
-    if (!this.sessionId || !this.isConnected) return;
-    const url = `${this.relayServerUrl}/api/heartbeat?sessionId=${encodeURIComponent(this.sessionId)}&deviceId=${encodeURIComponent(this.deviceId)}`;
-    try {
-      await this.httpRequest(url);
-    } catch {
-      // 로그만 하고 유지 (다음 heartbeat에서 재시도)
-    }
-  }
-
-  private startHeartbeat(): void {
-    this.clearHeartbeat();
-    this.heartbeatInterval = setInterval(() => {
-      this.sendHeartbeat();
-    }, this.HEARTBEAT_INTERVAL_MS);
-    this.log(
-      `💓 Heartbeat started (every ${this.HEARTBEAT_INTERVAL_MS / 1000}s; disconnect assumed after 2 min with no heartbeat)`
-    );
-  }
-
   /**
-   * Start polling for messages and session discovery
+   * Start polling for messages
    */
   private startPolling(): void {
     if (this.pollInterval) {
@@ -308,24 +260,8 @@ export class RelayClient {
   private async pollMessages(): Promise<void> {
     // If no session, try to connect to targetSessionId (입력한 세션 ID만 연결)
     if (!this.sessionId) {
-      if (this.pcInUse) return;
+      if (this.pcInUse || !this.targetSessionId) return;
 
-      if (this.targetSessionId) {
-        const now = Date.now();
-        if (
-          now - this.lastNoSessionHeartbeatTime >=
-          this.POLL_HEARTBEAT_INTERVAL
-        ) {
-          this.lastNoSessionHeartbeatTime = now;
-          this.log(
-            `⏳ Waiting for session ${this.targetSessionId} (will auto-connect after mobile creates/connects that session)`
-          );
-        }
-        await this.connectToSession(this.targetSessionId, this.targetPin ?? undefined);
-        return;
-      }
-
-      // targetSessionId 없을 때만 discovery (하위 호환)
       const now = Date.now();
       if (
         now - this.lastNoSessionHeartbeatTime >=
@@ -333,17 +269,10 @@ export class RelayClient {
       ) {
         this.lastNoSessionHeartbeatTime = now;
         this.log(
-          "⏳ No session - poll loop running (enter a session ID or wait for mobile to create a session)"
+          `⏳ Waiting for session ${this.targetSessionId} (will auto-connect after mobile creates/connects that session)`
         );
       }
-      const discoveredSessionId = await this.discoverSession();
-      if (discoveredSessionId) {
-        this.log(
-          `🔍 Found session waiting for Extension: ${discoveredSessionId}`
-        );
-        await this.connectToSession(discoveredSessionId);
-        return;
-      }
+      await this.connectToSession(this.targetSessionId, this.targetPin ?? undefined);
       return;
     }
 
@@ -434,84 +363,6 @@ export class RelayClient {
         this.logError(`   Error message: ${error.message}`);
         this.logError(`   Error stack: ${error.stack}`);
       }
-    }
-  }
-
-  /**
-   * Discover sessions waiting for Extension (this client) to connect
-   */
-  private async discoverSession(): Promise<string | null> {
-    if (this.sessionId) {
-      return null; // Already connected to a session
-    }
-
-    // Rate limiting
-    const now = Date.now();
-    if (now - this.lastSessionDiscoveryTime < this.SESSION_DISCOVERY_INTERVAL) {
-      return null;
-    }
-    this.lastSessionDiscoveryTime = now;
-
-    try {
-      const discoveryUrl = `${this.relayServerUrl}/api/sessions-with-mobile`;
-      this.log(`🔍 Discovery: GET ${discoveryUrl}`);
-      const data = await this.httpRequest(discoveryUrl);
-
-      if (!data) {
-        this.log("🔍 Discovery: API returned no data");
-        return null;
-      }
-      if (!data.success) {
-        this.log(
-          `🔍 Discovery: API error - ${(data as any).error ?? "unknown"}`
-        );
-        return null;
-      }
-      const sessions = data.data?.sessions ?? [];
-      const sessionsCount = Array.isArray(sessions) ? sessions.length : 0;
-      this.log(
-        `🔍 Discovery: server response success=true, sessionsCount=${sessionsCount} (sessions with mobile connected)`
-      );
-      if (sessionsCount === 0) {
-        this.log(
-          "🔍 Discovery: no sessions with mobile connected (create a session on mobile, then connect)"
-        );
-        this.log(
-          "💡 If another Cursor window is open, that extension may have claimed the session first. Close other windows and try again with a new session."
-        );
-        const debugUrl = `${this.relayServerUrl}/api/debug-sessions`;
-        this.log(
-          `🔧 Check server status: GET ${debugUrl} (or run "Cursor Remote: Check Relay Server Status" from the Command Palette)`
-        );
-        return null;
-      }
-      let chosenSessionId: string | null = null;
-      if (sessionsCount > 1 && this.onSessionsDiscoveredCallback) {
-        this.log(
-          `🔍 Discovery: found ${sessionsCount} sessions → waiting for user selection`
-        );
-        chosenSessionId = await this.onSessionsDiscoveredCallback(sessions);
-        if (chosenSessionId === null || chosenSessionId === undefined) {
-          this.log(
-            "🔍 Discovery: no session selected (will prompt again on next discovery)"
-          );
-          return null;
-        }
-      }
-      const foundSession = chosenSessionId
-        ? sessions.find(
-            (s: { sessionId: string }) => s.sessionId === chosenSessionId
-          ) ?? sessions[0]
-        : sessions[0];
-      if (foundSession?.sessionId) {
-        this.log(`🔍 Discovery: found session → ${foundSession.sessionId}`);
-        return foundSession.sessionId;
-      }
-      this.log("🔍 Discovery: session has no sessionId");
-      return null;
-    } catch (error) {
-      this.logError("Discovery failed", error);
-      return null;
     }
   }
 
@@ -633,7 +484,6 @@ export class RelayClient {
       this.isConnected = true;
       this.connectAttempts = 0;
       this.nextConnectAt = 0;
-      this.startHeartbeat();
       if (reconnected) {
         this.log(`Relay session ${sid} reconnected.`);
       } else {
@@ -708,48 +558,6 @@ export class RelayClient {
    */
   isConnectedToSession(): boolean {
     return this.isConnected && this.sessionId !== null;
-  }
-
-  /**
-   * 릴레이 서버 상태 확인 (디버그 API 호출)
-   * Output 채널에 totalSessions, waitingForPc, hint 출력
-   */
-  async checkServerStatus(): Promise<void> {
-    const debugUrl = `${this.relayServerUrl}/api/debug-sessions`;
-    this.log(`🔧 Checking relay server: GET ${debugUrl}`);
-    try {
-      const data = await this.httpRequest(debugUrl);
-      if (!data) {
-        this.log("🔧 No response from server (check network or CORS)");
-        return;
-      }
-      if (!data.success) {
-        this.log(`🔧 API error: ${(data as any).error ?? "unknown"}`);
-        return;
-      }
-      const d = data.data as
-        | {
-            totalSessions?: number;
-            waitingForPc?: number;
-            sessionsWithPc?: number;
-            hint?: string;
-          }
-        | undefined;
-      if (!d) {
-        this.log("🔧 Response has no data");
-        return;
-      }
-      this.log(
-        `🔧 totalSessions=${d.totalSessions ?? "?"}, waitingForPc=${
-          d.waitingForPc ?? "?"
-        }, sessionsWithPc=${d.sessionsWithPc ?? "?"}`
-      );
-      if (d.hint) {
-        this.log(`🔧 hint: ${d.hint}`);
-      }
-    } catch (error) {
-      this.logError("checkServerStatus failed", error);
-    }
   }
 
   /**

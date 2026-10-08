@@ -1,204 +1,144 @@
 # Cursor Remote 📱
 
-> Phase 2 containment is in progress. Local WebSocket now requires v2 pairing;
-> remote shell, stop and approval actions are disabled. Read the
-> [security migration guide](../SECURITY_MIGRATION.md) before following older examples.
-> Relay capabilities are implemented; full runtime validation remains outstanding.
-
-[![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)](https://github.com/jaloveeye/cursor-remote)
+[![Version](https://img.shields.io/badge/version-0.5.0-blue.svg)](https://github.com/jaloveeye/cursor-remote)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**Control Cursor AI from Your Mobile Device**
-
-> Use Cursor AI right from your smartphone or tablet! Code anywhere, anytime with Cursor CLI.
+**Watch and control Cursor's Agents window from your phone or Telegram**
 
 ---
 
 ## 🇺🇸 English
 
-**Control Cursor AI from Your Mobile Device!**
-
-Cursor Remote is an extension that allows you to remotely control Cursor AI from your mobile devices. Chat with AI in real-time, write code, and check work results through WebSocket. Code anywhere, anytime using Cursor CLI from your smartphone or tablet!
+Cursor Remote shows the chats in Cursor's **Agents window** on your phone, with a UI modelled on
+the Agents window. From the phone you can read chats, send prompts, switch model or mode, stop the
+agent and approve or reject its requests. A Telegram bot offers the same controls.
 
 ### Key Features
 
-- 📱 **Mobile Control**: Control Cursor AI from your smartphone or tablet
-- ⚡ **Real-time Communication**: WebSocket-based bidirectional real-time communication
-- 🤖 **CLI Mode**: AI interaction through Cursor CLI (`agent`)
-- 🔄 **Auto Start**: The server starts in every Cursor window (8766, then 8767… for more windows)
-- 🔐 **One-time pairing**: Devices pair with a single-use code that expires in 5 minutes
-- 💬 **AI Chat**: Real-time conversation with Cursor AI from mobile
-- ✈️ **Telegram**: Prompt any Cursor window's agent chat from a Telegram bot
-- 🌍 **Relay / Tunnel**: Connect from other networks via relay server or Cloudflare Tunnel
-
-### Features
-
-- 🌐 **WebSocket Server**: Real-time bidirectional communication (default port: 8766)
-- 📝 **Prompt Sending**: Send prompts to Cursor AI from mobile
-- ⚡ **CLI Integration**: AI interaction through Cursor CLI (`agent`) command
-- 💬 **AI Response Capture**: Forward AI responses to mobile in real-time
-- 📋 **Rules Management**: Remote management of Cursor rules files
-- 📊 **Status Display**: Check connection status in status bar
-- 🔗 **Relay Server**: Connect PC and mobile on different networks via relay server
+- 📱 **Agents window on your phone**: chat list, live replies, diffs, model and mode
+- 🌍 **Any network**: same Wi-Fi, a relay server, or a Cloudflare tunnel
+- 🔐 **Paired devices only**: single-use pairing codes that expire after 5 minutes
+- ✅ **Request-bound approvals**: approve or reject only the exact request shown, after a confirm tap
+- 🧾 **Audit log**: every remote action is written to the **Cursor Remote** output
+- ✈️ **Telegram**: control the same chats from a Telegram bot
 
 ### Installation
 
-#### Install from Cursor Marketplace (Recommended)
+1. Open the Extensions view in Cursor (`Cmd+Shift+X` / `Ctrl+Shift+X`), search for "Cursor Remote"
+   and click **Install**. Or download the `.vsix` from
+   [Releases](https://github.com/jaloveeye/cursor-remote/releases) and use
+   `Extensions` → `...` → `Install from VSIX...`.
+2. Optional, for CLI prompts: install and sign in to the Cursor CLI
+   (`curl https://cursor.com/install -fsS | bash`, then `agent login`).
 
-1. Open Extensions tab in Cursor IDE (`Cmd+Shift+X` / `Ctrl+Shift+X`)
-2. Search for "Cursor Remote"
-3. Click **Install**
+### Setup
 
-#### Install from VSIX File
+#### 1. Turn on session control
 
-1. Download `.vsix` file from [Releases](https://github.com/jaloveeye/cursor-remote/releases) page
-2. In Cursor IDE: `Extensions` → `...` → `Install from VSIX...`
-3. Select the downloaded file
+Cursor Remote drives Cursor's own windows through the Chrome DevTools Protocol on
+`127.0.0.1:9222`. It is never exposed to the network.
 
-#### Prerequisites
+1. Settings → **Cursor Remote: Enable Cdp** → on (`"cursorRemote.enableCdp": true`).
+2. Command Palette → **Cursor Remote: Restart Cursor with Session Control**. Cursor asks about
+   unsaved files, quits and reopens with session control on.
 
-- **Cursor CLI Installation**: Cursor CLI must be installed to use CLI mode
+Without session control the phone can read chats but cannot send, stop or approve. If Cursor was
+opened normally, the extension offers the restart once.
 
-  ```bash
-  curl https://cursor.com/install -fsS | bash
-  ```
+#### 2a. Connect on the same Wi-Fi
 
-- **CLI Authentication**: Authentication is required on first use
+1. The server starts automatically. The status bar shows `Remote :8766` (8767… for more windows).
+2. Click the status bar → **Pair a device**. The single-use code is copied; it expires after 5 minutes.
+3. In the app choose **Local**, enter the Mac's address and port, connect, then paste the code.
 
-  ```bash
-  agent login
-  ```
+Browsers must come from an origin listed in `cursorRemote.allowedWebSocketOrigins`; Pair Client
+offers to add the current one. An `https://` web app cannot open a local `ws://` connection, so
+use the relay from the hosted web app.
 
-### Quick Start
+#### 2b. Connect from any network (relay)
 
-#### 1. Install Extension
+1. Click the status bar → **Connect to relay…** (or run **Cursor Remote: Connect to Relay by
+   Session ID**) and enter a 6-character session ID. Press Enter to reuse the last one.
+2. Run **Cursor Remote: Pair Relay Client**. The code is copied and shown with the session ID.
+3. In the app choose **Relay**, enter the session ID, then paste the code.
 
-Search for "Cursor Remote" in Cursor Marketplace and install it.
+How relay sessions behave:
 
-#### 2. Cursor CLI Setup
+- A session lasts **24 hours**. After that, or if the ID is already taken, the extension switches to
+  a new random ID and you pair the phone again. An ID is never reused.
+- Pairing codes work once and expire after **5 minutes**.
+- After Cursor restarts, one window reconnects to the last session on its own; the phone keeps working.
+- **Cursor Remote: Start New Relay Session** revokes the current session and shows a new pairing
+  code. **Cursor Remote: Revoke Relay Session** just revokes it.
 
-To use CLI mode, install and authenticate Cursor CLI:
+#### 3. Keep the Mac awake
+
+The Mac must stay awake and online for the phone to reach Cursor. While you are away, run this in
+a terminal (Ctrl+C to stop):
 
 ```bash
-# Install CLI
-curl https://cursor.com/install -fsS | bash
-
-# Authenticate
-agent login
+caffeinate -dimsu
 ```
 
-#### 3. Start Server
+If the Mac sleeps for more than about 2 minutes, the relay treats it as offline and phones cannot
+join until it is back.
 
-The server starts automatically. The status bar shows `Remote :8766` when ready and `Remote · 1 device` when a device is connected. **Click it for every action** (pair, Telegram, tunnel, relay, log).
+#### 4. Telegram (optional)
 
-#### 4. Connect Mobile App
+Run **Cursor Remote: Edit Telegram Settings**. The file lives at
+`~/.config/cursor-remote/telegram.json` (see `telegram.secrets.example.json`). Set `botToken`,
+`allowedUserIds` and `allowedChatIds`; both lists are required. Only one Cursor window runs the bot.
 
-**Local Mode (Same Wi-Fi):**
-1. Serve the Web app on port 8080 (in this repo: `scripts/start-cursor-remote-stack.sh`) and open `http://<computer IP>:8080` on the phone.
-2. Status bar → **Pair a device**. The code is copied and the box shows the host and port to enter.
-3. In the app: Local → host, port → Connect → paste the code. The box closes when the phone is paired.
+### Commands
 
-**Relay Mode (Different Networks):**
-1. Status bar → **Connect to relay…** and enter a 6-character session ID.
-2. When it connects, click **Pair relay device** and enter that code in the mobile app.
+| Command | What it does |
+|---------|--------------|
+| `Cursor Remote: Quick Actions` | The status-bar menu with every common action |
+| `Cursor Remote: Restart Cursor with Session Control` | Reopen Cursor with session control on |
+| `Cursor Remote: Pair Client` | One-time code for a phone on the same Wi-Fi |
+| `Cursor Remote: Revoke All Paired Clients` | Sign out every local device |
+| `Cursor Remote: Connect to Relay by Session ID` | Connect this Mac to a relay session |
+| `Cursor Remote: Pair Relay Client` | One-time code for a phone on the relay |
+| `Cursor Remote: Start New Relay Session` | Revoke the current relay session and start a new one |
+| `Cursor Remote: Revoke Relay Session` | Revoke the current relay session |
+| `Cursor Remote: Set Relay Session ID` | Change the saved session ID |
+| `Cursor Remote: Start/Stop Cloudflare Tunnel` | Public `wss://` tunnel to the local server |
+| `Cursor Remote: Start/Stop/Restart Telegram Bot` | Control the Telegram bot |
+| `Cursor Remote: Show Connection Info` | Addresses, devices, Telegram, tunnel and relay status |
 
-See the [project README](https://github.com/jaloveeye/cursor-remote) for details.
+### Settings
 
-### Relay Mode (New in 0.3.6)
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `cursorRemote.enableCdp` | `false` | Allow session control of Cursor's windows |
+| `cursorRemote.remoteActions` | `enabled` | `disabled` turns off open/new chat, model, mode, stop, approve and reject from the phone and Telegram |
+| `cursorRemote.relayServerUrl` | built-in | Your own relay (`https://…`) |
+| `cursorRemote.allowedWebSocketOrigins` | localhost:8080 | Browser origins allowed on the local server |
+| `cursorRemote.cdpPort` | `9222` | Session-control port (always on `127.0.0.1`) |
+| `cursorRemote.telegramSecretsPath` | `~/.config/cursor-remote/telegram.json` | Telegram settings file |
 
-Relay mode allows you to connect from anywhere without being on the same network.
+### Protocol
 
-#### How It Works
-
-1. **Session ID**: Choose a 6-character alphanumeric Session ID via the status bar → Connect to relay…
-2. **Session Persistence**: The Session ID is saved and reused automatically (valid for 24 hours)
-3. **Mobile Connection**: Enter the same Session ID in the mobile app to connect
-4. **Heartbeat**: Extension sends heartbeat every 30 seconds; session is released after 2 minutes of inactivity
-
-#### Commands
-
-| Command | Description |
-|---------|-------------|
-| `Cursor Remote: Connect to Relay by Session ID` | Connect to a different session immediately |
-| `Cursor Remote: Set Relay Session ID` | Change the saved Session ID (used on next connect) |
-| `Cursor Remote: Check Relay Server Status` | Check relay server status (results in the log) |
-| `Cursor Remote: Pair Relay Client` | Create a one-time code for the mobile app |
-
-#### Session Conflict
-
-If another PC is using the same Session ID, you'll get a **409 error**. Solutions:
-- Close the other PC/Cursor window
-- Create a new session from mobile and use that Session ID
-
-### Configuration
-
-The extension currently uses internal defaults:
-
-- WebSocket: `8766` (auto-fallback to next available port)
-
-### API
-
-#### WebSocket API
-
-Connect to the WebSocket server to send and receive commands in real-time.
-
-```javascript
-const ws = new WebSocket('ws://localhost:8766');
-
-// Send command
-ws.send(JSON.stringify({
-  type: 'execute_command',
-  command: 'cursorRemote.toggle'
-}));
-
-// Receive response
-ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  console.log(data);
-};
-```
-
-There is no public `/status` or `/command` REST API in the extension.
+The app and the extension speak protocol v2: paired device tokens, typed commands with a deadline,
+and no generic command execution. See [PROTOCOL.md](https://github.com/jaloveeye/cursor-remote/blob/main/PROTOCOL.md).
 
 ### Development
 
 ```bash
-# Install dependencies
 npm install
-
-# Compile
-npm run compile
-
-# Development mode (auto-compile)
-npm run watch
-
-# Create VSIX package
-npm run package
+npm test                  # compile + unit tests
+npx tsc --noEmit -p .     # type-check
+npx --yes @vscode/vsce package --no-dependencies --allow-missing-repository --skip-license
 ```
-
-### Mobile App
-
-Cursor Remote can be used with a Flutter mobile app.
-
-- **Android**: Build and install APK
-- **iOS**: Build through Xcode
-- **Web**: Deployable via Flutter Web
-
-Mobile app source code is available in the [GitHub repository](https://github.com/jaloveeye/cursor-remote/tree/main/mobile-app).
 
 ### Contributing
 
-Contributions are welcome! Bug reports, feature suggestions, and Pull Requests are all welcome.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'feat: Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+Contributions are welcome. Fork the repository, create a `feature/*` branch, use
+Conventional Commits (`feat: …`, `fix: …`) and open a Pull Request.
 
 ### License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+MIT License. See [LICENSE](LICENSE).
 
 ### Contact & Support
 
@@ -211,199 +151,76 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 
 ## 🇰🇷 한국어
 
-**모바일 기기에서 Cursor AI를 제어하세요!**
-
-Cursor Remote는 모바일 기기에서 Cursor AI를 원격으로 제어할 수 있게 해주는 확장입니다. WebSocket을 통해 실시간으로 AI와 대화하고, 코드를 작성하며, 작업 결과를 확인할 수 있습니다. 스마트폰이나 태블릿에서 어디서든 Cursor CLI를 사용하여 코딩하세요!
-
-### 주요 특징
-
-- 📱 **모바일 제어**: 스마트폰이나 태블릿에서 Cursor AI 제어
-- ⚡ **실시간 통신**: WebSocket 기반 양방향 실시간 통신
-- 🤖 **CLI 모드**: Cursor CLI(`agent`)를 통한 AI 상호작용
-- 🔄 **자동 시작**: Cursor 시작 시 자동으로 서버 시작
-- ⚙️ **설정 가능**: 포트 및 자동 시작 옵션 커스터마이징
-- 💬 **AI 채팅**: 모바일에서 Cursor AI와 실시간 대화
-- 📝 **코드 편집**: 모바일에서 코드 작성 및 편집
-- 🌍 **릴레이 모드**: 같은 네트워크가 아니어도 릴레이 서버를 통해 연결
-- 🔐 **일회용 페어링**: 5분 후 만료되는 일회용 코드로 기기 페어링
-
-### 기능
-
-- 🌐 **WebSocket 서버**: 실시간 양방향 통신 (기본 포트: 8766)
-- 📝 **프롬프트 전송**: 모바일에서 Cursor AI에 프롬프트 전송
-- ⚡ **CLI 통합**: Cursor CLI(`agent`) 명령어를 통한 AI 상호작용
-- 💬 **AI 응답 캡처**: AI 응답을 실시간으로 모바일로 전달
-- 📋 **규칙 관리**: Cursor 규칙 파일 원격 관리
-- 📊 **상태 표시**: 상태바에서 연결 상태 확인
-- 🔗 **릴레이 서버**: 다른 네트워크에 있는 PC와 모바일을 릴레이 서버로 연결
+Cursor Remote는 Cursor **Agents 창**의 채팅을 휴대폰에서 Agents 창과 비슷한 화면으로 보여줍니다.
+휴대폰에서 채팅을 읽고, 프롬프트를 보내고, 모델·모드를 바꾸고, 에이전트를 멈추고, 요청을 승인·거절할
+수 있습니다. 텔레그램 봇으로도 같은 기능을 쓸 수 있습니다.
 
 ### 설치
 
-#### Cursor 마켓플레이스에서 설치 (권장)
-
-1. Cursor IDE에서 확장 탭 열기 (`Cmd+Shift+X` / `Ctrl+Shift+X`)
-2. "Cursor Remote" 검색
-3. **설치** 클릭
-
-#### VSIX 파일로 설치
-
-1. [Releases](https://github.com/jaloveeye/cursor-remote/releases) 페이지에서 `.vsix` 파일 다운로드
-2. Cursor IDE에서 `확장` → `...` → `VSIX에서 설치...` 선택
-3. 다운로드한 파일 선택
-
-#### 사전 요구사항
-
-- **Cursor CLI 설치**: CLI 모드를 사용하려면 Cursor CLI가 설치되어 있어야 합니다
-
-  ```bash
-  curl https://cursor.com/install -fsS | bash
-  ```
-
-- **CLI 인증**: 처음 사용 시 인증이 필요합니다
-
-  ```bash
-  agent login
-  ```
-
-### 빠른 시작
-
-#### 1. Extension 설치
-
-Cursor 마켓플레이스에서 "Cursor Remote"를 검색하여 설치합니다.
-
-#### 2. Cursor CLI 설정
-
-CLI 모드를 사용하려면 Cursor CLI를 설치하고 인증해야 합니다:
-
-```bash
-# CLI 설치
-curl https://cursor.com/install -fsS | bash
-
-# 인증
-agent login
-```
-
-#### 3. 서버 시작
-
-Extension이 설치되면 자동으로 서버가 시작됩니다. 상태바에서 연결 상태를 확인할 수 있습니다.
-
-**수동 시작:**
-
-- 명령 팔레트 (`Cmd+Shift+P` / `Ctrl+Shift+P`) → `Cursor Remote: Start Server`
-
-#### 4. 모바일 앱 연결
-
-**로컬 모드 (같은 네트워크):**
-모바일 앱에서 PC의 IP 주소로 연결합니다.
-
-**릴레이 모드 (다른 네트워크):**
-1. 익스텐션 첫 실행 시 **6자리 세션 ID** 입력 프롬프트가 뜹니다
-2. 모바일 앱에서 동일한 세션 ID를 입력하여 연결
-3. PC와 모바일이 완전히 다른 네트워크에 있어도 연결 가능
-
-자세한 내용은 [프로젝트 README](https://github.com/jaloveeye/cursor-remote)를 참조하세요.
-
-### 릴레이 모드 (0.3.6 신규)
-
-릴레이 모드를 사용하면 같은 네트워크가 아니어도 어디서든 연결할 수 있습니다.
-
-#### 작동 방식
-
-1. **세션 ID**: 첫 실행 시 6자리 영숫자 세션 ID 입력 프롬프트
-2. **세션 저장**: 입력한 세션 ID는 자동 저장되어 다음 실행 시 재사용 (24시간 유효)
-3. **모바일 연결**: 모바일 앱에서 동일한 세션 ID를 입력하여 연결
-4. **하트비트**: 익스텐션이 30초마다 하트비트 전송, 2분간 응답 없으면 세션 해제
-
-#### 명령어
-
-| 명령어 | 설명 |
-|--------|------|
-| `Cursor Remote: 세션 ID로 릴레이 연결` | 다른 세션에 즉시 연결 |
-| `Cursor Remote: 릴레이 세션 ID 설정` | 저장된 세션 ID 변경 (다음 실행 시 사용) |
-| `Cursor Remote: 릴레이 서버 상태 확인` | 릴레이 서버 상태 확인 |
-
-#### 세션 충돌
-
-다른 PC에서 같은 세션 ID를 사용 중이면 **409 에러**가 발생합니다. 해결 방법:
-- 다른 PC/Cursor 창 닫기
-- 모바일에서 새 세션 생성 후 해당 세션 ID 사용
+1. Cursor 확장 탭(`Cmd+Shift+X`)에서 "Cursor Remote"를 검색해 설치합니다. 또는
+   [Releases](https://github.com/jaloveeye/cursor-remote/releases)의 `.vsix`를
+   `확장` → `...` → `VSIX에서 설치...`로 설치합니다.
+2. CLI 프롬프트를 쓰려면 Cursor CLI를 설치하고 로그인합니다 (`agent login`).
 
 ### 설정
 
-현재 익스텐션은 내부 기본값을 사용합니다.
+#### 1. 세션 제어 켜기
 
-- WebSocket: `8766` (충돌 시 다음 사용 가능한 포트로 자동 시작)
+Cursor Remote는 `127.0.0.1:9222`의 Chrome DevTools Protocol로 Cursor 창을 제어합니다. 이 포트는
+네트워크에 노출되지 않습니다.
 
-### API
+1. 설정 → **Cursor Remote: Enable Cdp** 켜기 (`"cursorRemote.enableCdp": true`)
+2. 명령 팔레트 → **Cursor Remote: Restart Cursor with Session Control**. 저장하지 않은 파일을 확인한
+   뒤 Cursor가 종료되고 세션 제어가 켜진 상태로 다시 열립니다.
 
-#### WebSocket API
+세션 제어가 꺼져 있으면 휴대폰에서 채팅은 읽을 수 있지만 전송·중지·승인은 할 수 없습니다.
 
-WebSocket 서버에 연결하여 실시간으로 명령을 주고받을 수 있습니다.
+#### 2a. 같은 Wi-Fi에서 연결
 
-```javascript
-const ws = new WebSocket('ws://localhost:8766');
+1. 서버는 자동으로 시작되고 상태줄에 `Remote :8766`이 표시됩니다.
+2. 상태줄 클릭 → **Pair a device**. 일회용 코드가 복사되며 5분 후 만료됩니다.
+3. 앱에서 **Local** → Mac 주소와 포트 입력 → 연결 → 코드 붙여넣기.
 
-// 명령 전송
-ws.send(JSON.stringify({
-  type: 'execute_command',
-  command: 'cursorRemote.toggle'
-}));
+`https://` 웹 앱에서는 로컬 `ws://` 연결이 막히므로 릴레이를 사용하세요.
 
-// 응답 수신
-ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  console.log(data);
-};
-```
+#### 2b. 다른 네트워크에서 연결 (릴레이)
 
-익스텐션에는 공개 `/status`, `/command` REST API가 없습니다.
+1. 상태줄 클릭 → **Connect to relay…** (또는 **Cursor Remote: Connect to Relay by Session ID**) →
+   6자리 세션 ID 입력 (Enter를 누르면 마지막 ID 재사용).
+2. **Cursor Remote: Pair Relay Client** 실행. 코드가 복사되고 세션 ID와 함께 표시됩니다.
+3. 앱에서 **Relay** → 세션 ID 입력 → 코드 붙여넣기.
 
-### 개발
+- 세션은 **24시간** 유지됩니다. 만료되거나 이미 사용된 ID이면 새 ID로 바뀌고 휴대폰을 다시
+  페어링합니다. 한 번 쓴 ID는 다시 쓸 수 없습니다.
+- 페어링 코드는 한 번만 쓸 수 있고 **5분** 후 만료됩니다.
+- Cursor를 다시 시작하면 한 창이 마지막 세션에 자동으로 다시 연결됩니다.
+- **Start New Relay Session**은 현재 세션을 폐기하고 새 코드를 보여주고, **Revoke Relay Session**은
+  폐기만 합니다.
+
+#### 3. Mac 깨어 있게 하기
+
+자리를 비울 때는 터미널에서 다음을 실행하세요 (Ctrl+C로 종료):
 
 ```bash
-# 의존성 설치
-npm install
-
-# 컴파일
-npm run compile
-
-# 개발 모드 (자동 컴파일)
-npm run watch
-
-# VSIX 패키지 생성
-npm run package
+caffeinate -dimsu
 ```
 
-### 모바일 앱
+Mac이 약 2분 이상 잠들면 릴레이는 Mac을 오프라인으로 보고 휴대폰이 접속할 수 없습니다.
 
-Cursor Remote는 Flutter로 개발된 모바일 앱과 함께 사용할 수 있습니다.
+#### 4. 텔레그램 (선택)
 
-- **Android**: APK 빌드 및 설치
-- **iOS**: Xcode를 통한 빌드
-- **Web**: Flutter Web으로 배포 가능
+**Cursor Remote: Edit Telegram Settings**로 `~/.config/cursor-remote/telegram.json`을 엽니다.
+`botToken`, `allowedUserIds`, `allowedChatIds`를 설정하세요 (두 목록 모두 필수).
 
-모바일 앱 소스 코드는 [GitHub 저장소](https://github.com/jaloveeye/cursor-remote/tree/main/mobile-app)에서 확인할 수 있습니다.
+### 원격 작업과 감사 로그
 
-### 기여하기
-
-기여를 환영합니다! 버그 리포트, 기능 제안, Pull Request 모두 환영합니다.
-
-1. 이 저장소를 Fork합니다
-2. 기능 브랜치를 생성합니다 (`git checkout -b feature/amazing-feature`)
-3. 변경사항을 커밋합니다 (`git commit -m 'feat: Add amazing feature'`)
-4. 브랜치에 푸시합니다 (`git push origin feature/amazing-feature`)
-5. Pull Request를 엽니다
+`cursorRemote.remoteActions`가 `enabled`이면 휴대폰·텔레그램에서 채팅 열기/새 채팅, 모델·모드 변경,
+중지, 승인·거절을 할 수 있습니다. 승인·거절은 항상 확인 탭이 필요하고 화면에 표시된 바로 그 요청에만
+적용됩니다. 모든 작업은 **Cursor Remote** 출력에 `[Audit]` 줄로 기록됩니다.
 
 ### 라이선스
 
-이 프로젝트는 MIT 라이선스 하에 배포됩니다. 자세한 내용은 [LICENSE](LICENSE) 파일을 참조하세요.
-
-### 문의 및 지원
-
-- **Author**: 김형진 (<jaloveeye@gmail.com>)
-- **Website**: <https://jaloveeye.com>
-- **GitHub**: <https://github.com/jaloveeye/cursor-remote>
-- **Issues**: [GitHub Issues](https://github.com/jaloveeye/cursor-remote/issues)
+MIT License. [LICENSE](LICENSE) 참고.
 
 ---
 

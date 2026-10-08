@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createServer } from "node:http";
@@ -284,6 +284,23 @@ test("starting a new session waits out a connect already in flight, which then c
     assert.equal(relay.client.isConnectedToSession(), true);
     assert.equal(await relay.client.hasCredential("SLOW12"), false, "the stale connect stored no login");
   } finally { await relay.close(); }
+});
+
+test("the relay client only polls: no heartbeat, discovery or debug requests", async () => {
+  const relay = await fakeRelay();
+  mock.timers.enable({ apis: ["setInterval"] });
+  try {
+    await (relay.client as any).pollMessages();
+    assert.equal(relay.requests.length, 0, "without a session ID there is nothing to discover");
+    await relay.client.connectToSessionById("TEST99");
+    mock.timers.tick(5 * 60_000);
+    await (relay.client as any).pollMessages();
+    await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual(relay.requests.map((r) => r.path), ["/api/session", "/api/poll"]);
+  } finally {
+    mock.timers.reset();
+    await relay.close();
+  }
 });
 
 test("startup resume reconnects only with a saved login and only in the window holding the lock", async () => {

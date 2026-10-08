@@ -72,21 +72,6 @@ describe("CdpManager status & lifecycle", () => {
     assert.equal(await manager.getAgentState(), null);
   });
 
-  it("approve/reject fail gracefully without session", async () => {
-    const manager = new CdpManager({
-      host: "127.0.0.1",
-      port: 9222,
-      enabled: true,
-      log: () => undefined,
-      logError: () => undefined,
-      broadcast: () => undefined,
-    });
-    const a = await manager.approveAction("x");
-    const r = await manager.rejectAction("x");
-    assert.equal(a.ok, false);
-    assert.equal(r.ok, false);
-  });
-
   it("schedules limited reconnect when CDP unavailable", async () => {
     const logs: string[] = [];
     const manager = new CdpManager({

@@ -1,278 +1,97 @@
 # Cursor Remote Relay Server
 
-> **Protocol v2 migration:** all session data/control endpoints now require scoped
-> Bearer credentials. Create the session in Cursor, then use Pair Relay Client.
-> PIN-only connections and public discovery are disabled. Supabase users must
-> apply `supabase/security.sql`; Redis remains supported without a SQL migration.
-> Read [the migration guide](../SECURITY_MIGRATION.md#relay-protocol-v2).
-> Older API examples below describe the legacy protocol and are not sufficient
-> to authenticate with this version. Nothing has been deployed automatically.
+The relay lets the phone reach the Cursor extension from any network. It runs as one Vercel
+function backed by Upstash Redis and only forwards messages; it never talks to Cursor itself.
 
-Vercel에 배포하여 사용하는 Cursor Remote 중계 서버입니다.
+Production: `https://cursor-remote-rela.vercel.app`. The full message format is in
+[PROTOCOL.md](../PROTOCOL.md#relay-api).
 
-로컬 네트워크 제한 없이 인터넷을 통해 모바일 앱과 PC를 연결할 수 있습니다.
-
-## 아키텍처
+## Architecture
 
 ```
-┌─────────────┐                    ┌─────────────────┐                    ┌─────────────┐
-│   Mobile    │◄── HTTP/SSE ──────►│  Vercel Relay   │◄── HTTP/SSE ──────►│  PC Server  │
-│     App     │                    │     Server      │                    │  (Node.js)  │
-└─────────────┘                    │                 │                    └──────┬──────┘
-                                   │  ┌───────────┐  │                           │
-                                   │  │  Upstash  │  │                           │
-                                   │  │   Redis   │  │                    ┌──────┴──────┐
-                                   │  └───────────┘  │                    │  Cursor IDE │
-                                   └─────────────────┘                    │  Extension  │
-                                                                          └─────────────┘
+Phone / Web app  ⇄  HTTPS polling  ⇄  Vercel relay (api/relay.ts)  ⇄  HTTPS polling  ⇄  Cursor extension
+                                              │
+                                        Upstash Redis
 ```
 
-## 기능
+There is no SSE stream, no PC server and no database other than Redis.
 
-- **세션 기반 연결**: 6자리 세션 코드로 PC와 모바일 연결
-- **PC 먼저 연결 가능**: PC가 세션 ID 입력 시 해당 ID로 세션 자동 생성 (0.3.6+)
-- **메시지 중계**: PC ↔ 모바일 간 양방향 메시지 전달
-- **SSE 스트림**: 실시간 메시지 수신 (Server-Sent Events)
-- **HTTP Polling**: SSE 지원이 어려운 환경을 위한 폴백
-- **Heartbeat 기반 세션 해제**: 2분간 heartbeat 없으면 PC 연결 끊김으로 간주
-- **세션 충돌 방지**: 같은 세션 ID를 다른 PC에서 사용 시 409 에러
+## How sessions work
 
-## API 엔드포인트
+- **The Mac creates the session.** In Cursor, run **Cursor Remote: Connect to Relay by Session ID**
+  (or Pair Relay Client). The extension calls `POST /api/session` with a 6-character ID and gets a
+  capability token.
+- **Sessions last 24 hours.** A session ID can never be claimed again, even after it expires. If an
+  ID is taken or a login expired, the extension switches to a fresh random ID; phones pair again.
+- **Phones join with a pairing code.** **Cursor Remote: Pair Relay Client** calls `POST /api/pair`
+  and shows a code that works once and expires after 5 minutes. The phone sends it with the session
+  ID to `POST /api/connect` and gets its own token. A phone can join only while the Mac is polling,
+  and a failed join does not use up the code.
+- **Capability tokens** are 256-bit random values. Redis stores only their SHA-256 hashes.
+- **Messages expire after 5 minutes.** A reply addressed to one phone (`targetDeviceId`) goes only
+  to that phone; other messages go to every phone that is still polling.
+- **Liveness comes from polling.** Every `GET /api/poll` refreshes the device's last-seen time. The
+  Mac counts as connected for 2 minutes after its last poll; a phone that has not polled for about
+  2 minutes stops receiving messages and is pruned from the session.
+- **Revocation:** `POST /api/disconnect` from the Mac revokes the session for everyone
+  (**Cursor Remote: Revoke Relay Session**, or **Start New Relay Session**).
+- Failed authentication is rate-limited per client IP (`x-vercel-forwarded-for` / `x-real-ip`).
+- Bodies over 256 KB from a phone (4 MB from the Mac) are rejected with `413`.
 
-| 엔드포인트 | 메서드 | 설명 |
-|-----------|--------|------|
-| `/api/health` | GET | 서버 상태 확인 |
-| `/api/store` | GET | 사용 중인 저장소 (Supabase / Upstash Redis) |
-| `/api/session` | POST | 새 세션 생성 |
-| `/api/session?sessionId=XXX` | GET | 세션 정보 조회 |
-| `/api/connect` | POST | 세션에 디바이스 연결 |
-| `/api/heartbeat` | GET | PC "살아있음" 신호 (sessionId, deviceId 쿼리) |
-| `/api/send` | POST | 메시지 전송 |
-| `/api/poll` | GET | 메시지 폴링 |
-| `/api/stream` | GET | SSE 스트림 연결 |
-| `/api/command-events?sessionId=XXX&approvalId=APR_...` | GET | 커맨드 정책/승인/결과 이벤트 조회 (approvalId 필터 지원) |
-| `/api/command-timeline-summary?sessionId=XXX&approvalId=APR_...` | GET | 커맨드 체인 1줄 요약 조회 (approvalId 필터 지원) |
-| `/api/command-approvals?sessionId=XXX` | GET | 대기 중인 커맨드 승인 요청 조회 |
-| `/api/resolve-command-approval` | POST | 승인 요청 approve/reject 처리 |
+## Endpoints
 
-**Connection ownership (v2):** heartbeat staleness does not transfer ownership. Reconnect requires the saved capability. Use authenticated `/api/disconnect` to revoke credentials.
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/session` | POST | Mac creates a session (no token yet) |
+| `/api/session` | GET | Session record (token required) |
+| `/api/connect` | POST | Mac reconnects with its token; phone joins with a pairing code |
+| `/api/pair` | POST | Mac creates a pairing code |
+| `/api/send` | POST | Queue a message |
+| `/api/poll` | GET | Fetch queued messages and mark this device as seen |
+| `/api/disconnect` | POST | Revoke this device (from the Mac: the whole session) |
+| `/api/health` | GET | Returns `{ "status": "healthy" }` and nothing else |
+| `/api/store` | GET | Storage label (always Upstash Redis) |
 
-## 스토어 선택 (Supabase / Redis)
+Kept only for extensions older than 0.5.0, scheduled for removal: `/api/heartbeat` (polling already
+refreshes the Mac's last-seen time), `/api/sessions-with-mobile` and `/api/debug-sessions` (always
+`403`).
 
-- **SUPABASE_URL** 이 설정되어 있으면 **Supabase(PostgreSQL)** 를 사용합니다.
-- 설정되어 있지 않으면 **Upstash Redis** 를 사용합니다.
+Every route is served by `api/relay.ts` through the rewrite in `vercel.json`, because the Hobby plan
+allows 12 functions per deployment.
 
-Supabase 사용 시 무료 티어로 명령 한도 부담 없이 운영할 수 있습니다.
+## Deploy
 
-## 배포 방법
+1. Create a Redis database in the [Upstash Console](https://console.upstash.com) and copy its REST
+   URL and token.
+2. In Vercel → Project → Settings → Environment Variables, set `UPSTASH_REDIS_REST_URL` and
+   `UPSTASH_REDIS_REST_TOKEN`. Both are required.
+3. Deploy from this folder:
 
-### 1-A. Supabase 사용 시
+   ```bash
+   cd relay-server
+   npm install
+   vercel --prod
+   ```
 
-1. [Supabase](https://supabase.com)에서 프로젝트 생성
-2. SQL Editor에서 [supabase/schema.sql](./supabase/schema.sql) 내용 실행
-3. Project Settings > API에서 **Project URL**과 **service_role** 키 복사
-4. Vercel 환경변수: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` 설정
+4. Check it: `curl https://<your-relay>/api/health` should return `"status": "healthy"`.
+5. To use your own relay, set `cursorRemote.relayServerUrl` in Cursor and the relay URL in the app.
 
-### 1-B. Upstash Redis 사용 시
-
-1. [Upstash Console](https://console.upstash.com)에서 계정 생성
-2. 새 Redis 데이터베이스 생성
-3. REST API URL과 Token 복사
-4. Vercel 환경변수: `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` 설정
-
-### 2. Vercel 배포
+## Local development and tests
 
 ```bash
-# Vercel CLI 설치 (이미 설치되어 있다면 생략)
-npm install -g vercel
-
-# relay-server 디렉토리로 이동
 cd relay-server
-
-# 의존성 설치
 npm install
-
-# 로컬 개발
+cp .env.example .env.local   # then add your Upstash URL and token
 npm run dev
 
-# 배포
-vercel
-
-# 프로덕션 배포
-vercel --prod
+npm run type-check
+npm test              # command policy + security tests (no network)
+npm run test:redis    # needs a local redis-server on PATH
 ```
 
-### 3. 환경변수 설정
+See [TEST_PLAN.md](./TEST_PLAN.md) for manual checks and [MAINTENANCE.md](./MAINTENANCE.md) for
+the routine health check.
 
-Vercel 대시보드 > Project Settings > Environment Variables에서 설정:
-
-- **Supabase 사용**: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
-- **Redis 사용**: `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` (SUPABASE_URL이 없을 때 사용)
-
-## API 사용 예제
-
-### 세션 생성 (PC)
-
-```bash
-curl -X POST https://relay.jaloveeye.com/api/session
-```
-
-응답:
-```json
-{
-  "success": true,
-  "data": {
-    "sessionId": "ABC123",
-    "createdAt": 1705123456789,
-    "expiresAt": 1705209856789
-  },
-  "timestamp": 1705123456789
-}
-```
-
-### 세션 연결 (Mobile/PC)
-
-```bash
-# PC 연결 (세션이 없으면 자동 생성)
-curl -X POST https://relay.jaloveeye.com/api/connect \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sessionId": "ABC123",
-    "deviceId": "pc-device-uuid",
-    "deviceType": "pc"
-  }'
-
-# 모바일 연결
-curl -X POST https://relay.jaloveeye.com/api/connect \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sessionId": "ABC123",
-    "deviceId": "mobile-device-uuid",
-    "deviceType": "mobile"
-  }'
-```
-
-### Heartbeat (PC)
-
-PC는 주기적으로 heartbeat를 전송해야 합니다. 2분간 없으면 연결 끊김으로 간주됩니다.
-
-```bash
-curl "https://relay.jaloveeye.com/api/heartbeat?sessionId=ABC123&deviceId=pc-device-uuid"
-```
-
-### 메시지 전송
-
-```bash
-curl -X POST https://relay.jaloveeye.com/api/send \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sessionId": "ABC123",
-    "deviceId": "device-uuid",
-    "deviceType": "mobile",
-    "type": "insert_text",
-    "data": {
-      "text": "Hello, World!"
-    }
-  }'
-```
-
-### 메시지 폴링
-
-```bash
-curl "https://relay.jaloveeye.com/api/poll?sessionId=ABC123&deviceType=pc"
-```
-
-### SSE 스트림 연결
-
-```javascript
-const eventSource = new EventSource(
-  'https://relay.jaloveeye.com/api/stream?sessionId=ABC123&deviceType=mobile'
-);
-
-eventSource.addEventListener('message', (event) => {
-  const message = JSON.parse(event.data);
-  console.log('Received:', message);
-});
-
-eventSource.addEventListener('heartbeat', (event) => {
-  console.log('Heartbeat:', event.data);
-});
-
-eventSource.addEventListener('reconnect', (event) => {
-  console.log('Reconnect needed:', event.data);
-  eventSource.close();
-  // 재연결 로직
-});
-```
-
-## 통신 흐름
-
-### 1. 연결 설정
-
-```
-PC Server                    Relay Server                 Mobile App
-    │                             │                            │
-    │──POST /api/session─────────►│                            │
-    │◄─────────{sessionId}────────│                            │
-    │                             │                            │
-    │──POST /api/connect─────────►│                            │
-    │  {sessionId, deviceType:pc} │                            │
-    │                             │                            │
-    │                             │◄──POST /api/connect────────│
-    │                             │  {sessionId, deviceType:mobile}
-    │                             │                            │
-```
-
-### 2. 메시지 교환
-
-```
-PC Server                    Relay Server                 Mobile App
-    │                             │                            │
-    │                             │◄──SSE /api/stream──────────│
-    │                             │   (deviceType: mobile)     │
-    │                             │                            │
-    │──POST /api/send────────────►│                            │
-    │  {type: "ai_response"}      │────SSE message────────────►│
-    │                             │                            │
-    │◄──GET /api/poll─────────────│◄──POST /api/send───────────│
-    │   (deviceType: pc)          │   {type: "insert_text"}    │
-    │                             │                            │
-```
-
-## 환경변수
-
-| 변수명 | 설명 | 필수 |
-|--------|------|------|
-| `UPSTASH_REDIS_REST_URL` | Upstash Redis REST API URL | Yes |
-| `UPSTASH_REDIS_REST_TOKEN` | Upstash Redis REST API Token | Yes |
-
-## 제한사항
-
-- **SSE 연결 시간**: Vercel Serverless는 최대 실행 시간이 있음 (Free: 10초, Pro: 60초)
-  - SSE 스트림은 자동으로 타임아웃되며, 클라이언트가 재연결해야 함
-- **메시지 TTL**: 메시지는 5분간 보관 후 자동 삭제
-- **세션 TTL**: 세션은 24시간 후 자동 만료
-
-## 정기 점검
-
-운영 중 주기적으로 서버 상태를 확인하려면 [MAINTENANCE.md](./MAINTENANCE.md)의 체크리스트를 사용하세요. (health, debug-sessions, 필요 시 connect 샘플 호출)
-
-## 로컬 개발
-
-```bash
-# 환경변수 설정
-cp .env.example .env.local
-# .env.local 파일을 편집하여 Upstash 정보 입력
-
-# 개발 서버 실행
-npm run dev
-```
-
-## 라이선스
+## License
 
 MIT License
-
----
-
-**작성 시간**: 2026년 1월 21일  
-**수정 시간**: 2026년 2월 2일 (0.3.6: PC 먼저 연결, Heartbeat, 세션 충돌 방지)

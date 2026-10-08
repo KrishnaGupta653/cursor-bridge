@@ -5,7 +5,6 @@
 
 import { CdpSessionSocket } from "./cdp-client";
 import {
-  CLICK_APPROVAL_SCRIPT,
   CLICK_AGENT_HISTORY_SCRIPT,
   EXTRACT_AGENT_DOM_SCRIPT,
   EXTRACT_AGENTS_HISTORY_SCRIPT,
@@ -269,28 +268,6 @@ export class CursorSession {
       }
       this.state = "RUNNING";
       return { ok: true };
-    } catch (e) {
-      return {
-        ok: false,
-        error: e instanceof Error ? e.message : String(e),
-      };
-    }
-  }
-
-  async resolvePermission(
-    approve: boolean
-  ): Promise<{ ok: boolean; error?: string; label?: string }> {
-    if (!this.socket?.connected) {
-      return { ok: false, error: "CDP session not connected" };
-    }
-    try {
-      const result = await this.socket.evaluate<{
-        ok: boolean;
-        error?: string;
-        label?: string;
-      }>(CLICK_APPROVAL_SCRIPT(approve));
-      this.lastActivity = new Date().toISOString();
-      return result || { ok: false, error: "No result from approval click" };
     } catch (e) {
       return {
         ok: false,

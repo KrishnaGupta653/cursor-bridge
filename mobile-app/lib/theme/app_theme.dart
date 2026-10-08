@@ -49,7 +49,7 @@ class Cr {
 }
 
 ThemeData buildCrDarkTheme() {
-  final scheme = ColorScheme.dark(
+  const scheme = ColorScheme.dark(
     primary: Cr.accent,
     onPrimary: Colors.white,
     primaryContainer: Cr.accentSoft,
@@ -212,19 +212,19 @@ ThemeData buildCrDarkTheme() {
 
 /// Light theme kept for Settings toggle — still Cr-aligned neutrals.
 ThemeData buildCrLightTheme() {
-  final scheme = ColorScheme.light(
-    primary: const Color(0xFF2F5FBF),
+  const scheme = ColorScheme.light(
+    primary: Color(0xFF2F5FBF),
     onPrimary: Colors.white,
-    primaryContainer: const Color(0xFFE8EEF9),
-    onPrimaryContainer: const Color(0xFF0F1A2E),
-    secondary: const Color(0xFF5A6578),
+    primaryContainer: Color(0xFFE8EEF9),
+    onPrimaryContainer: Color(0xFF0F1A2E),
+    secondary: Color(0xFF5A6578),
     onSecondary: Colors.white,
-    surface: const Color(0xFFF7F8FA),
-    onSurface: const Color(0xFF12151A),
-    surfaceContainerHighest: const Color(0xFFEBEEF3),
-    onSurfaceVariant: const Color(0xFF5A6578),
-    outline: const Color(0xFFD0D5DE),
-    outlineVariant: const Color(0xFFE4E7EC),
+    surface: Color(0xFFF7F8FA),
+    onSurface: Color(0xFF12151A),
+    surfaceContainerHighest: Color(0xFFEBEEF3),
+    onSurfaceVariant: Color(0xFF5A6578),
+    outline: Color(0xFFD0D5DE),
+    outlineVariant: Color(0xFFE4E7EC),
     error: Cr.danger,
     onError: Colors.white,
   );

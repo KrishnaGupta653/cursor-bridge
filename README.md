@@ -1,13 +1,12 @@
 # Cursor Remote 📱
 
-> Phase 2 containment is in progress. Local WebSocket now requires v2 pairing;
-> remote shell, stop and approval actions are disabled. Read the
-> [security migration guide](SECURITY_MIGRATION.md) before following older examples.
-> Relay capabilities are implemented; full runtime validation remains outstanding.
+> Protocol v2: every device pairs with a single-use code, commands are typed and audited, and
+> there is no remote shell. Older clients and examples are rejected; see [PROTOCOL.md](PROTOCOL.md)
+> and the [security migration guide](SECURITY_MIGRATION.md).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![GitHub Sponsors](https://img.shields.io/badge/Sponsor-♥-ea4aaa?logo=github)](https://github.com/sponsors/jaloveeye)
-[![Version](https://img.shields.io/badge/version-0.3.6-blue.svg)](https://github.com/jaloveeye/cursor-remote)
+[![Version](https://img.shields.io/badge/version-0.5.0-blue.svg)](https://github.com/jaloveeye/cursor-remote)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0-blue)](https://www.typescriptlang.org/)
 [![Flutter](https://img.shields.io/badge/Flutter-3.0+-blue)](https://flutter.dev/)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-green)](https://nodejs.org/)
@@ -39,7 +38,7 @@ If this project helps you, consider [sponsoring](https://github.com/sponsors/jal
 - 💬 **AI Chat**: Real-time conversation with Cursor AI from mobile
 - 📝 **Code Editing**: Write and edit code from your mobile device
 - 🌍 **Relay Mode**: Connect from anywhere via relay server (no same network required)
-- 🔐 **Session Management**: Session ID persistence, heartbeat-based connection, conflict prevention
+- 🔐 **Paired devices only**: single-use 5-minute pairing codes, 24-hour relay sessions, request-bound approvals
 
 ### Why Cursor Remote?
 
@@ -94,8 +93,8 @@ Mobile/Web App  ←→  Relay Server  ←→  Extension (RelayClient)
            (e.g. ABC123)
 ```
 
-No separate PC server is required. The extension includes relay client and WebSocket server.
-Session ID is entered on first launch and saved for reuse (24-hour TTL).
+No separate PC server is required. The extension includes the relay client and the WebSocket server.
+The Mac creates a relay session (valid 24 hours) and phones join it with a single-use pairing code.
 
 #### Connection Modes
 
@@ -277,100 +276,64 @@ flutter run
 
 ## Connection Setup
 
+### Turn on session control
+
+The extension drives Cursor's Agents window through the Chrome DevTools Protocol on
+`127.0.0.1:9222` (never exposed to the network).
+
+1. Settings → **Cursor Remote: Enable Cdp** → on (`"cursorRemote.enableCdp": true`).
+2. Command Palette → **Cursor Remote: Restart Cursor with Session Control**. Cursor asks about unsaved
+   files, quits and reopens with session control on.
+
+Without it the phone can read chats but cannot send, stop or approve. If Cursor was opened normally,
+the extension offers the restart once.
+
 ### Local Mode (Same Wi-Fi Network)
 
-Use this when PC and mobile are on the same Wi-Fi. The app connects directly to the Extension's WebSocket server.
+1. The extension starts its server on port **8766** (8767… for more Cursor windows); the status bar
+   shows `Remote :8766`.
+2. Click the status bar → **Pair a device** (**Cursor Remote: Pair Client**). The code is copied; it
+   works once and expires after 5 minutes.
+3. In the app choose **Local**, enter the Mac's IP address and port, connect, then paste the code.
 
-#### Setup
+Browsers must come from an origin in `cursorRemote.allowedWebSocketOrigins` (Pair Client offers to
+add it). An `https://` web app cannot open a local `ws://` connection; use the relay there.
+Allow the port in the Mac's firewall. Find the IP with `ipconfig getifaddr en0` (macOS),
+`ipconfig` (Windows) or `hostname -I` (Linux).
 
-1. **Launch app** and choose **Local** connection.
-2. **Enter PC IP** (e.g., `192.168.0.10`) — the machine running Cursor.
-3. **Port** is fixed at **8766** (Extension WebSocket).
-4. **Click "Connect"**.
+### Relay Mode (Any Network)
 
-#### Verify Connection
-
-- **Mobile app**: Green cloud icon displayed.
-- **Cursor**: Output channel shows "Client connected".
-
-#### Network Requirements
-
-| Item | Description |
-|------|-------------|
-| Same network | PC and mobile on same Wi-Fi |
-| Port open | Allow port 8766 in PC firewall |
-| IP check | Need PC's local IP address |
-
-#### How to Find PC IP Address
-
-**macOS:**
-
-```bash
-ifconfig | grep "inet " | grep -v 127.0.0.1
-```
-
-**Windows:**
-
-```cmd
-ipconfig | findstr IPv4
-```
-
-**Linux:**
-
-```bash
-hostname -I
-```
-
----
-
-### Relay Server Mode (External Network)
-
-Use this when PC and mobile are on different networks, connecting through a relay server.
-
-#### Setup (0.3.6+)
-
-1. **Extension prompts for Session ID** on first launch
-   - Enter a 6-character alphanumeric Session ID (e.g., `ABC123`)
-   - Session ID is saved and reused automatically
-
-2. **Connect from Mobile App**
-   - Select relay server mode
-   - Enter relay server URL (default: `https://relay.jaloveeye.com`)
-   - Enter the **same Session ID** as Extension
-   - Connect
-
-#### How It Works
+1. Click the status bar → **Connect to relay…** (**Cursor Remote: Connect to Relay by Session ID**)
+   and enter a 6-character session ID. Press Enter to reuse the last one.
+2. Run **Cursor Remote: Pair Relay Client**. The code is copied and shown with the session ID.
+3. In the app choose **Relay**, enter the session ID, then paste the code.
 
 ```
-Mobile App → Relay Server → Extension (RelayClient) → Cursor CLI
+Mobile App ⇄ Relay Server (Vercel + Upstash Redis) ⇄ Extension (RelayClient) ⇄ Cursor
 ```
 
-The relay server forwards messages, so you can connect even when PC and mobile are on different networks.
-
-#### Session Management
-
-| Feature | Description |
-|---------|-------------|
-| **Session ID Persistence** | Saved in Extension's globalState, reused on next launch |
-| **Heartbeat** | Extension sends heartbeat every 30 seconds |
-| **Auto-release** | Session released after 2 minutes of inactivity |
-| **Conflict Detection** | 409 error if same Session ID used by another PC |
-| **TTL** | Sessions expire after 24 hours |
-
-#### Commands
+| Rule | Behaviour |
+|------|-----------|
+| **Session lifetime** | 24 hours. Afterwards, or if the ID is taken, the extension switches to a new random ID and you pair again. An ID is never reused. |
+| **Pairing codes** | Single use, expire after 5 minutes |
+| **Credentials** | 256-bit capability tokens, stored hashed on the relay |
+| **Messages** | Expire after 5 minutes; replies go only to the phone that asked |
+| **Liveness** | The extension's polls keep the Mac "connected"; phones that stop polling for about 2 minutes are pruned |
+| **Restart** | After Cursor restarts, one window reconnects to the last session on its own |
 
 | Command | Description |
 |---------|-------------|
-| `Cursor Remote: 세션 ID로 릴레이 연결` | Connect to a different session immediately |
-| `Cursor Remote: 릴레이 세션 ID 설정` | Change saved Session ID (used on next launch) |
-| `Cursor Remote: 릴레이 서버 상태 확인` | Check relay server status |
+| `Cursor Remote: Connect to Relay by Session ID` | Connect this Mac to a relay session |
+| `Cursor Remote: Pair Relay Client` | One-time code for the phone |
+| `Cursor Remote: Start New Relay Session` | Revoke the current session and start a new one |
+| `Cursor Remote: Revoke Relay Session` | Revoke the current session |
+| `Cursor Remote: Set Relay Session ID` | Change the saved session ID |
 
-#### Advantages
+### Keep the Mac awake
 
-- **No port forwarding**: Use without router configuration
-- **Security**: Safe connection without direct port exposure
-- **Session Persistence**: Same Session ID works for 24 hours
-- **Conflict Prevention**: Only one PC per Session ID at a time
+The phone can only reach Cursor while the Mac is awake and online. While you are away, run
+`caffeinate -dimsu` in a terminal (Ctrl+C to stop). If the Mac sleeps for more than about 2 minutes,
+the relay treats it as offline and phones cannot join until it is back.
 
 ---
 
@@ -424,15 +387,11 @@ Prompts from the session composer use `agent_prompt` and inject into the **selec
 
 #### 1. Start Cursor with CDP (macOS)
 
-```bash
-# Quit Cursor completely first, then:
-open -a Cursor --args --remote-debugging-port=9222
-```
-
-Or from Terminal:
+Run **Cursor Remote: Restart Cursor with Session Control**. To do it by hand, quit Cursor completely,
+then:
 
 ```bash
-/Applications/Cursor.app/Contents/MacOS/Cursor --remote-debugging-port=9222
+open -a Cursor --args --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222
 ```
 
 #### 2. Verify CDP (localhost only)
@@ -466,14 +425,14 @@ Do **not** bind CDP to `0.0.0.0`. It must stay on loopback.
 | `cdp_targets` | Server→App | Discovered targets |
 | `get_sessions` / `sessions` | both | Live Cursor window sessions |
 | `get_agent_history` / `agent_history` | both | Agents sidebar history/pinned (DOM scrape) |
-| `open_agent_history` | App→Server | Click a history row in Cursor Agents UI (`historyId`) |
 | `select_session` | App→Server | Set active remote-control target |
 | `get_agent_state` / `agent_state` | both | Conversation + state snapshot |
 | `agent_prompt` | App→Server | Prompt → **existing** IDE Agent |
 | `cli_prompt` | App→Server | Prompt → CLI (explicit) |
-| `approve_action` / `reject_action` | App→Server | Permission UI |
+| `approve_action` / `reject_action` | App→Server | Exact pending `requestId` + `chatId`, confirmed on the phone, gated by `cursorRemote.remoteActions` and audited |
 | `get_plan` / `get_agent_plan` / `agent_plan` | both | Plan steps when detectable |
-| `agent_message` / `agent_message_delta` / `agent_state_changed` / `agent_plan_changed` / `permission_request` / `permission_resolved` / `file_changed` / `activity_event` / `agent_completed` / `agent_error` | Server→App | Live updates |
+| `list_chats` / `get_chat` / `watch_chat` | App→Server | Agents-window chats; a watch streams `chat_delta` and `composer_state` to the asking device |
+| `chat_response` | Server→App | Final answer to a prompt, sent only to the device that asked |
 
 #### Security
 
@@ -522,24 +481,13 @@ CDP logs use the `[CDP]` prefix (connect, targets, session state, permissions, r
 
 ## Communication Protocol
 
-### WebSocket Message Types
-
-| Type | Direction | Description |
-|------|-----------|-------------|
-| `command` | App→Server | Command send request |
-| `command_result` | Server→App | Command send result (includes error messages) |
-| `insert_text` | App→Server | Insert text into editor |
-| `execute_command` | App→Server | Execute Cursor command |
-| `ai_response` | Server→App | Cursor AI response |
-| `file_changed` | Server→App | File change notification |
-| `permission_request` | Server→App | Permission request notification |
-| `permission_response` | App→Server | Permission response |
-
-### Port Information
+The app, the relay and the extension speak protocol v2: paired device tokens, typed commands with an
+`id` and a `deadline`, and no generic command execution. See [PROTOCOL.md](./PROTOCOL.md).
 
 | Port | Protocol | Purpose |
 |------|----------|---------|
-| 8766 | WebSocket | Mobile/Web app ↔ Extension (real-time bidirectional communication) |
+| 8766+ | WebSocket | Mobile/Web app ↔ Extension (local mode) |
+| 9222 | CDP (loopback only) | Extension ↔ Cursor's own windows |
 
 ---
 
@@ -549,7 +497,7 @@ CDP logs use the `[CDP]` prefix (connect, targets, session state, permissions, r
 
 #### `curl http://127.0.0.1:9222/json` fails
 
-- Quit Cursor completely and relaunch with `--remote-debugging-port=9222`
+- Run **Cursor Remote: Restart Cursor with Session Control**, or quit Cursor and relaunch with `--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222`
 - Confirm nothing else is using 9222: `lsof -i :9222`
 - Enable `cursorRemote.enableCdp` in settings
 
@@ -704,7 +652,7 @@ Cursor Remote는 모바일 기기에서 Cursor AI를 원격으로 제어할 수 
 - 💬 **AI 채팅**: 모바일에서 Cursor AI와 실시간 대화
 - 📝 **코드 편집**: 모바일에서 코드 작성 및 편집
 - 🌍 **릴레이 모드**: 같은 네트워크가 아니어도 릴레이 서버를 통해 연결
-- 🔐 **세션 관리**: 세션 ID 저장/재사용, Heartbeat 기반 연결, 충돌 방지
+- 🔐 **페어링된 기기만**: 5분짜리 일회용 페어링 코드, 24시간 릴레이 세션, 요청 단위 승인
 
 ### 왜 Cursor Remote인가?
 
@@ -738,7 +686,7 @@ Cursor Remote는 모바일 기기에서 Cursor AI를 원격으로 제어할 수 
 
 **로컬 모드**: 모바일/웹 앱이 Extension WebSocket(8766)에 직접 연결.
 
-**릴레이 모드 (0.3.6+)**: 앱 ↔ 릴레이 서버 ↔ Extension(RelayClient). PC 서버는 사용하지 않습니다. 세션 ID(6자리)로 연결하며, 상태줄 클릭(또는 릴레이 명령)으로 연결합니다.
+**릴레이 모드**: 앱 ↔ 릴레이 서버 ↔ Extension(RelayClient). PC 서버는 사용하지 않습니다. Mac이 세션(24시간 유효)을 만들고, 휴대폰은 일회용 페어링 코드로 참여합니다.
 
 #### 연결 모드
 
@@ -920,101 +868,56 @@ flutter run
 
 ## 연결 설정
 
+### 세션 제어 켜기
+
+Extension은 `127.0.0.1:9222`의 Chrome DevTools Protocol로 Cursor Agents 창을 제어합니다 (네트워크에
+노출되지 않음).
+
+1. 설정 → **Cursor Remote: Enable Cdp** 켜기 (`"cursorRemote.enableCdp": true`)
+2. 명령 팔레트 → **Cursor Remote: Restart Cursor with Session Control**. 저장하지 않은 파일을 확인한 뒤
+   Cursor가 종료되고 세션 제어가 켜진 상태로 다시 열립니다.
+
+세션 제어가 꺼져 있으면 휴대폰에서 채팅은 읽을 수 있지만 전송·중지·승인은 할 수 없습니다.
+
 ### 로컬 모드 (동일 Wi-Fi 네트워크)
 
-PC와 모바일이 같은 Wi-Fi에 연결된 경우 사용합니다.
+1. Extension이 포트 **8766**(창이 여러 개면 8767…)에서 서버를 시작하고 상태줄에 `Remote :8766`이 표시됩니다.
+2. 상태줄 클릭 → **Pair a device** (**Cursor Remote: Pair Client**). 코드가 복사되며 한 번만 쓸 수 있고
+   5분 후 만료됩니다.
+3. 앱에서 **Local** → Mac IP와 포트 입력 → 연결 → 코드 붙여넣기.
 
-#### 설정 방법
+브라우저 출처는 `cursorRemote.allowedWebSocketOrigins`에 있어야 합니다. `https://` 웹 앱에서는 로컬
+`ws://` 연결이 막히므로 릴레이를 사용하세요. Mac 방화벽에서 포트를 허용하세요.
 
-1. **앱 실행** 후 **로컬** 연결 선택
-2. **PC IP 입력** (예: `192.168.0.10`) — Cursor가 실행 중인 PC
-3. **포트**는 **8766** (Extension WebSocket)
-4. **"Connect" 버튼 클릭**
+### 릴레이 모드 (다른 네트워크)
 
-#### 연결 확인
+1. 상태줄 클릭 → **Connect to relay…** (**Cursor Remote: Connect to Relay by Session ID**) → 6자리 세션
+   ID 입력 (Enter를 누르면 마지막 ID 재사용).
+2. **Cursor Remote: Pair Relay Client** 실행. 코드가 복사되고 세션 ID와 함께 표시됩니다.
+3. 앱에서 **Relay** → 세션 ID 입력 → 코드 붙여넣기.
 
-- **모바일 앱**: 녹색 구름 아이콘 표시
-- **Cursor**: Output 채널에 "Client connected" 표시
-
-#### 네트워크 요구사항
-
-| 항목 | 설명 |
+| 항목 | 동작 |
 |------|------|
-| 동일 네트워크 | PC와 모바일이 같은 Wi-Fi에 연결 |
-| 포트 개방 | PC 방화벽에서 WebSocket 포트 허용 (기본 8766, 충돌 시 8767~8776) |
-| IP 확인 | PC의 로컬 IP 주소 확인 필요 |
-
-#### PC IP 주소 확인 방법
-
-**macOS:**
-
-```bash
-ifconfig | grep "inet " | grep -v 127.0.0.1
-```
-
-**Windows:**
-
-```cmd
-ipconfig | findstr IPv4
-```
-
-**Linux:**
-
-```bash
-hostname -I
-```
-
----
-
-### 릴레이 서버 모드 (외부 네트워크)
-
-PC와 모바일이 다른 네트워크에 있을 때 릴레이 서버를 통해 연결합니다.
-
-#### 설정 방법 (0.3.6+)
-
-1. **Extension에서 릴레이 연결 시작**
-   - 상태줄의 "Cursor Remote" 클릭 또는 명령 팔레트에서 "Cursor Remote: 세션 ID로 릴레이 연결" 실행
-   - 6자리 영숫자 세션 ID 입력 (예: `ABC123`)
-   - 필요하면 PIN(4~6자리 숫자) 입력
-
-2. **모바일 앱에서 연결**
-   - 릴레이 서버 모드 선택
-   - 릴레이 서버 URL 입력 (기본: `https://relay.jaloveeye.com`)
-   - Extension과 **동일한 세션 ID** 입력
-   - 연결
-
-#### 작동 방식
-
-```
-모바일 앱 → 릴레이 서버 → Extension (RelayClient) → Cursor CLI
-```
-
-릴레이 서버가 중간에서 메시지를 전달하므로, PC와 모바일이 서로 다른 네트워크에 있어도 연결할 수 있습니다.
-
-#### 세션 관리
-
-| 기능 | 설명 |
-|------|------|
-| **세션 ID 저장** | Extension의 globalState에 저장, 다음 입력 시 기본값으로 재사용 |
-| **Heartbeat** | Extension이 30초마다 heartbeat 전송 |
-| **자동 해제** | 2분간 비활성 시 세션 해제 |
-| **충돌 감지** | 같은 세션 ID를 다른 PC에서 사용 시 409 에러 |
-| **TTL** | 세션은 24시간 후 만료 |
-
-#### 명령어
+| **세션 유효기간** | 24시간. 만료되거나 이미 사용된 ID이면 새 ID로 바뀌고 다시 페어링합니다. 한 번 쓴 ID는 재사용할 수 없습니다. |
+| **페어링 코드** | 일회용, 5분 후 만료 |
+| **자격 증명** | 256비트 capability 토큰, 릴레이에는 해시만 저장 |
+| **메시지** | 5분 후 만료, 응답은 요청한 휴대폰에만 전달 |
+| **연결 상태** | Extension의 폴링으로 Mac이 "연결됨"으로 유지되고, 약 2분간 폴링하지 않은 휴대폰은 세션에서 제외 |
+| **재시작** | Cursor를 다시 시작하면 한 창이 마지막 세션에 자동으로 다시 연결 |
 
 | 명령어 | 설명 |
 |--------|------|
-| `Cursor Remote: 세션 ID로 릴레이 연결` | 다른 세션에 즉시 연결 |
-| `Cursor Remote: 릴레이 세션 ID 설정` | 저장된 세션 ID 변경 (다음 실행 시 사용) |
-| `Cursor Remote: 릴레이 서버 상태 확인` | 릴레이 서버 상태 확인 |
+| `Cursor Remote: Connect to Relay by Session ID` | 이 Mac을 릴레이 세션에 연결 |
+| `Cursor Remote: Pair Relay Client` | 휴대폰용 일회용 코드 |
+| `Cursor Remote: Start New Relay Session` | 현재 세션을 폐기하고 새 세션 시작 |
+| `Cursor Remote: Revoke Relay Session` | 현재 세션 폐기 |
+| `Cursor Remote: Set Relay Session ID` | 저장된 세션 ID 변경 |
 
-#### 장점
+### Mac 깨어 있게 하기
 
-- **포트 포워딩 불필요**: 라우터 설정 없이 사용 가능
-- **보안**: 직접 포트 노출 없이 안전한 연결
-- **세션 연속성**: 동일 세션 ID로 24시간 재접속 가능
-- **충돌 방지**: 세션 ID당 한 PC만 연결 가능
+Mac이 깨어 있고 온라인일 때만 휴대폰이 Cursor에 접근할 수 있습니다. 자리를 비울 때는 터미널에서
+`caffeinate -dimsu`를 실행하세요 (Ctrl+C로 종료). Mac이 약 2분 이상 잠들면 릴레이는 Mac을 오프라인으로
+봅니다.
 
 ---
 
@@ -1056,24 +959,13 @@ Cursor IDE의 Output 패널에서 "Cursor Remote" 채널을 선택하면 다음�
 
 ## 통신 프로토콜
 
-### WebSocket 메시지 타입
-
-| 타입 | 방향 | 설명 |
-|------|------|------|
-| `command` | App→Server | 명령 전송 요청 |
-| `command_result` | Server→App | 명령 전송 결과 (에러 메시지 포함) |
-| `insert_text` | App→Server | 에디터에 텍스트 삽입 |
-| `execute_command` | App→Server | Cursor 명령 실행 |
-| `ai_response` | Server→App | Cursor AI 응답 |
-| `file_changed` | Server→App | 파일 변경 알림 |
-| `permission_request` | Server→App | 권한 요청 알림 |
-| `permission_response` | App→Server | 권한 응답 |
-
-### 포트 정보
+앱, 릴레이, Extension은 프로토콜 v2를 사용합니다: 페어링된 기기 토큰, `id`와 `deadline`이 있는 타입별
+명령, 일반 명령 실행 없음. 자세한 내용은 [PROTOCOL.md](./PROTOCOL.md)를 참고하세요.
 
 | 포트 | 프로토콜 | 용도 |
 |------|----------|------|
-| 8766 | WebSocket | 모바일/웹 앱 ↔ Extension (실시간 양방향 통신) |
+| 8766+ | WebSocket | 모바일/웹 앱 ↔ Extension (로컬 모드) |
+| 9222 | CDP (loopback 전용) | Extension ↔ Cursor 창 |
 
 ---
 
@@ -1208,4 +1100,4 @@ lsof -i :8766
 **Made with ❤️ by [jaloveeye](https://jaloveeye.com)**
 
 **작성 시간**: 2026년 1월 21일  
-**최종 수정**: 2026년 2월 2일 (릴레이 모드 세션 ID 입력/저장, Heartbeat 방식 반영)
+**최종 수정**: 2026년 10월 8일 (0.5.0: 세션 제어, 페어링 코드, 24시간 릴레이 세션, 프로토콜 v2)

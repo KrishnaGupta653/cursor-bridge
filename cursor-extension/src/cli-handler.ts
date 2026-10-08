@@ -4,7 +4,6 @@ import * as fs from "fs";
 
 import { WebSocketServer } from "./websocket-server";
 import * as vscode from "vscode";
-import { CONFIG } from "./config";
 import { cliHistoryFile, writePrivateFile } from "./private-state";
 
 interface ChatHistoryEntry {

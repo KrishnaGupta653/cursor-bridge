@@ -20,7 +20,6 @@ class AppSettings extends ChangeNotifier {
   static const String _keyThemeMode = 'theme_mode';
   static const String _keyShowHistory = 'show_history';
   static const String _keyDefaultAgentMode = 'default_agent_mode';
-  static const String _keyAutoConnect = 'auto_connect';
   static const String _keyConnectionHistory = 'connection_history';
 
   // 최대 히스토리 개수
@@ -30,14 +29,12 @@ class AppSettings extends ChangeNotifier {
   ThemeModeSetting _themeMode = ThemeModeSetting.system;
   bool _showHistory = false; // 기본값: 숨김
   String _defaultAgentMode = 'auto';
-  bool _autoConnect = false;
   List<ConnectionHistoryItem> _connectionHistory = [];
 
   // getters
   ThemeModeSetting get themeMode => _themeMode;
   bool get showHistory => _showHistory;
   String get defaultAgentMode => _defaultAgentMode;
-  bool get autoConnect => _autoConnect;
   List<ConnectionHistoryItem> get connectionHistory =>
       List.unmodifiable(_connectionHistory);
 
@@ -65,9 +62,6 @@ class AppSettings extends ChangeNotifier {
 
     // 기본 에이전트 모드
     _defaultAgentMode = prefs.getString(_keyDefaultAgentMode) ?? 'auto';
-
-    // 자동 연결
-    _autoConnect = prefs.getBool(_keyAutoConnect) ?? false;
 
     // 연결 히스토리
     final historyJson = prefs.getString(_keyConnectionHistory);
@@ -99,14 +93,6 @@ class AppSettings extends ChangeNotifier {
     _defaultAgentMode = mode;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_keyDefaultAgentMode, mode);
-    notifyListeners();
-  }
-
-  // 자동 연결 설정
-  Future<void> setAutoConnect(bool value) async {
-    _autoConnect = value;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_keyAutoConnect, value);
     notifyListeners();
   }
 
