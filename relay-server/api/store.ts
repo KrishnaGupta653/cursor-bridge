@@ -3,8 +3,8 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { ApiResponse } from "../lib/types.js";
 
 /**
- * 릴레이 서버가 사용 중인 저장소 정보 (Supabase / Upstash Redis)
- * GET /api/store → { store: "supabase" | "redis", storeLabel: "Supabase" | "Upstash Redis" }
+ * 릴레이 서버가 사용 중인 저장소 정보 (Upstash Redis)
+ * GET /api/store → { store: "redis", storeLabel: "Upstash Redis" }
  */
 async function handler(
   req: VercelRequest,
@@ -26,13 +26,9 @@ async function handler(
     });
   }
 
-  const useSupabase = !!process.env.SUPABASE_URL;
-  const store = useSupabase ? "supabase" : "redis";
-  const storeLabel = useSupabase ? "Supabase" : "Upstash Redis";
-
-  const response: ApiResponse<{ store: "supabase" | "redis"; storeLabel: string }> = {
+  const response: ApiResponse<{ store: "redis"; storeLabel: string }> = {
     success: true,
-    data: { store, storeLabel },
+    data: { store: "redis", storeLabel: "Upstash Redis" },
     timestamp: Date.now(),
   };
   return res.status(200).json(response);

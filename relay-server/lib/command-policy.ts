@@ -23,7 +23,7 @@ const allowed = new Set([
   "agent_prompt", "cli_prompt", "insert_text",
   "list_chats", "get_chat", "watch_chat", "unwatch_chat", "get_composer_state", "list_models",
   "get_file_diff", "open_chat", "new_chat", "set_model", "set_mode", "agent_stop",
-  "approve_action", "reject_action",
+  "approve_action", "reject_action", "stop_prompt",
 ]);
 
 const CHAT_ID = /^[A-Za-z0-9-]{8,80}$/;

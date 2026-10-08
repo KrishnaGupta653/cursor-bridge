@@ -1,5 +1,4 @@
-import { securityOperation as redisOperation } from "./redis.js";
-import { securityOperation as supabaseOperation } from "./supabase-store.js";
+import { securityOperation } from "./redis.js";
 
 export type SecurityAction = "get" | "put" | "take" | "delete" | "increment";
 export interface SecurityStore {
@@ -10,7 +9,7 @@ export interface SecurityStore {
   increment(key: string, ttl: number): Promise<number>;
 }
 const operation = (action: SecurityAction, key: string, value: unknown = null, ttl = 86400) =>
-  (process.env.SUPABASE_URL ? supabaseOperation : redisOperation)(action, key, value, ttl);
+  securityOperation(action, key, value, ttl);
 export const securityStore: SecurityStore = {
   get: key => operation("get", key),
   put: async (key, value, ttl) => (await operation("put", key, value, ttl)) === true,

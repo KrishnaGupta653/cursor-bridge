@@ -1,21 +1,13 @@
 import { SecurityError, type Principal } from "../lib/relay-security.js";
-import { withRelayAuth, relaySecurity, securityFailure } from "../lib/relay-auth.js";
+import { withRelayAuth, relaySecurity, securityFailure, logUnexpected } from "../lib/relay-auth.js";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import {
-  sendMessage,
-  getSession,
-  getDeviceSession,
-  appendCommandEvent,
-  createCommandApproval,
-  listCommandApprovals,
-} from "../lib/store.js";
+import { sendMessage, getSession, appendCommandEvent } from "../lib/store.js";
 import { evaluateCommandPolicy } from "../lib/command-policy.js";
 import {
   ApiResponse,
   RelayMessage,
   DeviceType,
   CommandEvent,
-  CommandApprovalRequest,
 } from "../lib/types.js";
 
 interface SendRequest {
@@ -27,13 +19,23 @@ interface SendRequest {
   targetDeviceId?: string; // 유니캐스트 응답용 - 특정 클라이언트에게만 전송
 }
 
+/** Phone commands are small. Mac replies (chat pages, diffs up to 256 KB of text) stay under Vercel's 4.5 MB cap. */
+const MAX_BODY_BYTES: Record<Principal["role"], number> = {
+  mobile: 256 * 1024,
+  pc: 4 * 1024 * 1024,
+};
+
+function bodyBytes(req: VercelRequest): number {
+  const declared = Number(req.headers?.["content-length"]);
+  if (Number.isFinite(declared) && declared > 0) return declared;
+  const raw = req.body;
+  if (raw == null) return 0;
+  return Buffer.byteLength(typeof raw === "string" ? raw : JSON.stringify(raw));
+}
+
 // UUID 생성
 function generateMessageId(): string {
   return `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-}
-
-function generateApprovalId(): string {
-  return `apr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function extractCommandRaw(
@@ -67,103 +69,6 @@ function extractCommandId(data: Record<string, unknown>): string | null {
   return typeof data.id === "string" && data.id.trim() ? data.id : null;
 }
 
-function buildCommandResultEvent(
-  sessionId: string,
-  approval: CommandApprovalRequest,
-  resultData: Record<string, unknown>
-): CommandEvent {
-  const success = resultData.success === true;
-  const errorMessage =
-    typeof resultData.error_message === "string"
-      ? resultData.error_message
-      : typeof resultData.errorMessage === "string"
-      ? resultData.errorMessage
-      : typeof resultData.error === "string"
-      ? resultData.error
-      : typeof resultData.message === "string" && !success
-      ? resultData.message
-      : null;
-  const commandRaw =
-    typeof approval.command_message?.data?.command === "string"
-      ? (approval.command_message.data.command as string)
-      : typeof approval.command_message?.data?.raw === "string"
-      ? (approval.command_message.data.raw as string)
-      : approval.command_message.type;
-
-  return {
-    event_id: `evt_${generateMessageId()}`,
-    session_id: sessionId,
-    timestamp: Date.now(),
-    tool: {
-      provider: "cursor",
-      name: "relay-server",
-    },
-    command: {
-      raw: commandRaw,
-      cwd:
-        typeof approval.command_message?.data?.cwd === "string"
-          ? (approval.command_message.data.cwd as string)
-          : undefined,
-    },
-    risk: {
-      level: approval.policy.risk_level,
-      reasons: approval.policy.reasons,
-    },
-    policy: {
-      decision: approval.policy.decision,
-      rule_id: approval.policy.rule_id,
-    },
-    approval: {
-      required: true,
-      status: "approved",
-      approved_by: approval.resolved_by ?? null,
-      approved_at: approval.resolved_at ?? null,
-      reason: approval.resolution_reason ?? null,
-    },
-    result: {
-      status: success ? "success" : "error",
-      exit_code:
-        typeof resultData.exitCode === "number"
-          ? resultData.exitCode
-          : typeof resultData.exit_code === "number"
-          ? (resultData.exit_code as number)
-          : null,
-      duration_ms:
-        typeof resultData.durationMs === "number"
-          ? resultData.durationMs
-          : typeof resultData.duration_ms === "number"
-          ? (resultData.duration_ms as number)
-          : 0,
-      error_message: success ? null : errorMessage,
-    },
-    metadata: {
-      approval_id: approval.approval_id,
-      source: "command_result",
-      command_id: extractCommandId(approval.command_message.data) ?? null,
-      result_payload: resultData,
-    },
-  };
-}
-
-async function appendCommandResultEventIfMatched(
-  sessionId: string,
-  data: Record<string, unknown>
-): Promise<void> {
-  const commandId = extractCommandId(data);
-  if (!commandId) return;
-
-  const approvals = await listCommandApprovals(sessionId, 100);
-  const matched = approvals.find((approval) => {
-    const approvalCommandId = extractCommandId(approval.command_message.data);
-    return approvalCommandId === commandId;
-  });
-  if (!matched) return;
-  if (matched.status !== "approved") return;
-
-  const event = buildCommandResultEvent(sessionId, matched, data);
-  await appendCommandEvent(sessionId, event);
-}
-
 async function handler(req: VercelRequest, res: VercelResponse, principal: Principal) {
   // CORS 헤더 설정
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -195,54 +100,27 @@ async function handler(req: VercelRequest, res: VercelResponse, principal: Princ
     return res.status(405).json(response);
   }
 
+  if (bodyBytes(req) > MAX_BODY_BYTES[principal.role]) {
+    return res.status(413).json({ success: false, errorCode: "PAYLOAD_TOO_LARGE", error: "Request body too large", timestamp: Date.now() });
+  }
+
   try {
-    // Vercel/Node에서 body가 문자열로 올 수 있음
-    let body = req.body;
-    if (typeof body === "string") {
-      try {
-        body = JSON.parse(body) as SendRequest;
-      } catch (e) {
-        const response: ApiResponse = {
-          success: false,
-          error: "Invalid JSON body",
-          timestamp: Date.now(),
-        };
-        return res.status(400).json(response);
-      }
-    }
+    // Session, device and role were set from the credential by authorize.
     const {
-      sessionId: providedSessionId,
+      sessionId,
       deviceId,
       deviceType,
       type,
       data: rawData,
       targetDeviceId: providedTargetDeviceId,
-    } = (body || {}) as SendRequest;
+    } = (req.body || {}) as SendRequest;
     const data = normalizeDataWithCommandId(type, rawData || {});
 
     // 입력 검증
-    if (!deviceId || !deviceType || !type) {
+    if (!sessionId || !deviceId || !deviceType || !type) {
       const response: ApiResponse = {
         success: false,
         error: "deviceId, deviceType, and type are required",
-        timestamp: Date.now(),
-      };
-      return res.status(400).json(response);
-    }
-
-    // 세션 ID 결정 (connect와 동일하게 대문자 정규화 — PC/모바일 동일 키 매칭)
-    let sessionId =
-      providedSessionId && typeof providedSessionId === "string"
-        ? providedSessionId.trim().toUpperCase()
-        : undefined;
-    if (!sessionId) {
-      sessionId = (await getDeviceSession(deviceId)) || undefined;
-    }
-
-    if (!sessionId) {
-      const response: ApiResponse = {
-        success: false,
-        error: "sessionId is required or device must be connected to a session",
         timestamp: Date.now(),
       };
       return res.status(400).json(response);
@@ -269,20 +147,9 @@ async function handler(req: VercelRequest, res: VercelResponse, principal: Princ
       throw new SecurityError(403, "TARGET_MEMBERSHIP_REQUIRED");
     }
 
-    // 실행 결과(command_result)를 approval 흐름과 연결
-    if (deviceType === "pc" && type === "command_result") {
-      try {
-        await appendCommandResultEventIfMatched(sessionId, data);
-      } catch (error) {
-        console.error("Failed to append command_result-linked event:", error);
-      }
-    }
-
-    // 정책 평가 (Day1: execute_command 기준 게이팅)
+    // 정책 평가 (execute_command 기준 게이팅)
     const commandRaw = extractCommandRaw(type, data || {});
     const policy = evaluateCommandPolicy({ messageType: type, commandRaw, data, deviceType });
-    const approvalId =
-      policy.decision === "approval_required" ? generateApprovalId() : undefined;
 
     const commandEvent: CommandEvent | null = commandRaw
       ? {
@@ -306,28 +173,15 @@ async function handler(req: VercelRequest, res: VercelResponse, principal: Princ
             rule_id: policy.ruleId,
           },
           approval: {
-            required: policy.decision === "approval_required",
-            status:
-              policy.decision === "approval_required"
-                ? "pending"
-                : "not_required",
+            required: false,
+            status: "not_required",
             approved_by: null,
             approved_at: null,
             reason: null,
           },
           result: {
-            status:
-              policy.decision === "deny"
-                ? "error"
-                : policy.decision === "approval_required"
-                ? "pending"
-                : "success",
-            error_message:
-              policy.decision === "deny"
-                ? "Command denied by policy"
-                : policy.decision === "approval_required"
-                ? "Approval required before execution"
-                : null,
+            status: policy.decision === "deny" ? "error" : "success",
+            error_message: policy.decision === "deny" ? "Command denied by policy" : null,
             duration_ms: 0,
             exit_code: null,
           },
@@ -335,17 +189,22 @@ async function handler(req: VercelRequest, res: VercelResponse, principal: Princ
             sender_device_id: deviceId,
             target_device_id: targetDeviceId || null,
             message_type: type,
-            approval_id: approvalId ?? null,
             command_id: extractCommandId(data),
           },
         }
       : null;
 
+    // Claimed before it is audited or delivered, so a replay is neither logged nor run twice.
+    if (principal.role === "mobile" && (commandEvent || policy.decision !== "deny") &&
+        !await relaySecurity.claimCommand(principal, data.id, data.deadline)) {
+      return res.status(409).json({ success: false, errorCode: "DUPLICATE_COMMAND", error: "Command already accepted", timestamp: Date.now() });
+    }
+
     if (commandEvent) {
       try {
         await appendCommandEvent(sessionId, commandEvent);
       } catch (error) {
-        console.error("Failed to persist command event:", error);
+        logUnexpected(req, error, "COMMAND_EVENT_NOT_PERSISTED");
       }
       console.info("[command_event]", commandEvent.event_id, policy.decision);
     }
@@ -368,63 +227,6 @@ async function handler(req: VercelRequest, res: VercelResponse, principal: Princ
       return res.status(403).json(response);
     }
 
-    if (policy.decision === "approval_required") {
-      const pendingMessage: RelayMessage = {
-        id: generateMessageId(),
-        type,
-        from: deviceType,
-        to: targetType,
-        data: data || {},
-        timestamp: Date.now(),
-        senderDeviceId: deviceId,
-        targetDeviceId: targetDeviceId,
-      };
-
-      const approvalRequest: CommandApprovalRequest = {
-        approval_id: approvalId!,
-        session_id: sessionId,
-        created_at: Date.now(),
-        status: "pending",
-        requested_by: deviceId,
-        command_message: pendingMessage,
-        policy: {
-          decision: "approval_required",
-          rule_id: policy.ruleId,
-          risk_level: policy.riskLevel,
-          reasons: policy.reasons,
-        },
-        resolved_at: null,
-        resolved_by: null,
-        resolution_reason: null,
-      };
-
-      await createCommandApproval(sessionId, approvalRequest);
-
-      const response: ApiResponse<{
-        approvalId: string;
-        commandId: string | null;
-        policyDecision: string;
-        riskLevel: string;
-        reasons: string[];
-      }> = {
-        success: false,
-        error: "Approval required before command dispatch",
-        data: {
-          approvalId: approvalId!,
-          commandId: extractCommandId(data),
-          policyDecision: policy.decision,
-          riskLevel: policy.riskLevel,
-          reasons: policy.reasons,
-        },
-        timestamp: Date.now(),
-      };
-      return res.status(403).json(response);
-    }
-
-    if (principal.role === "mobile" && !await relaySecurity.claimCommand(principal, data.id, data.deadline)) {
-      return res.status(409).json({ success: false, errorCode: "DUPLICATE_COMMAND", error: "Command already accepted", timestamp: Date.now() });
-    }
-
     // 메시지 생성
     const message: RelayMessage = {
       id: generateMessageId(),
@@ -437,8 +239,9 @@ async function handler(req: VercelRequest, res: VercelResponse, principal: Princ
       targetDeviceId: targetDeviceId,  // 유니캐스트 응답용 - 특정 클라이언트에게만 전송
     };
 
-    // 메시지 큐에 추가
-    await sendMessage(sessionId, message);
+    // 메시지 큐에 추가: a reply goes only to the phone that asked; anything else to every live phone
+    const recipients = targetDeviceId ? [targetDeviceId] : session.mobileDeviceIds ?? [];
+    await sendMessage(sessionId, message, recipients);
 
     const response: ApiResponse<{
       messageId: string;
@@ -460,8 +263,8 @@ async function handler(req: VercelRequest, res: VercelResponse, principal: Princ
 
     return res.status(200).json(response);
   } catch (error) {
-    if (error instanceof SecurityError) return securityFailure(res, error);
-    console.error("Send API operation failed");
+    if (error instanceof SecurityError) return securityFailure(res, error, req);
+    logUnexpected(req, error, "RELAY_OPERATION_FAILED");
     const response: ApiResponse = {
       success: false,
       error: "Relay operation failed",

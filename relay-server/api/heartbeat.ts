@@ -1,6 +1,6 @@
-import { withRelayAuth } from "../lib/relay-auth.js";
+import { logUnexpected, withRelayAuth } from "../lib/relay-auth.js";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { getSession, updatePcLastSeen } from "../lib/store.js";
+import { getSessionRecord, updatePcLastSeen } from "../lib/store.js";
 import { ApiResponse } from "../lib/types.js";
 
 /**
@@ -57,7 +57,7 @@ async function handler(
       return res.status(400).json(response);
     }
 
-    const session = await getSession(sessionId);
+    const session = await getSessionRecord(sessionId);
     if (!session) {
       const response: ApiResponse = {
         success: false,
@@ -76,7 +76,7 @@ async function handler(
       return res.status(403).json(response);
     }
 
-    await updatePcLastSeen(sessionId, deviceId);
+    await updatePcLastSeen(sessionId, session.expiresAt);
 
     const response: ApiResponse<{ ok: boolean }> = {
       success: true,
@@ -85,7 +85,7 @@ async function handler(
     };
     return res.status(200).json(response);
   } catch (error) {
-    console.error("Relay operation failed");
+    logUnexpected(req, error, "RELAY_OPERATION_FAILED");
     const response: ApiResponse = {
       success: false,
       error:

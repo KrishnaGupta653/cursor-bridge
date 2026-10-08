@@ -6,7 +6,6 @@ import {
   REDIS_KEYS,
   TTL,
   CommandEvent,
-  CommandApprovalRequest,
 } from "./types.js";
 
 // Upstash Redis 클라이언트 (lazy initialization)
@@ -37,150 +36,77 @@ function getRedis(): Redis {
   return _redis;
 }
 
-// 호환성을 위한 redis 객체
-const redis = {
-  set: (...args: Parameters<Redis["set"]>) => getRedis().set(...args),
-  get: <T>(...args: Parameters<Redis["get"]>) => getRedis().get<T>(...args),
-  del: (...args: Parameters<Redis["del"]>) => getRedis().del(...args),
-  lpush: (...args: Parameters<Redis["lpush"]>) => getRedis().lpush(...args),
-  rpop: <T>(...args: Parameters<Redis["rpop"]>) => getRedis().rpop<T>(...args),
-  llen: (...args: Parameters<Redis["llen"]>) => getRedis().llen(...args),
-  expire: (...args: Parameters<Redis["expire"]>) => getRedis().expire(...args),
-  lrange: <T>(key: string, start: number, stop: number) =>
-    getRedis().lrange<T>(key, start, stop),
-  ltrim: (...args: Parameters<Redis["ltrim"]>) => getRedis().ltrim(...args),
-  sadd: (...args: Parameters<Redis["sadd"]>) => getRedis().sadd(...args),
-  smembers: <T extends unknown[]>(...args: Parameters<Redis["smembers"]>) =>
-    getRedis().smembers<T>(...args),
-  srem: (...args: Parameters<Redis["srem"]>) => getRedis().srem(...args),
-};
+// Commands issued in the same tick share one HTTP round trip (Upstash auto-pipelining),
+// so independent reads/writes below are started together with Promise.all.
 
-// 세션 생성
-export async function createSession(sessionId: string): Promise<Session> {
-  try {
-    const now = Date.now();
-    const session: Session = {
-      sessionId,
-      createdAt: now,
-      expiresAt: now + TTL.session * 1000,
-    };
+/** Phones poll at least every 10 s while open; one silent for longer is no longer delivered to. */
+export const MOBILE_STALE_MS = 2 * 60 * 1000;
+const MAX_QUEUE_LENGTH = 1000;
 
-    await redis.set(REDIS_KEYS.session(sessionId), JSON.stringify(session), {
-      ex: TTL.session,
-    });
+/** Session JSON as stored. Records written before phones moved to their own set may still carry them. */
+type StoredSession = Session & { pcPinHash?: string };
 
-    // 세션 목록에 추가
-    await redis.sadd(REDIS_KEYS.sessionList(), sessionId);
-    await redis.expire(REDIS_KEYS.sessionList(), TTL.session);
-
-    return session;
-  } catch (error) {
-    console.error("createSession error:", error);
-    throw new Error(
-      `Failed to create session: ${
-        error instanceof Error ? error.message : "Unknown error"
-      }`
-    );
-  }
+function parse<T>(data: unknown): T | null {
+  if (data == null) return null;
+  return (typeof data === "string" ? JSON.parse(data) : data) as T;
 }
 
-// 세션 조회
+// 세션 생성 (expiresAt: the credential's absolute expiry; the record never outlives it)
+export async function createSession(sessionId: string, expiresAt: number): Promise<Session> {
+  const session: Session = { sessionId, createdAt: Date.now(), expiresAt };
+  await getRedis().set(REDIS_KEYS.session(sessionId), JSON.stringify(session), { pxat: expiresAt });
+  return session;
+}
+
+/** The stored record only (no phone/last-seen lookups). */
+export async function getSessionRecord(sessionId: string): Promise<StoredSession | null> {
+  return parse<StoredSession>(await getRedis().get(REDIS_KEYS.session(sessionId)));
+}
+
+// 세션 조회: record + phones that polled recently + the Mac's last-seen time
 export async function getSession(sessionId: string): Promise<Session | null> {
-  const data = await redis.get<string>(REDIS_KEYS.session(sessionId));
-  if (!data) return null;
-  return typeof data === "string" ? JSON.parse(data) : data;
+  const redis = getRedis();
+  const [raw, live, pcSeen] = await Promise.all([
+    redis.get(REDIS_KEYS.session(sessionId)),
+    redis.zrange<unknown[]>(REDIS_KEYS.sessionMobiles(sessionId), Date.now() - MOBILE_STALE_MS, "+inf", { byScore: true }),
+    redis.get(REDIS_KEYS.pcLastSeen(sessionId)),
+  ]);
+  const stored = parse<StoredSession>(raw);
+  if (!stored) return null;
+  const mobiles = new Set([...(stored.mobileDeviceIds ?? []), ...(live ?? []).map(String)]);
+  const pcLastSeenAt = Math.max(Number(pcSeen) || 0, stored.pcLastSeenAt ?? 0);
+  return {
+    sessionId: stored.sessionId,
+    pcDeviceId: stored.pcDeviceId,
+    ...(pcLastSeenAt ? { pcLastSeenAt } : {}),
+    mobileDeviceIds: [...mobiles],
+    createdAt: stored.createdAt,
+    expiresAt: stored.expiresAt,
+  };
 }
 
-/** 세션 ID 목록 (디버그·스토어 공통 인터페이스) */
-export async function getSessionIds(): Promise<string[]> {
-  const ids = await redis.smembers<string[]>(REDIS_KEYS.sessionList());
-  return Array.isArray(ids) ? ids : [];
-}
-
-/** PC 폴링 시 호출. session.pcDeviceId === deviceId일 때만 pcLastSeenAt 갱신 */
-export async function updatePcLastSeen(
+/** Records that [deviceId] is alive. Called on every poll; expires with the session. */
+export function markSeen(
   sessionId: string,
-  deviceId: string
-): Promise<void> {
-  const session = await getSession(sessionId);
-  if (!session || session.pcDeviceId !== deviceId) return;
-  session.pcLastSeenAt = Date.now();
-  await redis.set(REDIS_KEYS.session(sessionId), JSON.stringify(session), {
-    ex: TTL.session,
-  });
+  deviceId: string,
+  deviceType: DeviceType,
+  expiresAt: number
+): Promise<unknown> {
+  const redis = getRedis();
+  const now = Date.now();
+  if (deviceType === "pc") {
+    return redis.set(REDIS_KEYS.pcLastSeen(sessionId), now, { pxat: expiresAt });
+  }
+  const key = REDIS_KEYS.sessionMobiles(sessionId);
+  return Promise.all([
+    redis.zadd(key, { score: now, member: deviceId }),
+    redis.pexpireat(key, expiresAt),
+  ]);
 }
 
-// PC가 N ms 이상 폴링하지 않으면 "끊어진 것"으로 간주 (재접속 허용)
-const PC_STALE_MS = 2 * 60 * 1000; // 2분
-
-// PC deviceId가 없거나, PC가 오래 폴링하지 않은(stale) 세션 찾기
-export async function findSessionsWaitingForPC(): Promise<Session[]> {
-  try {
-    const sessionIds = await redis.smembers<string[]>(REDIS_KEYS.sessionList());
-    if (!sessionIds || sessionIds.length === 0) {
-      return [];
-    }
-
-    const now = Date.now();
-    const waitingSessions: Session[] = [];
-
-    for (const sid of sessionIds) {
-      const session = await getSession(sid);
-      if (!session) continue;
-      const noPc = !session.pcDeviceId;
-      const pcStale =
-        session.pcDeviceId &&
-        (session.pcLastSeenAt == null ||
-          now - session.pcLastSeenAt > PC_STALE_MS);
-      if (noPc || pcStale) {
-        waitingSessions.push(session);
-      }
-    }
-
-    // mobileDeviceIds가 있는 세션을 우선순위로 정렬 (최신순)
-    waitingSessions.sort((a, b) => {
-      // mobileDeviceIds가 있는 세션 우선
-      const aHasMobile = a.mobileDeviceIds && a.mobileDeviceIds.length > 0;
-      const bHasMobile = b.mobileDeviceIds && b.mobileDeviceIds.length > 0;
-      if (aHasMobile && !bHasMobile) return -1;
-      if (!aHasMobile && bHasMobile) return 1;
-      // 둘 다 같으면 최신순
-      return b.createdAt - a.createdAt;
-    });
-
-    return waitingSessions;
-  } catch (error) {
-    console.error("findSessionsWaitingForPC error:", error);
-    return [];
-  }
-}
-
-/** 모바일이 1명 이상 연결된 세션 전체 (익스텐션이 연결 가능한 세션 목록) */
-export async function findSessionsWithMobile(): Promise<Session[]> {
-  try {
-    const sessionIds = await redis.smembers<string[]>(REDIS_KEYS.sessionList());
-    if (!sessionIds || sessionIds.length === 0) {
-      return [];
-    }
-
-    const sessions: Session[] = [];
-    for (const sid of sessionIds) {
-      const session = await getSession(sid);
-      if (!session) continue;
-      const hasMobile =
-        (session.mobileDeviceIds && session.mobileDeviceIds.length > 0) ||
-        !!(session as any).mobileDeviceId; // 레거시 단일 필드
-      if (hasMobile) {
-        sessions.push(session);
-      }
-    }
-
-    sessions.sort((a, b) => b.createdAt - a.createdAt);
-    return sessions;
-  } catch (error) {
-    console.error("findSessionsWithMobile error:", error);
-    return [];
-  }
+/** Heartbeat: the caller has checked that [sessionId]'s record names this Mac. */
+export async function updatePcLastSeen(sessionId: string, expiresAt: number): Promise<void> {
+  await markSeen(sessionId, "", "pc", expiresAt);
 }
 
 // 세션에 디바이스 연결
@@ -189,141 +115,69 @@ export async function joinSession(
   deviceId: string,
   deviceType: DeviceType
 ): Promise<Session | null> {
-  const session = await getSession(sessionId);
-  if (!session) return null;
-
-  // 세션 업데이트
-  if (deviceType === "pc") {
-    session.pcDeviceId = deviceId;
-    session.pcLastSeenAt = Date.now();
-  } else {
-    // 멀티 클라이언트 지원: 배열에 추가 (중복 방지)
-    if (!session.mobileDeviceIds) {
-      session.mobileDeviceIds = [];
-    }
-    if (!session.mobileDeviceIds.includes(deviceId)) {
-      session.mobileDeviceIds.push(deviceId);
-    }
+  const stored = await getSessionRecord(sessionId);
+  if (!stored) return null;
+  const writes: Promise<unknown>[] = [markSeen(sessionId, deviceId, deviceType, stored.expiresAt)];
+  if (deviceType === "pc" && stored.pcDeviceId !== deviceId) {
+    writes.push(getRedis().set(REDIS_KEYS.session(sessionId),
+      JSON.stringify({ ...stored, pcDeviceId: deviceId }), { pxat: stored.expiresAt }));
   }
-
-  await redis.set(REDIS_KEYS.session(sessionId), JSON.stringify(session), {
-    ex: TTL.session,
-  });
-
-  // 디바이스 → 세션 매핑 저장
-  await redis.set(REDIS_KEYS.deviceSession(deviceId), sessionId, {
-    ex: TTL.device,
-  });
-
-  return session;
+  await Promise.all(writes);
+  return getSession(sessionId);
 }
 
-/** PC가 설정한 PIN 해시 저장 (모바일은 이 PIN을 알아야 접속 가능) */
-export async function setSessionPinHash(
-  sessionId: string,
-  pinHash: string
-): Promise<void> {
-  const session = await getSession(sessionId);
-  if (!session) return;
-  session.pcPinHash = pinHash;
-  await redis.set(REDIS_KEYS.session(sessionId), JSON.stringify(session), {
-    ex: TTL.session,
-  });
-}
-
-// 세션에서 디바이스 연결 해제
-export async function leaveSession(
-  sessionId: string,
-  deviceId: string,
-  deviceType: DeviceType
-): Promise<Session | null> {
-  const session = await getSession(sessionId);
-  if (!session) return null;
-
-  // 세션에서 디바이스 제거
-  if (deviceType === "pc") {
-    if (session.pcDeviceId === deviceId) {
-      session.pcDeviceId = undefined;
-    }
-  } else {
-    // 모바일 클라이언트 배열에서 제거
-    if (session.mobileDeviceIds) {
-      session.mobileDeviceIds = session.mobileDeviceIds.filter(
-        (id) => id !== deviceId
-      );
-    }
-    // 해당 클라이언트의 메시지 큐 삭제
-    await redis.del(REDIS_KEYS.messagesForDevice(sessionId, deviceId));
+// 세션에서 모바일 디바이스 연결 해제
+export async function leaveSession(sessionId: string, deviceId: string): Promise<void> {
+  const redis = getRedis();
+  const [stored] = await Promise.all([
+    getSessionRecord(sessionId),
+    redis.zrem(REDIS_KEYS.sessionMobiles(sessionId), deviceId),
+    redis.del(REDIS_KEYS.messagesForDevice(sessionId, deviceId)),
+  ]);
+  if (stored?.mobileDeviceIds?.includes(deviceId)) {
+    const mobileDeviceIds = stored.mobileDeviceIds.filter((id) => id !== deviceId);
+    await redis.set(REDIS_KEYS.session(sessionId), JSON.stringify({ ...stored, mobileDeviceIds }), { keepTtl: true });
   }
-
-  await redis.set(REDIS_KEYS.session(sessionId), JSON.stringify(session), {
-    ex: TTL.session,
-  });
-
-  // 디바이스 → 세션 매핑 삭제
-  await redis.del(REDIS_KEYS.deviceSession(deviceId));
-
-  return session;
 }
 
-// 디바이스의 세션 조회
-export async function getDeviceSession(
-  deviceId: string
-): Promise<string | null> {
-  return await redis.get<string>(REDIS_KEYS.deviceSession(deviceId));
-}
-
-// 메시지 전송 (큐에 추가)
+/**
+ * 메시지 전송 (큐에 추가). PC → Mobile goes only to [recipients] (the target phone, or every
+ * live phone for a broadcast); phones that stopped polling are pruned from the session.
+ */
 export async function sendMessage(
   sessionId: string,
-  message: RelayMessage
+  message: RelayMessage,
+  recipients: string[] = []
 ): Promise<void> {
-  if (message.to === "mobile") {
-    // PC → Mobile: 항상 모든 모바일 디바이스 큐 + 레거시 큐에 전송 (응답 누락 방지)
-    // targetDeviceId가 있어도 브로드캐스트로 폴백해 최소 한 클라이언트는 응답을 받도록 함
-    const session = await getSession(sessionId);
-    if (
-      session &&
-      session.mobileDeviceIds &&
-      session.mobileDeviceIds.length > 0
-    ) {
-      for (const deviceId of session.mobileDeviceIds) {
-        const queueKey = REDIS_KEYS.messagesForDevice(sessionId, deviceId);
-        await redis.lpush(queueKey, JSON.stringify(message));
-        await redis.expire(queueKey, TTL.message);
-      }
-    }
-    const legacyQueueKey = REDIS_KEYS.messagesPC2Mobile(sessionId);
-    await redis.lpush(legacyQueueKey, JSON.stringify(message));
-    await redis.expire(legacyQueueKey, TTL.message);
-  } else {
-    // Mobile → PC: 세션 단위 큐에 메시지 추가
-    const queueKey = REDIS_KEYS.messagesMobile2PC(sessionId);
-    await redis.lpush(queueKey, JSON.stringify(message));
-    await redis.expire(queueKey, TTL.message);
-  }
+  const redis = getRedis();
+  const payload = JSON.stringify(message);
+  const toMobile = message.to === "mobile";
+  const queues = toMobile
+    ? recipients.map((deviceId) => REDIS_KEYS.messagesForDevice(sessionId, deviceId))
+    : [REDIS_KEYS.messagesMobile2PC(sessionId)];
+  await Promise.all([
+    ...queues.flatMap((queueKey) => [
+      redis.lpush(queueKey, payload),
+      redis.ltrim(queueKey, 0, MAX_QUEUE_LENGTH - 1),
+      redis.expire(queueKey, TTL.message),
+    ]),
+    ...(toMobile
+      ? [redis.zremrangebyscore(REDIS_KEYS.sessionMobiles(sessionId), "-inf", `(${Date.now() - MOBILE_STALE_MS}`)]
+      : []),
+  ]);
 }
 
-// 메시지 수신 (큐에서 가져오기)
+// 메시지 수신 (큐에서 가져오기): phones read their own queue, the Mac reads the session queue
 export async function receiveMessages(
   sessionId: string,
   deviceType: DeviceType,
   limit: number = 10,
-  deviceId?: string // 모바일 클라이언트의 경우 deviceId 필요
+  deviceId?: string
 ): Promise<RelayMessage[]> {
-  let queueKey: string;
-
-  if (deviceType === "mobile") {
-    // 모바일: deviceId가 있으면 개별 큐, 없으면 레거시 세션 단위 큐
-    if (deviceId) {
-      queueKey = REDIS_KEYS.messagesForDevice(sessionId, deviceId);
-    } else {
-      queueKey = REDIS_KEYS.messagesPC2Mobile(sessionId);
-    }
-  } else {
-    // PC: 세션 단위 큐
-    queueKey = REDIS_KEYS.messagesMobile2PC(sessionId);
-  }
+  if (deviceType === "mobile" && !deviceId) return [];
+  const queueKey = deviceType === "mobile"
+    ? REDIS_KEYS.messagesForDevice(sessionId, deviceId!)
+    : REDIS_KEYS.messagesMobile2PC(sessionId);
 
   // RPOP으로 오래된 메시지부터 가져오기 (one command for the whole batch)
   const batch = await getRedis().rpop<unknown[]>(queueKey, Math.max(1, limit));
@@ -331,68 +185,23 @@ export async function receiveMessages(
   return batch.map((data) => (typeof data === "string" ? JSON.parse(data) : data)) as RelayMessage[];
 }
 
-// 큐에 메시지가 있는지 확인
-export async function hasMessages(
-  sessionId: string,
-  deviceType: DeviceType,
-  deviceId?: string
-): Promise<boolean> {
-  let queueKey: string;
-
-  if (deviceType === "mobile") {
-    if (deviceId) {
-      queueKey = REDIS_KEYS.messagesForDevice(sessionId, deviceId);
-    } else {
-      queueKey = REDIS_KEYS.messagesPC2Mobile(sessionId);
-    }
-  } else {
-    queueKey = REDIS_KEYS.messagesMobile2PC(sessionId);
-  }
-
-  const length = await redis.llen(queueKey);
-  return length > 0;
-}
-
 // 세션 삭제
 export async function deleteSession(sessionId: string): Promise<void> {
-  const session = await getSession(sessionId);
-  if (!session) return;
-
-  const approvalIds = await redis.lrange<string>(
-    REDIS_KEYS.sessionApprovals(sessionId),
-    0,
-    -1
-  );
-
-  // 관련 키 모두 삭제
-  const keysToDelete = [
+  const redis = getRedis();
+  const [stored, members] = await Promise.all([
+    getSessionRecord(sessionId),
+    redis.zrange<unknown[]>(REDIS_KEYS.sessionMobiles(sessionId), 0, -1),
+  ]);
+  const devices = new Set([...(stored?.mobileDeviceIds ?? []), ...(members ?? []).map(String)]);
+  await redis.del(
     REDIS_KEYS.session(sessionId),
+    REDIS_KEYS.sessionMobiles(sessionId),
+    REDIS_KEYS.pcLastSeen(sessionId),
     REDIS_KEYS.messagesPC2Mobile(sessionId),
     REDIS_KEYS.messagesMobile2PC(sessionId),
     REDIS_KEYS.commandEvents(sessionId),
-    REDIS_KEYS.sessionApprovals(sessionId),
-  ];
-  if (Array.isArray(approvalIds)) {
-    for (const approvalId of approvalIds) {
-      keysToDelete.push(REDIS_KEYS.commandApproval(approvalId));
-    }
-  }
-
-  if (session.pcDeviceId) {
-    keysToDelete.push(REDIS_KEYS.deviceSession(session.pcDeviceId));
-  }
-  // 모든 모바일 클라이언트의 디바이스 매핑 및 메시지 큐 삭제
-  if (session.mobileDeviceIds && session.mobileDeviceIds.length > 0) {
-    for (const deviceId of session.mobileDeviceIds) {
-      keysToDelete.push(REDIS_KEYS.deviceSession(deviceId));
-      keysToDelete.push(REDIS_KEYS.messagesForDevice(sessionId, deviceId));
-    }
-  }
-
-  await redis.del(...keysToDelete);
-
-  // 세션 목록에서도 제거
-  await redis.srem(REDIS_KEYS.sessionList(), sessionId);
+    ...[...devices].map((deviceId) => REDIS_KEYS.messagesForDevice(sessionId, deviceId))
+  );
 }
 
 const MAX_COMMAND_EVENTS_PER_SESSION = 500;
@@ -401,125 +210,14 @@ export async function appendCommandEvent(
   sessionId: string,
   event: CommandEvent
 ): Promise<void> {
+  const redis = getRedis();
   const key = REDIS_KEYS.commandEvents(sessionId);
-  await redis.lpush(key, JSON.stringify(event));
-  await redis.ltrim(key, 0, MAX_COMMAND_EVENTS_PER_SESSION - 1);
-  await redis.expire(key, TTL.session);
+  await Promise.all([
+    redis.lpush(key, JSON.stringify(event)),
+    redis.ltrim(key, 0, MAX_COMMAND_EVENTS_PER_SESSION - 1),
+    redis.expire(key, TTL.session),
+  ]);
 }
-
-export async function listCommandEvents(
-  sessionId: string,
-  limit: number = 50
-): Promise<CommandEvent[]> {
-  const cappedLimit = Math.min(Math.max(limit, 1), 200);
-  const raw = await redis.lrange<string>(keyForEvents(sessionId), 0, cappedLimit - 1);
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .map((item) => (typeof item === "string" ? JSON.parse(item) : item))
-    .filter(Boolean) as CommandEvent[];
-}
-
-function keyForEvents(sessionId: string): string {
-  return REDIS_KEYS.commandEvents(sessionId);
-}
-
-export async function createCommandApproval(
-  sessionId: string,
-  approval: CommandApprovalRequest
-): Promise<void> {
-  await redis.set(
-    REDIS_KEYS.commandApproval(approval.approval_id),
-    JSON.stringify(approval),
-    {
-      ex: TTL.session,
-    }
-  );
-  await redis.lpush(REDIS_KEYS.sessionApprovals(sessionId), approval.approval_id);
-  await redis.expire(REDIS_KEYS.sessionApprovals(sessionId), TTL.session);
-}
-
-export async function getCommandApproval(
-  approvalId: string
-): Promise<CommandApprovalRequest | null> {
-  const raw = await redis.get<string>(REDIS_KEYS.commandApproval(approvalId));
-  if (!raw) return null;
-  return (typeof raw === "string" ? JSON.parse(raw) : raw) as CommandApprovalRequest;
-}
-
-export async function listPendingCommandApprovals(
-  sessionId: string,
-  limit: number = 50
-): Promise<CommandApprovalRequest[]> {
-  const cappedLimit = Math.min(Math.max(limit, 1), 200);
-  const approvalIds = await redis.lrange<string>(
-    REDIS_KEYS.sessionApprovals(sessionId),
-    0,
-    -1
-  );
-  if (!Array.isArray(approvalIds) || approvalIds.length === 0) return [];
-
-  const pending: CommandApprovalRequest[] = [];
-  for (const approvalId of approvalIds) {
-    if (pending.length >= cappedLimit) break;
-    const approval = await getCommandApproval(approvalId);
-    if (!approval) continue;
-    if (approval.status !== "pending") continue;
-    pending.push(approval);
-  }
-  return pending;
-}
-
-export async function listCommandApprovals(
-  sessionId: string,
-  limit: number = 50
-): Promise<CommandApprovalRequest[]> {
-  const cappedLimit = Math.min(Math.max(limit, 1), 200);
-  const approvalIds = await redis.lrange<string>(
-    REDIS_KEYS.sessionApprovals(sessionId),
-    0,
-    -1
-  );
-  if (!Array.isArray(approvalIds) || approvalIds.length === 0) return [];
-
-  const approvals: CommandApprovalRequest[] = [];
-  for (const approvalId of approvalIds) {
-    if (approvals.length >= cappedLimit) break;
-    const approval = await getCommandApproval(approvalId);
-    if (!approval) continue;
-    approvals.push(approval);
-  }
-  return approvals;
-}
-
-export async function resolveCommandApproval(
-  approvalId: string,
-  sessionId: string,
-  action: "approve" | "reject",
-  resolvedBy?: string,
-  reason?: string
-): Promise<CommandApprovalRequest | null> {
-  const approval = await getCommandApproval(approvalId);
-  if (!approval) return null;
-  if (approval.session_id !== sessionId) return null;
-  if (approval.status !== "pending") return approval;
-
-  approval.status = action === "approve" ? "approved" : "rejected";
-  approval.resolved_at = Date.now();
-  approval.resolved_by = resolvedBy ?? null;
-  approval.resolution_reason = reason ?? null;
-
-  await redis.set(
-    REDIS_KEYS.commandApproval(approval.approval_id),
-    JSON.stringify(approval),
-    {
-      ex: TTL.session,
-    }
-  );
-
-  return approval;
-}
-
-export { redis };
 
 /** Atomic security operations; never use destructive queue helpers for credentials. */
 export async function securityOperation(action: string, key: string, value: unknown, ttl: number): Promise<any> {

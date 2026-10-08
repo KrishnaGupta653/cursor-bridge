@@ -21,28 +21,10 @@ export default async function handler(
     });
     return res.end();
   }
-  
-  const useSupabase = !!process.env.SUPABASE_URL;
-  const hasRedisUrl = !!process.env.UPSTASH_REDIS_REST_URL;
-  const hasRedisToken = !!process.env.UPSTASH_REDIS_REST_TOKEN;
-  const hasSupabaseKey = !!(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY);
 
-  const response: ApiResponse<{
-    status: string;
-    version: string;
-    store: 'supabase' | 'redis';
-    redis?: { urlSet: boolean; tokenSet: boolean };
-    supabase?: { urlSet: boolean; keySet: boolean };
-  }> = {
+  const response: ApiResponse<{ status: string }> = {
     success: true,
-    data: {
-      status: 'healthy',
-      version: '1.0.0',
-      store: useSupabase ? 'supabase' : 'redis',
-      ...(useSupabase
-        ? { supabase: { urlSet: true, keySet: hasSupabaseKey } }
-        : { redis: { urlSet: hasRedisUrl, tokenSet: hasRedisToken } }),
-    },
+    data: { status: 'healthy' },
     timestamp: Date.now(),
   };
   

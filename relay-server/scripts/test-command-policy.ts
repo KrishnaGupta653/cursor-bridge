@@ -41,5 +41,7 @@ for (const input of [
   { messageType: "agent_stop", data: { chatId: CHAT } },
   { messageType: "approve_action", data: { chatId: CHAT, requestId: "req-abc123", confirmed: true } },
   { messageType: "reject_action", data: { chatId: CHAT, requestId: "req-abc123", confirmed: true } },
+  { messageType: "stop_prompt", data: { type: "stop_prompt", id: "c1" } },
 ]) assert.equal(evaluateCommandPolicy(input).decision, "allow");
-console.log("PASS: 19 denied capability/alias cases and 16 allowed typed messages");
+assert.equal(evaluateCommandPolicy({ messageType: "stop_prompt", data: { type: "execute_command" } }).decision, "deny");
+console.log("PASS: 20 denied capability/alias cases and 17 allowed typed messages");

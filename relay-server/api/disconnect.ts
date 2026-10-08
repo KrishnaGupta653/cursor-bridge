@@ -6,6 +6,6 @@ export default withRelayAuth(async (req, res, principal) => {
   // Revoke before cleanup: a failed cleanup must not preserve access.
   await relaySecurity.revoke(principal);
   if (principal.role === "pc") await deleteSession(principal.sessionId);
-  else await leaveSession(principal.sessionId, principal.deviceId, principal.role);
+  else await leaveSession(principal.sessionId, principal.deviceId);
   return res.status(200).json({ success: true });
 });

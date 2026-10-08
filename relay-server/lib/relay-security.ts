@@ -13,13 +13,16 @@ const hash = (value: string) => createHash("sha256").update(value).digest("hex")
 export const validSessionId = (value: unknown): value is string => typeof value === "string" && /^[A-Z0-9]{6,32}$/.test(value);
 export const validDeviceId = (value: unknown): value is string => typeof value === "string" && /^[a-zA-Z0-9:_-]{1,128}$/.test(value);
 export const newSessionId = () => randomBytes(9).toString("hex").toUpperCase();
+const AUTH_FAILURES_PER_IP_PER_MINUTE = 60;
 
 /** Opaque capabilities are verified by a shared store, not process-local state. */
 export class RelaySecurity {
   constructor(readonly store: SecurityStore, private now = Date.now) {}
+  private rateKey(key: string): string {
+    return `rate:${hash(key)}:${Math.floor(this.now() / 60_000)}`;
+  }
   async limit(key: string, limit: number): Promise<void> {
-    const bucket = Math.floor(this.now() / 60_000);
-    if (await this.store.increment(`rate:${hash(key)}:${bucket}`, 120) > limit) {
+    if (await this.store.increment(this.rateKey(key), 120) > limit) {
       throw new SecurityError(429, "RATE_LIMITED");
     }
   }
@@ -29,7 +32,9 @@ export class RelaySecurity {
     return state;
   }
   async state(sessionId: string): Promise<SessionSecurity> {
-    const state = await this.store.get<SessionSecurity>(`session:${sessionId}`);
+    return this.live(await this.store.get<SessionSecurity>(`session:${sessionId}`));
+  }
+  private live(state: SessionSecurity | null): SessionSecurity {
     if (!state || state.expiresAt <= this.now()) throw new SecurityError(401, "CREDENTIAL_INVALID_OR_EXPIRED");
     return state;
   }
@@ -42,19 +47,34 @@ export class RelaySecurity {
     }
     return { token, principal };
   }
-  async authenticate(token: unknown): Promise<Principal> {
+  /**
+   * Failed lookups are counted per client IP; a valid credential is never refused because of
+   * other clients' failures. [sessionHint] lets the session state be fetched in the same round trip.
+   */
+  async authenticate(token: unknown, clientIp = "unknown", sessionHint?: string): Promise<Principal> {
     if (typeof token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw new SecurityError(401, "CREDENTIAL_REQUIRED");
-    await this.limit("authentication-attempts-global", 3600);
     const verifier = hash(token);
-    const principal = await this.store.get<Principal>(`token:${verifier}`);
-    if (!principal || principal.expiresAt <= this.now() ||
-        typeof principal.verifier !== "string" || principal.verifier.length !== 64 ||
-        !timingSafeEqual(Buffer.from(verifier), Buffer.from(principal.verifier))) {
-      throw new SecurityError(401, "CREDENTIAL_INVALID_OR_EXPIRED");
+    const failuresKey = this.rateKey(`authentication-failures:${clientIp}`);
+    const [principal, failures, hinted] = await Promise.all([
+      this.store.get<Principal>(`token:${verifier}`),
+      this.store.get<number>(failuresKey),
+      sessionHint ? this.store.get<SessionSecurity>(`session:${sessionHint}`) : null,
+    ]);
+    try {
+      if (!principal || principal.expiresAt <= this.now() ||
+          typeof principal.verifier !== "string" || principal.verifier.length !== 64 ||
+          !timingSafeEqual(Buffer.from(verifier), Buffer.from(principal.verifier))) {
+        throw new SecurityError(401, "CREDENTIAL_INVALID_OR_EXPIRED");
+      }
+      const state = principal.sessionId === sessionHint ? this.live(hinted) : await this.state(principal.sessionId);
+      if (state.epoch !== principal.epoch) throw new SecurityError(401, "CREDENTIAL_REVOKED");
+      return principal;
+    } catch (error) {
+      if (!(error instanceof SecurityError) || error.status !== 401) throw error;
+      if (Number(failures) >= AUTH_FAILURES_PER_IP_PER_MINUTE) throw new SecurityError(429, "RATE_LIMITED");
+      await this.store.increment(failuresKey, 120);
+      throw error;
     }
-    const state = await this.state(principal.sessionId);
-    if (state.epoch !== principal.epoch) throw new SecurityError(401, "CREDENTIAL_REVOKED");
-    return principal;
   }
   async invite(principal: Principal): Promise<string> {
     if (principal.role !== "pc") throw new SecurityError(403, "PC_CAPABILITY_REQUIRED");
@@ -68,11 +88,13 @@ export class RelaySecurity {
     if (!stored) throw new SecurityError(503, "PAIRING_ISSUANCE_FAILED");
     return pairingCode;
   }
-  async redeem(sessionId: string, deviceId: string, pairingCode: unknown) {
+  /** [beforeConsume] runs after the code is known valid and before it is used up; if it throws, the code stays valid. */
+  async redeem(sessionId: string, deviceId: string, pairingCode: unknown, beforeConsume?: () => Promise<void>) {
     if (typeof pairingCode !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(pairingCode)) throw new SecurityError(403, "PAIRING_CODE_REQUIRED");
     const key = `invite:${hash(pairingCode)}`;
     const preview = await this.store.get<{ sessionId: string }>(key);
     if (!preview || preview.sessionId !== sessionId) throw new SecurityError(403, "PAIRING_CODE_INVALID_OR_EXPIRED");
+    await beforeConsume?.();
     const invitation = await this.store.take<{ sessionId: string; epoch: string; expiresAt: number }>(key);
     const state = await this.state(sessionId);
     if (!invitation || invitation.sessionId !== sessionId || invitation.epoch !== state.epoch || invitation.expiresAt <= this.now()) {

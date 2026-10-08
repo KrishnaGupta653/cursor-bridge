@@ -16,7 +16,6 @@
     "test:redis": "tsc --noEmit false --declaration false --outDir .test-dist && node --test test/redis-integration.test.mjs"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.0",
     "@upstash/redis": "^1.34.0"
   },
   "devDependencies": {

@@ -1,16 +1,10 @@
-import { withRelayAuth } from "../lib/relay-auth.js";
+import { logUnexpected, withRelayAuth } from "../lib/relay-auth.js";
+import type { Principal } from "../lib/relay-security.js";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import {
-  receiveMessages,
-  getSession,
-  getDeviceSession,
-  updatePcLastSeen,
-} from "../lib/store.js";
-import { ApiResponse, RelayMessage, DeviceType } from "../lib/types.js";
+import { receiveMessages, markSeen } from "../lib/store.js";
+import { ApiResponse, RelayMessage } from "../lib/types.js";
 
-const PC_LAST_SEEN_REFRESH_MS = 30_000;
-
-async function handler(req: VercelRequest, res: VercelResponse) {
+async function handler(req: VercelRequest, res: VercelResponse, principal: Principal) {
   // CORS 헤더 설정
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -42,78 +36,14 @@ async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    const {
-      sessionId: querySessionId,
-      deviceId,
-      deviceType,
-      limit,
-    } = req.query;
-
-    // 입력 검증
-    if (!deviceType || typeof deviceType !== "string") {
-      const response: ApiResponse = {
-        success: false,
-        error: "deviceType is required",
-        timestamp: Date.now(),
-      };
-      return res.status(400).json(response);
-    }
-
-    if (deviceType !== "mobile" && deviceType !== "pc") {
-      const response: ApiResponse = {
-        success: false,
-        error: 'deviceType must be "mobile" or "pc"',
-        timestamp: Date.now(),
-      };
-      return res.status(400).json(response);
-    }
-
-    // 세션 ID 결정 (connect와 동일하게 대문자 정규화 — PC/모바일 동일 키 매칭)
-    let sessionId = querySessionId as string | undefined;
-    if (sessionId && typeof sessionId === "string") {
-      sessionId = sessionId.trim().toUpperCase();
-    }
-    if (!sessionId && deviceId && typeof deviceId === "string") {
-      sessionId = (await getDeviceSession(deviceId)) || undefined;
-    }
-
-    if (!sessionId) {
-      const response: ApiResponse = {
-        success: false,
-        error: "sessionId or deviceId is required",
-        timestamp: Date.now(),
-      };
-      return res.status(400).json(response);
-    }
-
-    // 세션 존재 확인
-    const session = await getSession(sessionId);
-    if (!session) {
-      const response: ApiResponse = {
-        success: false,
-        error: "Session not found",
-        timestamp: Date.now(),
-      };
-      return res.status(404).json(response);
-    }
-
-    // PC 폴링 시 생존 시각 갱신 (findSessionsWaitingForPC에서 stale 판단에 사용)
-    // The 30 s heartbeat also refreshes it, so a poll only writes when it has gone stale.
-    if (deviceType === "pc" && deviceId && typeof deviceId === "string" &&
-        session.pcDeviceId === deviceId &&
-        Date.now() - (session.pcLastSeenAt ?? 0) >= PC_LAST_SEEN_REFRESH_MS) {
-      await updatePcLastSeen(sessionId, deviceId);
-    }
-
-    // 메시지 가져오기
-    const maxLimit = Math.min(parseInt(limit as string) || 10, 50);
-    // deviceId가 있으면 개별 큐에서 메시지 수신 (멀티 클라이언트 지원)
-    const messages = await receiveMessages(
-      sessionId,
-      deviceType as DeviceType,
-      maxLimit,
-      deviceId as string | undefined
-    );
+    // Session, device and role come from the credential (authorize rejects mismatching query values).
+    const { sessionId, deviceId, role, expiresAt } = principal;
+    const maxLimit = Math.min(parseInt(req.query.limit as string) || 10, 50);
+    // Each poll refreshes this device's last-seen time (the Mac's liveness, a phone's delivery).
+    const [messages] = await Promise.all([
+      receiveMessages(sessionId, role, maxLimit, deviceId),
+      markSeen(sessionId, deviceId, role, expiresAt),
+    ]);
 
     const response: ApiResponse<{ messages: RelayMessage[]; count: number }> = {
       success: true,
@@ -126,7 +56,7 @@ async function handler(req: VercelRequest, res: VercelResponse) {
 
     return res.status(200).json(response);
   } catch (error) {
-    console.error("Relay operation failed");
+    logUnexpected(req, error, "RELAY_OPERATION_FAILED");
     const response: ApiResponse = {
       success: false,
       error: "Relay operation failed",
