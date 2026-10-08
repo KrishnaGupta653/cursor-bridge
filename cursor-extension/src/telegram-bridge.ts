@@ -23,6 +23,7 @@ import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 import { CLI_NOT_INSTALLED } from "./cli-handler";
+import { isStaleTelegramMessage, readTelegramOffset, writeTelegramOffset } from "./private-state";
 import { CommandHandler } from "./command-handler";
 import { CommandRouter } from "./command-router";
 import {
@@ -52,9 +53,6 @@ interface TgUserState {
   backend: "cli" | "cdp";
   /** Mirror agent replies + important events to this chat */
   sync: boolean;
-  sessionId?: string;
-  sessionsCache: Array<{ id: string; title: string; state?: string }>;
-  historyCache: Array<{ id: string; title: string; group?: string }>;
   /** Agents-window chat picked with /c_N or /newchat; plain text prompts it. */
   agentChatId?: string;
   chatsCache: Array<{ id: string; title: string; group: string }>;
@@ -83,26 +81,19 @@ const TG_TEXT_LIMIT = 3900;
 const HELP_TEXT = [
   "Cursor Remote",
   "",
-  "Everyday",
-  "/sessions        Every agent chat in every Cursor window",
-  "/use_2           Tap to pick session 2; then just type to prompt it",
-  "/to 2 <text>     Prompt session 2 without switching",
-  "/last            Full latest reply of the selected session (/last_2 for another)",
-  "/state           What the selected session is doing (/state_2)",
-  "",
   "Agents window",
   "/chats [search]  Chats grouped like Cursor's sidebar; tap /c_3, then just type",
+  "/last            Full latest reply of the open chat",
   "/newchat [text]  Start a new chat (optionally with a first prompt)",
   "/model [name]    List models, or switch the open chat's model",
   "/stop            Stop the agent",
   "Approval alerts carry /approve_<code> and /reject_<code>. Each asks you to confirm, and the code expires after 2 minutes.",
   "",
   "More",
-  "/history · /open_3   Past chats; open one in Cursor",
   "/new [text]      Fresh Cursor CLI chat",
   "/mode [m]        agent | ask | plan | debug | auto",
-  "/backend [b]     cdp (Cursor windows) | cli (Cursor CLI)",
-  "/plan · /messages · /file · /save",
+  "/backend [b]     cdp (Agents window chats) | cli (Cursor CLI)",
+  "/file · /save",
   "/sync [on|off]   Send replies here automatically (default on)",
   "/status · /whoami",
   "",
@@ -114,19 +105,11 @@ const BOT_COMMANDS = [
   { command: "newchat", description: "Start a new chat: /newchat text" },
   { command: "model", description: "List or switch models: /model name" },
   { command: "stop", description: "Stop the agent" },
-  { command: "sessions", description: "List agent chats in all Cursor windows" },
-  { command: "last", description: "Full latest reply of the selected session" },
-  { command: "state", description: "What the selected session is doing" },
-  { command: "to", description: "Prompt a session: /to 2 text" },
-  { command: "use", description: "Select a session: /use 2" },
-  { command: "history", description: "Past agent chats" },
-  { command: "open", description: "Open a past chat in Cursor: /open 3" },
+  { command: "last", description: "Full latest reply of the open chat" },
   { command: "new", description: "New Cursor CLI chat" },
   { command: "ask", description: "Send a prompt" },
   { command: "mode", description: "agent | ask | plan | debug | auto" },
-  { command: "backend", description: "cdp (Cursor windows) or cli" },
-  { command: "plan", description: "Current plan" },
-  { command: "messages", description: "Recent CLI chat messages" },
+  { command: "backend", description: "cdp (Agents window chats) or cli" },
   { command: "file", description: "Active file in Cursor" },
   { command: "save", description: "Save the active file" },
   { command: "sync", description: "Auto-send replies on/off" },
@@ -300,7 +283,7 @@ function stripBotCommand(text: string): { cmd: string; args: string } {
   }
   const cmd = m[1].toLowerCase();
   const args = (m[2] || "").trim();
-  // Telegram only makes space-free commands tappable, so lists offer /use_2 for "/use 2".
+  // Telegram only makes space-free commands tappable, so lists offer /c_2 for "/c 2" (older messages: /use_2).
   const tap = cmd.match(/^(use|state|last|open|c)_(\d+)$/) || cmd.match(/^(approve|reject|confirm)_([a-f0-9]{6})$/);
   if (tap) return { cmd: tap[1], args: tap[2] };
   return { cmd, args };
@@ -322,6 +305,7 @@ export class TelegramBridge {
   private mode: "botapi" | "mtproto" | null = null;
   private abort: AbortController | null = null;
   private offset = 0;
+  private offsetPath = "";
   private secretsPath: string;
   private lockPath = "";
   private token = "";
@@ -454,8 +438,6 @@ export class TelegramBridge {
         agentMode: "auto",
         backend,
         sync: true,
-        sessionsCache: [],
-        historyCache: [],
         chatsCache: [],
       };
       this.userState.set(userId, s);
@@ -512,6 +494,8 @@ export class TelegramBridge {
       };
     }
 
+    this.offsetPath = path.join(path.dirname(this.secretsPath), "telegram.offset");
+    this.offset = readTelegramOffset(this.offsetPath);
     this.token = loaded.secrets.botToken;
     this.allowed = new Set(loaded.secrets.allowedUserIds);
     this.allowedChats = new Set(loaded.secrets.allowedChatIds);
@@ -854,13 +838,6 @@ export class TelegramBridge {
     }
   }
 
-  private sessionTitle(chatId: number, sessionId: unknown): string | null {
-    if (typeof sessionId !== "string") return null;
-    const state = [...this.userState.values()].find((s) => s.chatId === chatId);
-    const title = state?.sessionsCache.find((s) => s.id === sessionId)?.title;
-    return title ? truncate(title, 60) : null;
-  }
-
   private resolveSyncTargets(msg: any): number[] {
     // Unattributed/global events are never routed to Telegram.
     return [...this.userState.entries()]
@@ -903,11 +880,10 @@ export class TelegramBridge {
           this.chunkByChat.delete(chatId);
           this.pendingByChat.delete(chatId);
           const body = text || buffered;
-          const title = this.sessionTitle(chatId, msg.sessionId);
           void this.sendText(
             chatId,
             body
-              ? `🤖 ${title ? `${title}\n\n` : ""}${body}`
+              ? `🤖 ${body}`
               : "The agent finished without a reply I could read. Try /last or check Cursor."
           );
         }
@@ -957,10 +933,10 @@ export class TelegramBridge {
       if (msg.type === "command_result" && msg.success === false) {
         const err =
           msg.command_type === "agent_prompt"
-            ? "Couldn't send to that session (window closed or composer not found). Run /sessions and try again."
+            ? "Couldn't send to that chat. Run /chats and pick it again."
             : msg.command_type === "cli_prompt"
               ? msg.error_message === CLI_NOT_INSTALLED
-                ? `${CLI_NOT_INSTALLED}, or pick a Cursor window with /sessions.`
+                ? `${CLI_NOT_INSTALLED}, or open an Agents-window chat with /chats.`
                 : "The Cursor CLI prompt failed. Check the Cursor Remote log in Cursor."
               : "Command failed. Check the Cursor Remote log in Cursor.";
         for (const chatId of targets) {
@@ -989,6 +965,7 @@ export class TelegramBridge {
         }
         for (const update of data.result || []) {
           this.offset = Math.max(this.offset, (update.update_id || 0) + 1);
+          writeTelegramOffset(this.offsetPath, this.offset);
           await this.handleUpdate(update);
         }
       } catch (e) {
@@ -1003,27 +980,6 @@ export class TelegramBridge {
 
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  private resolveIndexOrId(
-    arg: string,
-    cache: Array<{ id: string; title: string }>
-  ): string | null {
-    const a = arg.trim();
-    if (!a) return null;
-    if (/^\d+$/.test(a)) {
-      const n = Number(a);
-      if (n >= 1 && n <= cache.length) {
-        return cache[n - 1].id;
-      }
-      return null;
-    }
-    const byId = cache.find((x) => x.id === a || x.id.startsWith(a));
-    if (byId) return byId.id;
-    const byTitle = cache.find((x) =>
-      x.title.toLowerCase().includes(a.toLowerCase())
-    );
-    return byTitle?.id || a;
   }
 
   private async handleUpdate(update: any): Promise<void> {
@@ -1042,6 +998,10 @@ export class TelegramBridge {
     if (!Number.isSafeInteger(userId) || !Number.isSafeInteger(chatId) ||
         message.chat.type !== "private" || chatId !== userId ||
         !this.allowed.has(userId) || !this.allowedChats.has(chatId)) return;
+    if (isStaleTelegramMessage(message.date)) {
+      this.log(`Ignored a Telegram message sent ${Math.round(Date.now() / 1000 - message.date)}s ago`);
+      return;
+    }
 
     if (Date.now() - this.rateWindow >= 60_000) {
       this.rateWindow = Date.now();
@@ -1073,11 +1033,6 @@ export class TelegramBridge {
     text: string
   ): Promise<void> {
     const { cmd, args } = stripBotCommand(text);
-    if ((cmd === "plan" || ((cmd === "state" || (cmd === "last" && !state.agentChatId)) && !args)) && !state.sessionId) {
-      await this.sendText(chatId, "Select a session with /sessions and /use first.");
-      return;
-    }
-
 
     if (!cmd) {
       await this.sendPrompt(userId, chatId, state, text, false);
@@ -1099,8 +1054,8 @@ export class TelegramBridge {
 
       case "status": {
         const port = this.wsServer.getActualPort();
-        const cdp = await this.commandHandler.getCdpStatus();
-        const sessionInfo = await this.commandHandler.getSessionInfo(`telegram:${chatId}:${userId}`);
+        const cdp = (await this.call(userId, chatId, { type: "get_cdp_status" })).data;
+        const sessionInfo = (await this.call(userId, chatId, { type: "get_session_info" })).data;
         await this.sendText(
           chatId,
           [
@@ -1110,7 +1065,6 @@ export class TelegramBridge {
             `Mode: ${state.agentMode}`,
             `Backend: ${state.backend}`,
             `Sync: ${state.sync ? "on" : "off"}`,
-            state.sessionId ? `Selected session: ${state.sessionId}` : "",
             `CLI session: ${sessionInfo?.currentSessionId || "none"}`,
             `CDP: ${cdp?.connected ? "connected" : "off"} (${cdp?.activeSessionId || "no active"})`,
             `Secrets: ${this.secretsPath}`,
@@ -1185,11 +1139,8 @@ export class TelegramBridge {
         this.pendingByChat.delete(chatId);
         this.chunkByChat.delete(chatId);
         if (state.backend === "cli" && !state.agentChatId) {
-          await this.commandRouter.handleCommand({
-            type: "stop_prompt",
-            clientId: `telegram:${chatId}:${userId}`,
-          });
-          await this.sendText(chatId, "⏹ Stop requested.");
+          const r = await this.call(userId, chatId, { type: "stop_prompt" });
+          await this.sendText(chatId, r.ok ? "⏹ Stopped the CLI run." : `❌ ${r.error}`);
           return;
         }
         const r = await this.call(userId, chatId, { type: "agent_stop", chatId: state.agentChatId });
@@ -1330,114 +1281,6 @@ export class TelegramBridge {
         await this.sendPrompt(userId, chatId, state, args || "Hello", true);
         return;
 
-      case "sessions": {
-        const sessions = await this.loadSessions(state);
-        if (!sessions.length) {
-          await this.sendText(
-            chatId,
-            "No Cursor windows found. Session control is probably off.\nOn your Mac, run “Cursor Remote: Restart Cursor with Session Control”. Or use /new to chat through the Cursor CLI."
-          );
-          return;
-        }
-        const lines = sessions.map((s: any, i: number) => {
-          const n = i + 1;
-          const marker = state.sessionId === String(s.id) ? " ◀ selected" : "";
-          const last = s.latestMessage ? `\n   ${truncate(String(s.latestMessage), 100)}` : "";
-          return `${n}. ${s.title || s.id}${s.state ? ` [${s.state}]` : ""}${marker}${last}\n   /use_${n} · /last_${n} · /state_${n}`;
-        });
-        await this.sendText(
-          chatId,
-          `Sessions (${sessions.length}):\n\n${lines.join("\n\n")}\n\nTap /use_N, then just type. One-off: /to N <text>`
-        );
-        return;
-      }
-
-      case "use": {
-        if (!args) {
-          await this.sendText(chatId, "Usage: /use <number|id>");
-          return;
-        }
-        const id = await this.selectSession(chatId, state, args);
-        if (!id) return;
-        const st = await this.commandHandler.getAgentState(id);
-        await this.sendText(
-          chatId,
-          `Selected: ${st?.title || id}${st?.state ? ` [${st.state}]` : ""}\n\nNow just type to prompt it. /last shows its latest reply.`
-        );
-        return;
-      }
-
-      case "to": {
-        const m = args.match(/^(\S+)\s+([\s\S]+)$/);
-        if (!m) {
-          await this.sendText(chatId, "Usage: /to <number|id> <prompt>\nExample: /to 2 run the tests");
-          return;
-        }
-        if (!(await this.selectSession(chatId, state, m[1]))) return;
-        await this.sendPrompt(userId, chatId, state, m[2], false);
-        return;
-      }
-
-      case "history": {
-        const limit = Math.min(50, Math.max(1, Number(args) || 20));
-        const hist = await this.commandHandler.getAgentHistory();
-        const items = (hist.items || []).slice(0, limit);
-        state.historyCache = items.map((it: any) => ({
-          id: String(it.id),
-          title: String(it.title || it.id),
-          group: it.group ? String(it.group) : undefined,
-        }));
-        if (!state.historyCache.length) {
-          await this.sendText(
-            chatId,
-            `No agent history (${hist.support || "unavailable"}).\n${hist.note || ""}`
-          );
-          return;
-        }
-        const lines = state.historyCache.map(
-          (h, i) =>
-            `${i + 1}. ${h.title}${h.group ? ` (${h.group})` : ""}\n   id: ${h.id}`
-        );
-        await this.sendText(
-          chatId,
-          `History (${state.historyCache.length}/${hist.count || state.historyCache.length}):\n\n${lines.join("\n\n")}\n\nOpen: /open 1`
-        );
-        return;
-      }
-
-      case "open": {
-        if (!args) {
-          await this.sendText(chatId, "Usage: /open <number|id>");
-          return;
-        }
-        if (!state.historyCache.length) {
-          const hist = await this.commandHandler.getAgentHistory();
-          state.historyCache = (hist.items || []).map((it: any) => ({
-            id: String(it.id),
-            title: String(it.title || it.id),
-            group: it.group ? String(it.group) : undefined,
-          }));
-        }
-        const id = this.resolveIndexOrId(args, state.historyCache);
-        if (!id) {
-          await this.sendText(chatId, "Not found. Run /history first.");
-          return;
-        }
-        const result = await this.commandHandler.openAgentHistory(id);
-        if (!result.ok) {
-          await this.sendText(
-            chatId,
-            `Open failed: ${result.error || "unknown"}`
-          );
-          return;
-        }
-        await this.sendText(
-          chatId,
-          `Opened history chat.\nRun /sessions then /use to attach, or /state`
-        );
-        return;
-      }
-
       case "last": {
         if (!args && state.agentChatId) {
           const r = await this.call(userId, chatId, { type: "get_chat", chatId: state.agentChatId, limit: 10 });
@@ -1450,108 +1293,14 @@ export class TelegramBridge {
           );
           return;
         }
-        if (args && !(await this.selectSession(chatId, state, args))) return;
-        if (!state.sessionId) {
-          await this.sendText(chatId, "Select a session first: /sessions");
-          return;
-        }
-        const st = await this.commandHandler.getAgentState(state.sessionId);
-        const reply = [...(st?.messages || [])].reverse().find((m: any) => m.role === "assistant" && String(m.text || "").trim());
-        await this.sendText(
-          chatId,
-          reply ? `🤖 ${truncate(String(st?.title || ""), 60)}\n\n${String(reply.text).trim()}` : "No reply in that session yet."
-        );
-        return;
-      }
-
-      case "state": {
-        if (args && !(await this.selectSession(chatId, state, args))) return;
-        const st = await this.commandHandler.getAgentState(state.sessionId);
-        if (!st) {
-          await this.sendText(
-            chatId,
-            "No agent state. Enable CDP + /sessions /use, or send /ask"
-          );
-          return;
-        }
-        const msgs = (st.messages || [])
-          .slice(-8)
-          .map(
-            (m: any, i: number) =>
-              `${i + 1}. [${m.role || "?"}] ${truncate(String(m.text || m.content || ""), 200)}`
-          )
-          .join("\n");
-        await this.sendText(
-          chatId,
-          [
-            `Title: ${st.title || "?"}`,
-            `State: ${st.state || "?"}`,
-            `Model: ${st.model || "?"}`,
-            `Session: ${st.id || state.sessionId || "?"}`,
-            st.pendingApproval
-              ? `⚠️ Pending: ${truncate(String(st.pendingApproval.title || st.pendingApproval.detail || "yes"), 200)}`
-              : "",
-            "",
-            "Recent messages:",
-            msgs || "(none)",
-          ]
-            .filter((l) => l !== undefined)
-            .join("\n")
-        );
-        return;
-      }
-
-      case "plan": {
-        const st = await this.commandHandler.getAgentState(state.sessionId);
-        const plan = st?.plan;
-        if (!plan || !(plan as any).available) {
-          await this.sendText(chatId, "No plan available on current session.");
-          return;
-        }
-        const steps = ((plan as any).steps || [])
-          .map(
-            (s: any, i: number) =>
-              `${i + 1}. [${s.status || "?"}] ${truncate(String(s.title || s.text || s), 180)}`
-          )
-          .join("\n");
-        await this.sendText(
-          chatId,
-          `Plan: ${(plan as any).title || ""}\n\n${steps || "(empty)"}`
-        );
-        return;
-      }
-
-      case "messages": {
-        const limit = Math.min(40, Math.max(1, Number(args) || 15));
-        const history = await this.commandHandler.getChatHistory(
-          `telegram:${chatId}:${userId}`,
-          undefined,
-          undefined,
-          limit
-        );
-        const entries = history.entries || [];
-        if (!entries.length) {
-          await this.sendText(
-            chatId,
-            "No CLI chat messages yet. Send /ask something first."
-          );
-          return;
-        }
-        const lines = entries.map((e: any, i: number) => {
-          const role = e.role || e.type || "?";
-          const body = truncate(String(e.text || e.content || e.message || ""), 220);
-          return `${i + 1}. [${role}] ${body}`;
-        });
-        await this.sendText(
-          chatId,
-          `Messages (last ${lines.length}):\n\n${lines.join("\n")}`
-        );
+        await this.sendText(chatId, "Open a chat first: /chats then tap /c_N.");
         return;
       }
 
       case "file": {
-        const file = await this.commandHandler.getActiveFile();
-        if (!file) {
+        const r = await this.call(userId, chatId, { type: "get_active_file" });
+        const file = r.replies.find((x) => x.type === "command_result");
+        if (!r.ok || !file) {
           await this.sendText(chatId, "No active file in Cursor.");
           return;
         }
@@ -1564,22 +1313,15 @@ export class TelegramBridge {
       }
 
       case "save": {
-        try {
-          const result = await this.commandHandler.saveFile();
-          await this.sendText(
-            chatId,
-            result.success
-              ? `💾 Saved${result.path ? `: ${result.path}` : ""}`
-              : `❌ Save failed`
-          );
-        } catch (e) {
-          await this.sendText(
-            chatId,
-            `❌ ${e instanceof Error ? e.message : String(e)}`
-          );
-        }
+        const r = await this.call(userId, chatId, { type: "save_file" });
+        const result = r.replies.find((x) => x.type === "command_result");
+        await this.sendText(chatId, r.ok ? `💾 Saved${result?.path ? `: ${result.path}` : ""}` : `❌ ${r.error || "Save failed"}`);
         return;
       }
+
+      case "sessions": case "use": case "to": case "history": case "open": case "state": case "plan": case "messages":
+        await this.sendText(chatId, `/${cmd} was replaced by Agents-window chats: /chats, tap /c_N, then just type.`);
+        return;
 
       default:
         await this.sendText(
@@ -1587,31 +1329,6 @@ export class TelegramBridge {
           `Unknown /${cmd}\n\nSend /help for every command.`
         );
     }
-  }
-
-  private async loadSessions(state: TgUserState): Promise<any[]> {
-    await this.commandHandler.refreshCdpTargets();
-    const sessions = await this.commandHandler.listCdpSessions();
-    state.sessionsCache = sessions.map((s: any) => ({
-      id: String(s.id),
-      title: String(s.title || s.id),
-      state: s.state ? String(s.state) : undefined,
-    }));
-    return sessions;
-  }
-
-  /** Resolve /use-style argument, select it for this user, and report failures to the chat. */
-  private async selectSession(chatId: number, state: TgUserState, arg: string): Promise<string | null> {
-    if (!state.sessionsCache.length) await this.loadSessions(state);
-    const id = this.resolveIndexOrId(arg, state.sessionsCache);
-    if (!id || !this.commandHandler.selectCdpSession(id)) {
-      await this.sendText(chatId, `No session matches “${truncate(arg, 40)}”. Run /sessions for the current list.`);
-      return null;
-    }
-    state.sessionId = id;
-    state.agentChatId = undefined;
-    state.backend = "cdp";
-    return id;
   }
 
   private async sendPrompt(
@@ -1648,40 +1365,29 @@ export class TelegramBridge {
       return;
     }
 
-    if (state.backend === "cdp" && !newSession && !state.sessionId) {
-      await this.sendText(chatId, "Select a session with /sessions and /use first.");
+    if (state.backend === "cdp" && !newSession) {
+      await this.sendText(chatId, "Open a chat first: /chats then tap /c_N, or start one with /newchat <prompt>.");
       return;
     }
     this.pendingByChat.set(chatId, { userId, startedAt: Date.now() });
     this.chunkByChat.set(chatId, "");
     this.lastSyncChatId = chatId;
 
-    const type =
-      state.backend === "cdp" && !newSession ? "agent_prompt" : "cli_prompt";
-    const target =
-      type === "agent_prompt"
-        ? state.sessionsCache.find((s) => s.id === state.sessionId)?.title || "selected session"
-        : null;
-
     await this.sendText(
       chatId,
       newSession
         ? `🆕 New CLI session · ${state.agentMode} · working…`
         : !state.sync
-          ? `Sent${target ? ` to “${truncate(target, 60)}”` : ""}. Auto-replies are off: use /last, or /sync on.`
-          : target
-            ? `⏳ Sent to “${truncate(target, 60)}” — the reply will appear here.`
-            : `⏳ CLI · ${state.agentMode} · working…`
+          ? "Sent. Auto-replies are off: use /last, or /sync on."
+          : `⏳ CLI · ${state.agentMode} · working…`
     );
 
     await this.commandRouter.handleCommand({
-      type,
+      type: "cli_prompt",
       text,
       clientId: `telegram:${chatId}:${userId}`,
       newSession,
       agentMode: state.agentMode,
-      sessionId: state.sessionId,
-      agentBackend: state.backend,
     });
   }
 }

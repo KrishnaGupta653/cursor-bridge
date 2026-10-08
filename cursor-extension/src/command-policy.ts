@@ -7,12 +7,12 @@ const allowed = new Set([
   "agent_prompt", "cli_prompt", "insert_text",
   "list_chats", "get_chat", "watch_chat", "unwatch_chat", "get_composer_state", "list_models",
   "get_file_diff", "open_chat", "new_chat", "set_model", "set_mode", "agent_stop",
-  "approve_action", "reject_action",
+  "approve_action", "reject_action", "stop_prompt",
 ]);
 
 /** Commands that change what Cursor does; gated by cursorRemote.remoteActions and audited. */
 export const REMOTE_ACTIONS = new Set([
-  "open_chat", "new_chat", "set_model", "set_mode", "agent_stop", "approve_action", "reject_action",
+  "open_chat", "new_chat", "set_model", "set_mode", "agent_stop", "approve_action", "reject_action", "stop_prompt",
 ]);
 
 const CHAT_ID = /^[A-Za-z0-9-]{8,80}$/;
@@ -27,7 +27,7 @@ function validChat(v: unknown): boolean {
 export function remoteCommandError(command: {
   type: string; terminal?: unknown; prompt?: unknown; sessionId?: unknown;
   chatId?: unknown; requestId?: unknown; confirmed?: unknown; path?: unknown; mode?: unknown; model?: unknown;
-  newChat?: unknown;
+  newChat?: unknown; agentBackend?: unknown;
 }): string | null {
   if (!allowed.has(command.type)) return "Command is not an allowed remote capability";
   if (command.type === "insert_text" &&
@@ -37,9 +37,13 @@ export function remoteCommandError(command: {
   if (command.type === "insert_text" && command.prompt !== true && command.prompt !== "true") {
     return "Remote editor insertion is disabled; use a typed Agent prompt";
   }
-  if (command.type === "agent_prompt" && !validChat(command.chatId) && command.newChat !== true &&
-      (typeof command.sessionId !== "string" || !command.sessionId.trim())) {
-    return "Explicit sessionId required";
+  // Prompts only reach a named Agents-window chat (or a new one); a window-level sessionId
+  // would type into whatever text box that window shows.
+  if (command.type === "agent_prompt" && !validChat(command.chatId) && command.newChat !== true) {
+    return "Open a chat first: prompts need a chatId or newChat";
+  }
+  if (command.type === "insert_text" && command.agentBackend !== undefined && command.agentBackend !== "cli") {
+    return "Prompts to Cursor windows go through Agents-window chats";
   }
   if (NEEDS_CHAT.has(command.type) && !validChat(command.chatId)) return "Valid chatId required";
   if ((command.type === "approve_action" || command.type === "reject_action")) {

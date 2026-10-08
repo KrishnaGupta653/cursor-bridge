@@ -49,7 +49,8 @@ export class CursorSession {
   constructor(
     target: CdpTargetInfo,
     private readonly log: (msg: string) => void,
-    private readonly logError: (msg: string, err?: unknown) => void
+    private readonly logError: (msg: string, err?: unknown) => void,
+    private readonly onClosed?: (session: CursorSession) => void
   ) {
     this.id = `cursor-${target.id}`;
     this.targetId = target.id;
@@ -62,11 +63,19 @@ export class CursorSession {
       await this.socket.dispose();
       this.socket = null;
     }
-    this.socket = new CdpSessionSocket(
+    const socket = new CdpSessionSocket(
       webSocketDebuggerUrl,
       this.log,
-      this.logError
+      this.logError,
+      () => {
+        // A socket replaced by attach() or disposed by detach() is not this session closing.
+        if (this.socket !== socket) return;
+        this.connected = false;
+        this.log(`[CDP] Cursor session closed: ${this.title} (${this.targetId})`);
+        this.onClosed?.(this);
+      }
     );
+    this.socket = socket;
     await this.socket.connect();
     await this.socket.send("Runtime.enable").catch(() => undefined);
     await this.socket.send("Page.enable").catch(() => undefined);
@@ -77,8 +86,9 @@ export class CursorSession {
 
   async detach(): Promise<void> {
     if (this.socket) {
-      await this.socket.dispose();
+      const socket = this.socket;
       this.socket = null;
+      await socket.dispose();
     }
     this.connected = false;
   }

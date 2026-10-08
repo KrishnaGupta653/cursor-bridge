@@ -7,6 +7,8 @@ import * as vscode from "vscode";
 import * as https from "https";
 import * as http from "http";
 import { URL } from "url";
+import * as os from "os";
+import * as path from "path";
 import { randomInt, randomUUID } from "crypto";
 
 const SESSION_ID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -16,6 +18,25 @@ export function newRelaySessionId(): string {
   let id = "";
   for (let i = 0; i < 6; i++) id += SESSION_ID_ALPHABET[randomInt(SESSION_ID_ALPHABET.length)];
   return id;
+}
+
+/** One Cursor window polls the relay; a second poller would take the phone's commands from the first. */
+export const RELAY_LOCK_PATH = path.join(os.tmpdir(), "cursor-remote-relay.lock");
+
+export type ResumeOutcome = "no-session" | "no-credential" | "locked" | "connected" | "failed";
+
+/** Reconnects to the last relay session after a restart, only with a saved login and only in the window that holds the lock. */
+export async function resumeSavedRelaySession(
+  client: Pick<RelayClient, "hasCredential" | "connectToSessionById" | "isConnectedToSession">,
+  savedSid: string | undefined,
+  claimLock: () => boolean
+): Promise<ResumeOutcome> {
+  const sid = savedSid?.trim().toUpperCase();
+  if (!sid) return "no-session";
+  if (!(await client.hasCredential(sid))) return "no-credential";
+  if (!claimLock()) return "locked";
+  await client.connectToSessionById(sid);
+  return client.isConnectedToSession() ? "connected" : "failed";
 }
 
 export interface RelayMessage {
@@ -44,6 +65,9 @@ export class RelayClient {
   private onMessageCallback: ((message: string) => void) | null = null;
   private onSessionConnectedCallback: (() => void) | null = null;
   private onSessionExpiredCallback: ((expired: string, next: string) => void) | null = null;
+  private onRejectedCallback: ((sid: string, statusCode: number) => void) | null = null;
+  private onTargetGoneCallback: ((clientId: string) => void) | null = null;
+  private connectInFlight: Promise<void> | null = null;
   /** 복수 세션 발견 시 사용자 선택용. (sessions) => 선택한 sessionId 또는 null */
   private onSessionsDiscoveredCallback:
     | ((sessions: { sessionId: string }[]) => Promise<string | null>)
@@ -116,6 +140,16 @@ export class RelayClient {
     this.onSessionExpiredCallback = callback;
   }
 
+  /** Called when the relay refused this Mac for good; polling has stopped until a new session is started. */
+  setOnRejected(callback: (sid: string, statusCode: number) => void) {
+    this.onRejectedCallback = callback;
+  }
+
+  /** Called with the client ID of a phone the relay no longer delivers to (it left the session). */
+  setOnTargetGone(callback: (clientId: string) => void) {
+    this.onTargetGoneCallback = callback;
+  }
+
   /**
    * Set callback for when multiple sessions are discovered (user picks one).
    * If not set or returns null, first session is used.
@@ -139,10 +173,13 @@ export class RelayClient {
     }
     if (this.sessionId && this.isConnected) {
       this.log(`🔌 Disconnecting from session ${this.sessionId}, then connecting to ${trimmed}`);
-      this.clearHeartbeat();
       this.sessionId = null;
       this.isConnected = false;
     }
+    // A connect still running for the old loop must not finish after (and over) this one.
+    this.haltPolling();
+    await this.connectInFlight;
+    const generation = this.pollGeneration;
     this.pcInUse = false;
     this.connectAttempts = 0;
     this.nextConnectAt = 0;
@@ -150,6 +187,7 @@ export class RelayClient {
       pin != null && typeof pin === "string" && pin.trim() ? pin.trim() : null;
     this.targetSessionId = trimmed;
     await this.connectToSession(trimmed, this.targetPin ?? undefined);
+    if (generation !== this.pollGeneration) return;
     // An expired session was just replaced by a new ID: connect to that now so pairing can continue.
     const replacement = this.targetSessionId;
     if (!this.isConnected && !this.pcInUse && replacement && replacement !== trimmed) {
@@ -191,16 +229,21 @@ export class RelayClient {
    * Stop relay client
    */
   stop(): void {
+    this.haltPolling();
+    this.isConnected = false;
+    this.sessionId = null;
+    this.pcInUse = false;
+    this.log("Relay client stopped");
+  }
+
+  /** Ends the current poll loop; anything still running for it sees a newer generation and gives up. */
+  private haltPolling(): void {
     this.clearHeartbeat();
     this.pollGeneration++;
     if (this.pollInterval) {
       clearTimeout(this.pollInterval);
       this.pollInterval = null;
     }
-    this.isConnected = false;
-    this.sessionId = null;
-    this.pcInUse = false;
-    this.log("Relay client stopped");
   }
 
   private clearHeartbeat(): void {
@@ -355,21 +398,24 @@ export class RelayClient {
         );
         // Forward message to callback (Extension WebSocket server)
         if (this.onMessageCallback) {
-          // 페이로드: msg.data가 있으면 그대로, 없으면 전체 msg (하위 호환)
-          // 0.3.3 동작: 유니캐스트 없이 브로드캐스트만 사용
-          const rawPayload = msg.data !== undefined && msg.data !== null ? msg.data : msg;
-          const payload = typeof rawPayload === "string" ? JSON.parse(rawPayload) : rawPayload;
-          if (!payload || typeof payload !== "object" || Array.isArray(payload)) continue;
-          if (!Number.isSafeInteger(payload.deadline) || payload.deadline <= Date.now()) {
-            this.logError("Expired or unversioned relay command rejected");
-            continue;
+          try {
+            // 페이로드: msg.data가 있으면 그대로, 없으면 전체 msg (하위 호환)
+            const rawPayload = msg.data !== undefined && msg.data !== null ? msg.data : msg;
+            const payload = typeof rawPayload === "string" ? JSON.parse(rawPayload) : rawPayload;
+            if (!payload || typeof payload !== "object" || Array.isArray(payload)) continue;
+            if (!Number.isSafeInteger(payload.deadline) || payload.deadline <= Date.now()) {
+              this.logError("Expired or unversioned relay command rejected");
+              continue;
+            }
+            payload.clientId = `relay:${this.sessionId}:${msg.senderDeviceId || "unknown"}`;
+            payload.senderDeviceId = msg.senderDeviceId;
+            payload.source = "relay";
+            this.onMessageCallback(JSON.stringify(payload));
+            this.log(`✅ onMessageCallback completed`);
+          } catch {
+            // The error text can quote the payload, so only the ID is logged.
+            this.logError(`Relay message ${msg.id} dropped (malformed or failed to dispatch)`);
           }
-          payload.clientId = `relay:${this.sessionId}:${msg.senderDeviceId || "unknown"}`;
-          payload.senderDeviceId = msg.senderDeviceId;
-          payload.source = "relay";
-          const messageStr = JSON.stringify(payload);
-          this.onMessageCallback(messageStr);
-          this.log(`✅ onMessageCallback completed`);
         } else {
           this.logError(
             "⚠️ onMessageCallback is null - cannot forward message"
@@ -513,9 +559,20 @@ export class RelayClient {
     this.stop();
   }
 
-  private async connectToSession(sid: string, _pin?: string): Promise<void> {
-    if (this.connecting || this.pcInUse || Date.now() < this.nextConnectAt) return;
+  private connectToSession(sid: string, _pin?: string): Promise<void> {
+    if (this.connecting || this.pcInUse || Date.now() < this.nextConnectAt) return Promise.resolve();
     this.connecting = true;
+    const attempt = this.connectNow(sid, this.pollGeneration).finally(() => {
+      this.connecting = false;
+      if (this.connectInFlight === attempt) this.connectInFlight = null;
+    });
+    this.connectInFlight = attempt;
+    return attempt;
+  }
+
+  /** Gives up without touching any state once [generation] is stale (stop or a newer connect). */
+  private async connectNow(sid: string, generation: number): Promise<void> {
+    const stale = () => generation !== this.pollGeneration;
     // Temporary failures retry with backoff (4s … 60s); explicit rejections below stop for good.
     const retryLater = () => {
       this.connectAttempts++;
@@ -524,6 +581,7 @@ export class RelayClient {
     try {
       this.capabilityToken = null;
       const saved = await this.secrets?.get(this.credentialKey(sid));
+      if (stale()) return;
       if (saved) {
         const credential = JSON.parse(saved);
         this.capabilityToken = credential.token;
@@ -533,6 +591,7 @@ export class RelayClient {
       const result = await this.httpRequestWithStatus(`${this.relayServerUrl}/api/${endpoint}`, "POST", {
         sessionId: sid, deviceId: this.deviceId, deviceType: "pc",
       });
+      if (stale()) return;
       const data = result.body?.data;
       if (![200, 201].includes(result.statusCode) || !result.body?.success || result.body.protocolVersion !== 2) {
         this.isConnected = false;
@@ -547,6 +606,7 @@ export class RelayClient {
         const taken = endpoint === "session" && result.statusCode === 409;
         if (expired || taken) {
           if (expired) await this.secrets?.delete(this.credentialKey(sid));
+          if (stale()) return;
           this.capabilityToken = null;
           const next = newRelaySessionId();
           this.targetSessionId = next;
@@ -556,14 +616,18 @@ export class RelayClient {
           this.onSessionExpiredCallback?.(sid, next);
           return;
         }
-        if ([400, 401, 403, 409].includes(result.statusCode)) this.pcInUse = true;
-        else retryLater();
         this.logError(`Relay connection rejected (HTTP ${result.statusCode}). Existing or legacy sessions require their saved credential or a new session ID.`);
+        if ([400, 401, 403, 409].includes(result.statusCode)) {
+          this.pcInUse = true;
+          this.haltPolling();
+          this.onRejectedCallback?.(sid, result.statusCode);
+        } else retryLater();
         return;
       }
       if (typeof data?.token === "string") this.capabilityToken = data.token;
       if (!this.capabilityToken) throw new Error("Relay did not provide a v2 credential");
       await this.secrets?.store(this.credentialKey(sid), JSON.stringify({ token: this.capabilityToken, deviceId: this.deviceId }));
+      if (stale()) return;
       const reconnected = this.sessionId === sid;
       this.sessionId = sid;
       this.isConnected = true;
@@ -577,10 +641,11 @@ export class RelayClient {
         this.onSessionConnectedCallback?.();
       }
     } catch {
+      if (stale()) return;
       this.isConnected = false;
       retryLater();
       this.logError("Relay connection failed");
-    } finally { this.connecting = false; }
+    }
   }
 
   /**
@@ -601,20 +666,24 @@ export class RelayClient {
           })`
         );
       }
-      const data = await this.httpRequest(
-        `${this.relayServerUrl}/api/send`,
-        "POST",
-        {
-          sessionId: this.sessionId,
-          deviceId: this.deviceId,
-          deviceType: "pc",
-          type: parsed.type || "message",
-          data: parsed,
-        }
-      );
-
+      const body = {
+        sessionId: this.sessionId,
+        deviceId: this.deviceId,
+        deviceType: "pc",
+        type: parsed.type || "message",
+        data: parsed,
+      };
+      const result = await this.httpRequestWithStatus(`${this.relayServerUrl}/api/send`, "POST", body);
+      if (result.statusCode === 403 && result.body?.errorCode === "TARGET_MEMBERSHIP_REQUIRED" &&
+          typeof parsed.clientId === "string") {
+        this.log("A phone left the relay session; dropping its chat watches");
+        this.onTargetGoneCallback?.(parsed.clientId);
+        return;
+      }
+      if (result.statusCode === 401) this.isConnected = false;
+      const data = result.statusCode >= 200 && result.statusCode < 300 ? result.body : null;
       if (!data) {
-        this.logError("Relay /api/send returned no data");
+        this.logError(`Relay /api/send failed (HTTP ${result.statusCode})`);
         return;
       }
       if (data.success) {
@@ -752,8 +821,13 @@ export class RelayClient {
   private async httpRequest(url: string, method: "GET" | "POST" = "GET", body?: any): Promise<any> {
     const result = await this.httpRequestWithStatus(url, method, body);
     if (result.statusCode >= 200 && result.statusCode < 300) return result.body;
-    this.isConnected = false;
-    this.logError(`Relay request failed (HTTP ${result.statusCode}); reconnect required`);
+    // Only a refused login needs a new one; anything else is retried by the next poll as is.
+    if (result.statusCode === 401) {
+      this.isConnected = false;
+      this.logError("Relay login refused (HTTP 401); reconnecting");
+    } else {
+      this.logError(`Relay request failed (HTTP ${result.statusCode})`);
+    }
     return null;
   }
 }

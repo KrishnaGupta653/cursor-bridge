@@ -540,7 +540,6 @@ CDP logs use the `[CDP]` prefix (connect, targets, session state, permissions, r
 | Port | Protocol | Purpose |
 |------|----------|---------|
 | 8766 | WebSocket | Mobile/Web app ↔ Extension (real-time bidirectional communication) |
-| 8768 | HTTP | Extension hook endpoint (`POST /hook`, local only) |
 
 ---
 
@@ -1075,7 +1074,6 @@ Cursor IDE의 Output 패널에서 "Cursor Remote" 채널을 선택하면 다음�
 | 포트 | 프로토콜 | 용도 |
 |------|----------|------|
 | 8766 | WebSocket | 모바일/웹 앱 ↔ Extension (실시간 양방향 통신) |
-| 8768 | HTTP | Extension 훅 엔드포인트 (`POST /hook`, 로컬 전용) |
 
 ---
 

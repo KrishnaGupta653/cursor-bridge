@@ -5,6 +5,7 @@ import * as fs from "fs";
 import { WebSocketServer } from "./websocket-server";
 import * as vscode from "vscode";
 import { CONFIG } from "./config";
+import { cliHistoryFile, writePrivateFile } from "./private-state";
 
 interface ChatHistoryEntry {
   id: string;
@@ -44,7 +45,8 @@ export class CLIHandler {
   constructor(
     outputChannel?: vscode.OutputChannel,
     wsServer?: WebSocketServer,
-    workspaceRoot?: string
+    workspaceRoot?: string,
+    storageDir?: string
   ) {
     this.outputChannel = outputChannel || null;
     this.wsServer = wsServer || null;
@@ -53,12 +55,8 @@ export class CLIHandler {
     // 대화 히스토리 파일 경로 설정 (워크스페이스가 없거나 루트(/)면 스킵 - F5 테스트 시 ENOENT 방지)
     const safeWorkspaceRoot =
       workspaceRoot && workspaceRoot !== "/" && workspaceRoot.length > 1;
-    if (safeWorkspaceRoot) {
-      const cursorDir = path.join(workspaceRoot, ".cursor");
-      if (!fs.existsSync(cursorDir)) {
-        fs.mkdirSync(cursorDir, { recursive: true });
-      }
-      this.chatHistoryFile = path.join(cursorDir, "CHAT_HISTORY.json");
+    if (safeWorkspaceRoot && storageDir) {
+      this.chatHistoryFile = cliHistoryFile(storageDir, workspaceRoot);
     }
   }
 
@@ -378,6 +376,7 @@ export class CLIHandler {
         "--output-format",
         "stream-json",
         "--stream-partial-output",
+        "--",
         text
       );
 
@@ -1080,11 +1079,9 @@ export class CLIHandler {
       history.lastUpdated = new Date().toISOString();
 
       // 파일 저장
-      fs.writeFileSync(
-        this.chatHistoryFile,
-        JSON.stringify(history, null, 2),
-        "utf8"
-      );
+      if (!writePrivateFile(this.chatHistoryFile, JSON.stringify(history, null, 2))) {
+        throw new Error(`Could not write ${this.chatHistoryFile}`);
+      }
       this.log(`💾 Chat history saved (${history.entries.length} entries)`);
     } catch (error) {
       this.logError("Failed to save chat history", error);

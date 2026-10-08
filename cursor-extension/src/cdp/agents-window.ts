@@ -298,6 +298,27 @@ async function pageNewChat(S: typeof SELECTORS) {
 function pageFocusEditor(S: typeof SELECTORS) {
   const editor = document.querySelector(S.editor);
   if (!editor) return { ok: false, error: "Composer not found; open a chat in the Agents window" };
+  // Only typed text is a draft: TipTap marks an empty document `is-editor-empty` and shows
+  // its placeholder ("Plan, search, build anything") from a data-placeholder attribute or a
+  // decoration element, either of which can leak into innerText.
+  const clean = (s: any) => String(s || "").replace(/[\u200B-\u200D\uFEFF\u00A0]/g, " ").replace(/\s+/g, " ").trim();
+  const placeholders = new Set<string>();
+  for (const el of [editor, ...Array.from(editor.querySelectorAll("[data-placeholder], [placeholder], [aria-placeholder]")) as any[]]) {
+    for (const attr of ["data-placeholder", "placeholder", "aria-placeholder"]) {
+      const v = clean(el.getAttribute(attr));
+      if (v) placeholders.add(v);
+    }
+  }
+  let typed = clean(editor.innerText);
+  for (const el of Array.from(editor.querySelectorAll('[class*="placeholder"]')) as any[]) {
+    const t = clean(el.innerText);
+    if (t) typed = clean(typed.replace(t, ""));
+  }
+  const empty = !typed || placeholders.has(typed) ||
+    (!!editor.querySelector(".is-editor-empty") && editor.querySelectorAll("p").length <= 1);
+  if (!empty) {
+    return { ok: false, error: "The Cursor composer on your Mac already has a draft. Send or clear it there, then try again." };
+  }
   editor.focus();
   const range = document.createRange();
   range.selectNodeContents(editor);
@@ -309,7 +330,10 @@ function pageFocusEditor(S: typeof SELECTORS) {
 
 function pageEditorText(S: typeof SELECTORS) {
   const editor = document.querySelector(S.editor);
-  return { ok: !!editor, text: editor ? String(editor.innerText || "") : "" };
+  const root = document.querySelector(S.composerRoot);
+  const submit = root ? root.querySelector(S.submit) : null;
+  const running = !!submit && /stop/i.test(String(submit.getAttribute("aria-label") || ""));
+  return { ok: !!editor, text: editor ? String(editor.innerText || "") : "", running };
 }
 
 function pageSubmit(S: typeof SELECTORS) {
@@ -421,8 +445,34 @@ export function pageResolve(S: typeof SELECTORS, requestId: string, approve: boo
 
 /* ---------- controller ---------- */
 
+export interface Timing {
+  /** Delay between checks while waiting for Cursor. */
+  pollMs: number;
+  /** How long Cursor gets to take a prompt (composer empties or starts running). */
+  acceptMs: number;
+  /** How long a new chat gets to show its ID after its first prompt. */
+  newChatMs: number;
+}
+
+const DEFAULT_TIMING: Timing = { pollMs: 150, acceptMs: 3000, newChatMs: 3000 };
+
+export interface PromptTarget {
+  chatId?: string;
+  group?: string;
+  newChat?: boolean;
+}
+
 export class AgentsWindow {
-  constructor(private readonly page: () => Evaluator | null) {}
+  /** Every action that changes the open chat or clicks in it runs one at a time, in order. */
+  private queue: Promise<unknown> = Promise.resolve();
+
+  constructor(private readonly page: () => Evaluator | null, private readonly timing: Timing = DEFAULT_TIMING) {}
+
+  private locked<T>(task: () => Promise<T>): Promise<T> {
+    const next = this.queue.then(task, task);
+    this.queue = next.catch(() => undefined);
+    return next;
+  }
 
   private async run<T>(expression: string): Promise<T | { ok: false; error: string }> {
     const page = this.page();
@@ -433,6 +483,10 @@ export class AgentsWindow {
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
+  }
+
+  private sleep(): Promise<void> {
+    return new Promise((r) => setTimeout(r, this.timing.pollMs));
   }
 
   get attached(): boolean {
@@ -451,67 +505,116 @@ export class AgentsWindow {
     return this.run(`(${pageComposer.toString()})(${JSON.stringify(SELECTORS)}, ${pagePending.toString()})`);
   }
 
-  openChat(chatId: string, group = ""): Promise<ActionResult> {
+  private openChatNow(chatId: string, group = ""): Promise<ActionResult> {
     if (!CHAT_ID_RE.test(chatId)) return Promise.resolve({ ok: false, error: "Invalid chat ID" });
     return this.run(call(pageOpenChat, SELECTORS, chatId, String(group).slice(0, 200)));
   }
 
   /** Opens the chat unless it is already the active one. */
-  async ensureChat(chatId: string | undefined, group?: string): Promise<ActionResult> {
+  private async ensureChatNow(chatId: string | undefined, group?: string): Promise<ActionResult> {
     if (!chatId) return { ok: true };
     const state = await this.composerState();
     if (state.ok && state.state.chatId === chatId) return { ok: true };
-    return this.openChat(chatId, group);
+    return this.openChatNow(chatId, group);
+  }
+
+  /** Runs [action] with [chatId] open, without another action switching chats in between. */
+  private inChat<T extends ActionResult<any>>(chatId: string | undefined, group: string | undefined, action: () => Promise<T>): Promise<T | ActionResult> {
+    return this.locked(async () => {
+      const opened = await this.ensureChatNow(chatId, group);
+      return opened.ok ? action() : opened;
+    });
+  }
+
+  openChat(chatId: string, group = ""): Promise<ActionResult> {
+    return this.locked(() => this.openChatNow(chatId, group));
+  }
+
+  ensureChat(chatId: string | undefined, group?: string): Promise<ActionResult> {
+    return this.locked(() => this.ensureChatNow(chatId, group));
   }
 
   newChat(): Promise<ActionResult> {
-    return this.run(call(pageNewChat, SELECTORS));
+    return this.locked(() => this.run(call(pageNewChat, SELECTORS)));
   }
 
-  stop(): Promise<ActionResult> {
-    return this.run(call(pageStop, SELECTORS));
+  stop(chatId?: string, group?: string): Promise<ActionResult> {
+    return this.inChat(chatId, group, () => this.run(call(pageStop, SELECTORS)));
   }
 
   listModels(): Promise<ActionResult<{ models: string[] }>> {
-    return this.run(call(pageSetModel, SELECTORS, "", true));
+    return this.locked(() => this.run(call(pageSetModel, SELECTORS, "", true)));
   }
 
-  setModel(name: string): Promise<ActionResult<{ model: string; models: string[] }>> {
+  setModel(name: string, chatId?: string, group?: string): Promise<ActionResult<{ model: string; models: string[] }> | ActionResult> {
     const clean = String(name || "").trim().slice(0, 80);
     if (!clean) return Promise.resolve({ ok: false, error: "Model name required" });
-    return this.run(call(pageSetModel, SELECTORS, clean, false));
+    return this.inChat(chatId, group, () => this.run<ActionResult<{ model: string; models: string[] }>>(call(pageSetModel, SELECTORS, clean, false)));
   }
 
-  setMode(mode: string): Promise<ActionResult<{ mode: string }>> {
+  setMode(mode: string, chatId?: string, group?: string): Promise<ActionResult<{ mode: string }> | ActionResult> {
     const want = MODES.find((m) => m.toLowerCase() === String(mode || "").trim().toLowerCase());
     if (!want) return Promise.resolve({ ok: false, error: `Mode must be one of ${MODES.join(", ")}` });
-    return this.run(call(pageSetMode, SELECTORS, want));
+    return this.inChat(chatId, group, () => this.run<ActionResult<{ mode: string }>>(call(pageSetMode, SELECTORS, want)));
+  }
+
+  /**
+   * Opens the target chat (or a new one), types the prompt, presses Enter and confirms Cursor
+   * took it, as one step no other action can interleave with. [beforeSend] runs just before
+   * typing, with the chat that was open before New Chat.
+   */
+  prompt(target: PromptTarget, text: string, beforeSend?: (previousChatId: string | null) => void):
+    Promise<ActionResult<{ chatId: string | null }>> {
+    return this.locked(async () => {
+      let previousChatId: string | null = null;
+      if (target.newChat) {
+        const before = await this.composerState();
+        previousChatId = before.ok ? before.state.chatId : null;
+      }
+      const opened = target.newChat ? await this.run<ActionResult>(call(pageNewChat, SELECTORS))
+        : await this.ensureChatNow(target.chatId, target.group);
+      if (!opened.ok) return opened;
+      beforeSend?.(previousChatId);
+      const sent = await this.sendPromptNow(text);
+      if (!sent.ok) return sent;
+      const chatId = target.newChat ? await this.newChatId(previousChatId) : target.chatId ?? null;
+      return { ok: true, chatId };
+    });
+  }
+
+  /** Types into whatever chat is open; prefer prompt(), which also opens the chat under the lock. */
+  sendPrompt(text: string): Promise<ActionResult> {
+    return this.locked(() => this.sendPromptNow(text));
   }
 
   /**
    * Types into the composer with trusted input events, checks it landed, presses Enter, and
-   * confirms Cursor took it (the composer empties); falls back to the send button once.
+   * confirms Cursor took it (the composer empties or starts running); falls back to the send
+   * button once, and never while the agent is running.
    */
-  async sendPrompt(text: string, settleMs = 150): Promise<ActionResult> {
+  private async sendPromptNow(text: string): Promise<ActionResult> {
     const page = this.page();
     if (!page) return { ok: false, error: "Cursor Agents window is not attached (open it in Cursor)" };
     const focus = await this.run<ActionResult>(call(pageFocusEditor, SELECTORS));
     if (!focus.ok) return focus;
     const probe = text.trim().slice(0, 40).replace(/\s+/g, " ");
-    const stillTyped = async () => {
-      const typed = await this.run<{ ok: boolean; text: string }>(call(pageEditorText, SELECTORS));
-      return !!typed.ok && "text" in typed && typed.text.replace(/\s+/g, " ").includes(probe);
+    const read = async () => {
+      const r = await this.run<{ ok: boolean; text: string; running?: boolean }>(call(pageEditorText, SELECTORS));
+      const typed = !!r.ok && "text" in r && r.text.replace(/\s+/g, " ").includes(probe);
+      return { typed, running: !!r.ok && "running" in r && r.running === true };
     };
     const accepted = async () => {
-      for (let i = 0; i < 6; i++) {
-        await new Promise((r) => setTimeout(r, settleMs));
-        if (!(await stillTyped())) return true;
-      }
+      const deadline = Date.now() + this.timing.acceptMs;
+      do {
+        await this.sleep();
+        const s = await read();
+        if (!s.typed || s.running) return true;
+      } while (Date.now() < deadline);
       return false;
     };
     try {
       await page.send("Input.insertText", { text });
-      if (!(await stillTyped())) return { ok: false, error: "Text did not reach the Cursor composer" };
+      if (!(await read()).typed) return { ok: false, error: "Text did not reach the Cursor composer" };
       const key = { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 };
       await page.send("Input.dispatchKeyEvent", { type: "keyDown", ...key, text: "\r" });
       await page.send("Input.dispatchKeyEvent", { type: "keyUp", ...key });
@@ -524,11 +627,35 @@ export class AgentsWindow {
     }
   }
 
-  resolve(requestId: string, approve: boolean): Promise<ActionResult<{ label: string; command: string }> & { pending?: PendingRequest }> {
+  private async newChatId(previousChatId: string | null): Promise<string | null> {
+    const deadline = Date.now() + this.timing.newChatMs;
+    do {
+      const state = await this.composerState();
+      if (state.ok && state.state.chatId && state.state.chatId !== previousChatId) return state.state.chatId;
+      await this.sleep();
+    } while (Date.now() < deadline);
+    return null;
+  }
+
+  /**
+   * Approves or rejects [requestId], only while [chatId] is still the open chat; the check
+   * and the click run under the lock so no prompt can switch chats in between.
+   */
+  resolve(requestId: string, approve: boolean, chatId?: string):
+    Promise<ActionResult<{ label: string; command: string }> & { pending?: PendingRequest }> {
     if (!/^req-[a-z0-9]{1,16}$/.test(String(requestId || ""))) {
       return Promise.resolve({ ok: false, error: "A request ID from the pending prompt is required" });
     }
-    const expression = `(${pageResolve.toString()})(${JSON.stringify(SELECTORS)}, ${JSON.stringify(requestId)}, ${approve}, ${pagePending.toString()})`;
-    return this.run(expression);
+    return this.locked(async () => {
+      if (chatId !== undefined) {
+        const state = await this.composerState();
+        if (!state.ok) return state;
+        if (state.state.chatId !== chatId) return { ok: false as const, error: CHAT_CHANGED };
+      }
+      const expression = `(${pageResolve.toString()})(${JSON.stringify(SELECTORS)}, ${JSON.stringify(requestId)}, ${approve}, ${pagePending.toString()})`;
+      return this.run<ActionResult<{ label: string; command: string }> & { pending?: PendingRequest }>(expression);
+    });
   }
 }
+
+export const CHAT_CHANGED = "That chat is no longer open in Cursor — review the request again";

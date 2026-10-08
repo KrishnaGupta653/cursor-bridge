@@ -7,7 +7,7 @@ import { WebSocketServer } from "./websocket-server";
 import { CommandMessage, CommandResult } from "./types";
 import * as vscode from "vscode";
 import { REMOTE_ACTIONS, remoteCommandError } from "./command-policy";
-import { AgentsWindow, SidebarRow } from "./cdp/agents-window";
+import { AgentsWindow, CHAT_CHANGED, SidebarRow } from "./cdp/agents-window";
 import { ChatWatcher } from "./chat-watcher";
 import { TranscriptIndex } from "./transcripts/transcript-index";
 import { WorkspaceDiff, diffFromSnippets } from "./transcripts/workspace-diff";
@@ -143,7 +143,7 @@ export class CommandRouter {
           result = await this.handleSaveFile();
           break;
         case "stop_prompt":
-          result = await this.handleStopPrompt();
+          result = await this.handleStopPrompt(command);
           break;
         case "execute_action":
           result = await this.handleExecuteAction(command);
@@ -391,8 +391,6 @@ export class CommandRouter {
         this.log("Routing to prompt");
         const newSession = command.newSession === true;
         const agentMode = command.agentMode || "auto";
-        const agentBackend =
-          command.agentBackend === "cdp" ? "cdp" : ("cli" as const);
         await this.commandHandler.insertToPrompt(
           text,
           execute,
@@ -400,8 +398,7 @@ export class CommandRouter {
           newSession,
           agentMode,
           command.senderDeviceId,
-          agentBackend,
-          command.sessionId
+          "cli"
         );
         return {
           success: true,
@@ -496,8 +493,9 @@ export class CommandRouter {
   /**
    * Handle stop_prompt
    */
-  private async handleStopPrompt(): Promise<CommandResult> {
+  private async handleStopPrompt(command: CommandMessage): Promise<CommandResult> {
     const result = await this.commandHandler.stopPrompt();
+    this.audit(command, result.success);
     return result;
   }
 
@@ -648,18 +646,7 @@ export class CommandRouter {
     if (!text) {
       return { success: false, error: "Empty prompt" };
     }
-    if (command.chatId || command.newChat === true) return this.handleChatPrompt(command, text);
-    await this.commandHandler.insertToPrompt(
-      text,
-      true,
-      command.clientId,
-      false,
-      command.agentMode || "auto",
-      command.senderDeviceId,
-      "cdp",
-      command.sessionId
-    );
-    return { success: true, message: "Prompt sent to existing Cursor Agent" };
+    return this.handleChatPrompt(command, text);
   }
 
   private async handleCliPrompt(
@@ -815,20 +802,14 @@ export class CommandRouter {
       case "new_chat":
         result = await agents.newChat();
         break;
-      case "set_model": {
-        const opened = await agents.ensureChat(command.chatId, group);
-        result = opened.ok ? await agents.setModel(String(command.model)) : opened;
+      case "set_model":
+        result = await agents.setModel(String(command.model), command.chatId, group);
         break;
-      }
-      case "set_mode": {
-        const opened = await agents.ensureChat(command.chatId, group);
-        result = opened.ok ? await agents.setMode(String(command.mode)) : opened;
+      case "set_mode":
+        result = await agents.setMode(String(command.mode), command.chatId, group);
         break;
-      }
-      default: {
-        const opened = await agents.ensureChat(command.chatId, group);
-        result = opened.ok ? await agents.stop() : opened;
-      }
+      default:
+        result = await agents.stop(command.chatId, group);
     }
     this.audit(command, result.ok, command.type === "set_model" ? `model=${String(command.model).slice(0, 40)}` :
       command.type === "set_mode" ? `mode=${command.mode}` : "");
@@ -843,16 +824,11 @@ export class CommandRouter {
   /** Approve/reject only the exact pending request the phone showed, in the chat it showed it for. */
   private async handleResolveRequest(command: CommandMessage, approve: boolean): Promise<CommandResult> {
     const agents = this.requireAgents();
-    const state = await agents.composerState();
-    if (!state.ok) {
-      this.audit(command, false, "no-state");
-      return { success: false, error: state.error };
-    }
-    if (state.state.chatId !== command.chatId) {
+    const result = await agents.resolve(command.requestId as string, approve, String(command.chatId ?? ""));
+    if (!result.ok && result.error === CHAT_CHANGED) {
       this.audit(command, false, "chat-mismatch");
-      return { success: false, error: "That chat is no longer open in Cursor — review the request again" };
+      return { success: false, error: result.error };
     }
-    const result = await agents.resolve(command.requestId as string, approve);
     this.audit(command, result.ok, `request=${command.requestId}`);
     if (!result.ok) return { success: false, error: result.error };
     return { success: true, message: approve ? "Approved" : "Rejected", data: { label: result.label } };
@@ -863,34 +839,23 @@ export class CommandRouter {
     const chat = this.requireChat();
     const agents = this.requireAgents();
     const isNew = command.newChat === true;
-    let previousChatId: string | null = null;
-    if (isNew) {
-      const before = await agents.composerState();
-      previousChatId = before.ok ? before.state.chatId : null;
-    }
-    const opened = isNew ? await agents.newChat()
-      : await agents.ensureChat(command.chatId, typeof command.group === "string" ? command.group : "");
-    if (!opened.ok) return { success: false, error: opened.error };
-    let chatId = isNew ? null : (command.chatId as string);
     const sub = { clientId: command.clientId as string, targetDeviceId: command.senderDeviceId };
-    if (command.clientId) chat.watcher.awaitReply(sub, chatId, command.id, previousChatId);
-    const sent = await agents.sendPrompt(text);
+    let watching = false;
+    // The new chat's row appears once Cursor accepts the first prompt; its ID is reported so the client can follow it live.
+    const sent = await agents.prompt(
+      isNew ? { newChat: true } : { chatId: command.chatId as string, group: typeof command.group === "string" ? command.group : "" },
+      text,
+      (previousChatId) => {
+        if (!command.clientId) return;
+        chat.watcher.awaitReply(sub, isNew ? null : (command.chatId as string), command.id, previousChatId);
+        watching = true;
+      }
+    );
     this.audit(command, sent.ok, isNew ? "new-chat" : "");
     if (!sent.ok) {
-      if (command.clientId) chat.watcher.forgetReply(sub, command.id);
+      if (watching) chat.watcher.forgetReply(sub, command.id);
       return { success: false, error: sent.error };
     }
-    // The new chat's row appears once Cursor accepts the first prompt; report it so the client can follow it live.
-    if (isNew) chatId = await this.newChatId(agents, previousChatId);
-    return { success: true, message: "Prompt sent to Cursor", data: { chatId } };
-  }
-
-  private async newChatId(agents: AgentsWindow, previousChatId: string | null): Promise<string | null> {
-    for (let i = 0; i < 10; i++) {
-      const state = await agents.composerState();
-      if (state.ok && state.state.chatId && state.state.chatId !== previousChatId) return state.state.chatId;
-      await new Promise((r) => setTimeout(r, 300));
-    }
-    return null;
+    return { success: true, message: "Prompt sent to Cursor", data: { chatId: sent.chatId } };
   }
 }

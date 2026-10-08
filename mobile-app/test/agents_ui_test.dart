@@ -193,6 +193,25 @@ void main() {
     await finish(tester, store);
   });
 
+  testWidgets('a prompt Cursor refuses comes back into the empty composer', (tester) async {
+    final (store, sent) = fakeStore();
+    await pumpShell(tester, store, size: const Size(1200, 800));
+    await tester.tap(find.text('Docs pass'));
+    await tester.pump();
+    store.applyInbound({'type': 'chat', 'chatId': chatC, 'total': 0, 'hasOlder': false, 'items': []});
+    await tester.pump();
+
+    await tester.enterText(find.byType(TextField).last, 'ship it');
+    await tester.pump();
+    await tester.tap(find.byTooltip('Send'));
+    await tester.pump();
+    final prompt = sent.lastWhere((c) => c['type'] == 'agent_prompt');
+    store.applyInbound({'type': 'command_result', 'correlationId': prompt['id'], 'success': false, 'error': 'draft on the Mac'});
+    await tester.pump();
+    expect(tester.widget<TextField>(find.byType(TextField).last).controller!.text, 'ship it');
+    await finish(tester, store);
+  });
+
   testWidgets('confirm dialog repeats the command being approved', (tester) async {
     await tester.pumpWidget(MaterialApp(home: Builder(builder: (context) {
       return TextButton(
@@ -230,6 +249,28 @@ void main() {
     store.applyInbound({'type': 'chat_delta', 'chatId': chatB, 'fromSeq': 5, 'total': 6, 'items': [item(5, 'assistant', 'late')]});
     expect(sent.where((c) => c['type'] == 'get_chat').length, 1, reason: 'one reload at a time');
     store.dispose();
+  });
+
+  test('each lost delta after a successful reload triggers its own reload', () async {
+    final (store, sent) = fakeStore();
+    addTearDown(store.dispose);
+    await store.selectChat(chatB);
+    void reload(int total) => store.applyInbound({
+          'type': 'chat', 'chatId': chatB, 'total': total, 'hasOlder': false,
+          'items': [for (var i = 0; i < total; i++) item(i, 'assistant', 'm$i')],
+        });
+    reload(2);
+    sent.clear();
+    int reloads() => sent.where((c) => c['type'] == 'get_chat').length;
+
+    store.applyInbound({'type': 'chat_delta', 'chatId': chatB, 'fromSeq': 5, 'total': 6, 'items': [item(5, 'assistant', 'x')]});
+    expect(reloads(), 1);
+    reload(6);
+    store.applyInbound({'type': 'chat_delta', 'chatId': chatB, 'fromSeq': 9, 'total': 10, 'items': [item(9, 'assistant', 'y')]});
+    expect(reloads(), 2, reason: 'a second gap must reload again after the first reload succeeded');
+    reload(10);
+    store.applyInbound({'type': 'chat_delta', 'chatId': chatB, 'fromSeq': 10, 'total': 11, 'items': [item(10, 'assistant', 'z')]});
+    expect(store.thread!.items.length, 11);
   });
 
   test('a draft never shows the previous chat\'s approval and follows the new chat once it has an ID', () async {

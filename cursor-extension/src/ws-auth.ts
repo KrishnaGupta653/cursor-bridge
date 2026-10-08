@@ -108,6 +108,7 @@ export class WsAuth {
       if (this.now() >= expiresAt) { ws.close(4001, "Credential expired"); return; }
       if (this.now() - start >= 60_000) { start = this.now(); count = 0; }
       if (++count > 120) { ws.close(4008, "Rate limit exceeded"); return; }
+      if (message.type === "ping") { ws.send(JSON.stringify({ type: "pong" })); return; }
       const rate = this.principalRates.get(principal) || { start: this.now(), count: 0 };
       if (this.now() - rate.start >= 60_000) { rate.start = this.now(); rate.count = 0; }
       this.principalRates.set(principal, rate);

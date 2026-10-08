@@ -7,6 +7,24 @@ import * as http from "http";
 import WebSocket from "ws";
 import { CdpTargetInfo } from "./cdp-types";
 
+/** Only page sockets on the configured loopback port; whatever answers /json/list is not trusted to point elsewhere. */
+export function isAllowedDebuggerUrl(url: string | undefined, port: number): boolean {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    return u.protocol === "ws:" && u.hostname === "127.0.0.1" && Number(u.port) === port &&
+      !u.username && !u.password && !u.search && !u.hash && /^\/devtools\/page\/[A-Za-z0-9-]{1,80}$/.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
+/** Cursor's DevTools endpoint reports an Electron (or Cursor) user agent; anything else on the port is refused. */
+export function looksLikeCursor(version: Record<string, unknown> | null | undefined): boolean {
+  const ua = String(version?.["User-Agent"] ?? "");
+  return /\bElectron\/\d/.test(ua) || /\bCursor\/\d/.test(ua);
+}
+
 export interface CdpClientOptions {
   host: string;
   port: number;
@@ -74,7 +92,7 @@ export class CdpHttpClient {
       title: String(t.title || ""),
       url: String(t.url || ""),
       type: String(t.type || "unknown"),
-      webSocketDebuggerUrl: t.webSocketDebuggerUrl
+      webSocketDebuggerUrl: isAllowedDebuggerUrl(t.webSocketDebuggerUrl, this.options.port)
         ? String(t.webSocketDebuggerUrl)
         : undefined,
       description: t.description ? String(t.description) : undefined,
@@ -83,7 +101,11 @@ export class CdpHttpClient {
   }
 
   async getVersion(): Promise<Record<string, string>> {
-    return this.getJson<Record<string, string>>("/json/version");
+    const version = await this.getJson<Record<string, string>>("/json/version");
+    if (!looksLikeCursor(version)) {
+      throw new Error(`Port ${this.options.port} is not Cursor's DevTools endpoint; refusing to attach`);
+    }
+    return version;
   }
 }
 
@@ -105,7 +127,8 @@ export class CdpSessionSocket {
   constructor(
     private readonly debuggerUrl: string,
     private readonly log: (msg: string) => void,
-    private readonly logError: (msg: string, err?: unknown) => void
+    private readonly logError: (msg: string, err?: unknown) => void,
+    private readonly onClosed?: () => void
   ) {}
 
   get connected(): boolean {
@@ -149,6 +172,7 @@ export class CdpSessionSocket {
       p.reject(new Error("CDP session closed"));
     }
     this.pending.clear();
+    this.onClosed?.();
   }
 
   private onMessage(raw: string) {

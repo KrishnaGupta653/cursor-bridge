@@ -3,10 +3,8 @@ import * as vscode from "vscode";
 import { WebSocketServer } from "./websocket-server";
 import { CommandHandler } from "./command-handler";
 import { CommandRouter } from "./command-router";
-import { HttpServer } from "./http-server";
-import { RulesManager } from "./rules-manager";
 import { StatusBarManager } from "./status-bar";
-import { RelayClient } from "./relay-client";
+import { RELAY_LOCK_PATH, RelayClient, resumeSavedRelaySession } from "./relay-client";
 import { CONFIG } from "./config";
 import { CdpManager } from "./cdp/cdp-manager";
 import { claimOnce, cursorBinary, scheduleRelaunchWithCdp } from "./cdp/relaunch";
@@ -20,13 +18,13 @@ import {
   ensureTelegramSecretsTemplate,
   loadTelegramSecrets,
   TELEGRAM_LOCKED_PREFIX,
+  acquireTelegramLock,
+  releaseTelegramLock,
 } from "./telegram-bridge";
 
 let wsServer: WebSocketServer | null = null;
 let commandHandler: CommandHandler | null = null;
 let commandRouter: CommandRouter | null = null;
-let httpServer: HttpServer | null = null;
-let rulesManager: RulesManager | null = null;
 let statusBarManager: StatusBarManager | null = null;
 let relayClient: RelayClient | null = null;
 let cdpManager: CdpManager | null = null;
@@ -38,6 +36,24 @@ let outputChannel: vscode.OutputChannel;
 let connectionsPanel: vscode.WebviewPanel | null = null;
 /** 릴레이 서버 저장소 라벨 (연결 정보 패널에서 표시, /api/store 조회 결과) */
 let lastRelayStoreLabel: string | null = null;
+let relayLockHeld = false;
+
+function claimRelayLock(): { ok: true } | { ok: false; ownerPid: number } {
+  if (relayLockHeld) return { ok: true };
+  const lock = acquireTelegramLock(RELAY_LOCK_PATH);
+  relayLockHeld = lock.ok;
+  return lock;
+}
+
+/** True (after telling the user) when another live Cursor window already polls the relay. */
+function relayOwnedElsewhere(): boolean {
+  const lock = claimRelayLock();
+  if (lock.ok) return false;
+  void vscode.window.showWarningMessage(lock.ownerPid > 0
+    ? `Cursor Remote: another Cursor window (pid ${lock.ownerPid}) is already connected to the relay. Use that window, or close it and try again.`
+    : `Cursor Remote: could not create ${RELAY_LOCK_PATH}; check the temp folder's permissions.`);
+  return true;
+}
 
 /** 연결 정보 Webview용 HTML 생성 */
 function getConnectionsViewHtml(data: {
@@ -152,6 +168,8 @@ function allowedOrigins(): string[] {
 }
 
 let pairingAfterConnect = false;
+/** A startup reconnect to a session that is already paired; no "pair the phone" prompt. */
+let resumingRelay = false;
 
 function relayServerUrl(): string {
   const v = (vscode.workspace.getConfiguration("cursorRemote").get<string>("relayServerUrl") ?? "")
@@ -271,7 +289,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // CLI mode is always enabled (IDE mode is deprecated)
   const useCLIMode = true;
 
-  commandHandler = new CommandHandler(outputChannel, wsServer, useCLIMode);
+  commandHandler = new CommandHandler(outputChannel, wsServer, useCLIMode, context.globalStorageUri.fsPath);
   commandRouter = new CommandRouter(commandHandler, wsServer, outputChannel);
   const transcriptIndex = new TranscriptIndex();
   chatWatcher = new ChatWatcher({
@@ -377,13 +395,6 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // HTTP server for hooks; started together with the WS server at the end of activation.
-  httpServer = new HttpServer(outputChannel, wsServer);
-
-  // Rules manager (CHAT_SUMMARY hook 제거됨 - stdout 응답만 사용)
-  // rulesManager는 hooks.json 관리를 위해 유지하지만, CHAT_SUMMARY 감시는 제거
-  rulesManager = new RulesManager(outputChannel, httpServer);
-
   // WebSocket message handler
   wsServer.onMessage((message: string) => {
     try {
@@ -400,21 +411,6 @@ export async function activate(context: vscode.ExtensionContext) {
       // Handle command locally (whether from local WebSocket or relay)
       if (commandRouter) {
         commandRouter.handleCommand(command);
-      }
-
-      // If message is from local WebSocket client (not from relay), forward to relay
-      if (
-        source !== "relay" &&
-        relayClient &&
-        relayClient.isConnectedToSession()
-      ) {
-        relayClient.sendMessage(message).catch((error) => {
-          const errorMsg =
-            error instanceof Error ? error.message : "Unknown error";
-          outputChannel.appendLine(
-            `[${new Date().toLocaleTimeString()}] ❌ Failed to send to relay: ${errorMsg}`
-          );
-        });
       }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : "Unknown error";
@@ -526,6 +522,7 @@ export async function activate(context: vscode.ExtensionContext) {
         outputChannel.show();
         return;
       }
+      if (relayOwnedElsewhere()) return undefined;
       const sid = await vscode.window.showInputBox({
         title: "Cursor Remote: Relay Session ID",
         prompt: "Press Enter to reuse your last session, or type any new 6-character ID (a taken ID is swapped for a fresh one).",
@@ -859,7 +856,7 @@ export async function activate(context: vscode.ExtensionContext) {
   );
 
   const connectRelayFlow = async () => {
-    if (!relayClient) return;
+    if (!relayClient || relayOwnedElsewhere()) return;
     const sid = await vscode.window.showInputBox({
       title: "Cursor Remote: Connect to Relay",
       prompt: "6-character session ID (the phone joins the same ID). Afterwards run Pair Relay Client.",
@@ -942,6 +939,7 @@ export async function activate(context: vscode.ExtensionContext) {
       await showPairingCode();
     }),
     vscode.commands.registerCommand("cursorRemote.newRelaySession", async () => {
+      if (relayOwnedElsewhere()) return;
       const pick = await vscode.window.showWarningMessage(
         "Start a new relay session? The current session is revoked and phones must pair again.",
         { modal: true },
@@ -987,7 +985,7 @@ export async function activate(context: vscode.ExtensionContext) {
       if (sessionId) {
         context.globalState.update("cursorRemote.sessionId", sessionId);
       }
-      if (pairingAfterConnect) return;
+      if (pairingAfterConnect || resumingRelay) return;
       void vscode.window
         .showInformationMessage(
           sessionId != null
@@ -1036,16 +1034,34 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     wsServer?.triggerMessageHandlers(relayMessage);
   });
+  relayClient.setOnTargetGone((clientId) => chatWatcher?.forgetClient(clientId));
+  relayClient.setOnRejected((sid, statusCode) => {
+    statusBarManager?.refresh();
+    updateConnectionsView();
+    void vscode.window
+      .showWarningMessage(
+        `Cursor Remote: the relay refused session ${sid} (HTTP ${statusCode}) and stopped trying. Start a new relay session and pair the phone again.`,
+        "Start New Relay Session"
+      )
+      .then((pick) => pick && vscode.commands.executeCommand("cursorRemote.newRelaySession"));
+  });
+
+  // After a restart, pick up the last relay session in the one window that owns the relay.
+  resumingRelay = true;
+  void resumeSavedRelaySession(relayClient, context.globalState.get<string>("cursorRemote.sessionId"), () => claimRelayLock().ok)
+    .then((outcome) => {
+      if (outcome === "connected" || outcome === "failed" || outcome === "locked") {
+        outputChannel.appendLine(`[Relay] Resume last session on startup: ${outcome}`);
+      }
+      statusBarManager?.refresh();
+      updateConnectionsView();
+    })
+    .catch(() => outputChannel.appendLine("[Relay] Resume last session on startup failed"))
+    .finally(() => { resumingRelay = false; });
 
   // Start servers without blocking activation: commands and the status bar are already live.
   const serversReady = (async () => {
     await wsServer!.releaseOrphanedPorts();
-    // Hooks port 8768 lies inside the WS fallback range; binding it first keeps ports deterministic.
-    await httpServer!.start().catch((error) => {
-      outputChannel.appendLine(
-        `[${new Date().toLocaleTimeString()}] ❌ Failed to start hooks server: ${error instanceof Error ? error.message : error}`
-      );
-    });
     await wsServer!.start({ preferFreePreferredPort: false }).catch((error) => {
       outputChannel.appendLine(
         `[${new Date().toLocaleTimeString()}] ❌ Failed to start WebSocket server: ${error instanceof Error ? error.message : error}`
@@ -1175,14 +1191,16 @@ export async function activate(context: vscode.ExtensionContext) {
   }
 }
 
-export function deactivate() {
+export async function deactivate(): Promise<void> {
+  // Cursor waits a few seconds for this promise; the Telegram bot and tunnel must exit with the window.
+  const stopping: Promise<unknown>[] = [];
   if (telegramBridge) {
-    void telegramBridge.stop();
+    stopping.push(telegramBridge.stop());
     telegramBridge = null;
   }
 
   if (cloudflareTunnel) {
-    void cloudflareTunnel.stop();
+    stopping.push(cloudflareTunnel.stop());
     cloudflareTunnel = null;
   }
 
@@ -1192,7 +1210,7 @@ export function deactivate() {
   }
 
   if (cdpManager) {
-    void cdpManager.stop();
+    stopping.push(cdpManager.stop());
     cdpManager = null;
   }
 
@@ -1200,10 +1218,9 @@ export function deactivate() {
     relayClient.stop();
     relayClient = null;
   }
-
-  if (httpServer) {
-    httpServer.stop();
-    httpServer = null;
+  if (relayLockHeld) {
+    releaseTelegramLock(RELAY_LOCK_PATH);
+    relayLockHeld = false;
   }
 
   if (wsServer) {
@@ -1217,6 +1234,12 @@ export function deactivate() {
   }
 
   commandRouter = null;
-  rulesManager = null;
   statusBarManager = null;
+
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    Promise.allSettled(stopping),
+    new Promise<void>((resolve) => { timer = setTimeout(resolve, 4000); }),
+  ]);
+  clearTimeout(timer);
 }

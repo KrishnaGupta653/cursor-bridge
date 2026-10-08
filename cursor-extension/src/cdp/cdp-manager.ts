@@ -38,6 +38,8 @@ const REPLY_SETTLE_TICKS = 2;
 // Agents often pause output while running tools, so only force-settle after ~90s of no change.
 const REPLY_FORCE_SETTLE_TICKS = 60;
 const REPLY_TIMEOUT_MS = 10 * 60 * 1000;
+const REDISCOVER_THROTTLE_MS = 5000;
+const RECONNECT_MAX_DELAY_MS = 30000;
 
 export class CdpManager {
   private http: CdpHttpClient;
@@ -60,6 +62,8 @@ export class CdpManager {
     count: 0,
   };
   private historySourceSessionId: string | null = null;
+  private lastRediscoverAt = 0;
+  private rediscovering: Promise<unknown> | null = null;
   readonly agents = new AgentsWindow(() => this.agentsWindowSession());
 
   constructor(private options: CdpManagerOptions) {
@@ -183,7 +187,7 @@ export class CdpManager {
       const sessionId = `cursor-${t.id}`;
       let session = this.sessions.get(sessionId);
       if (!session) {
-        session = new CursorSession(t, this.options.log, this.options.logError);
+        session = new CursorSession(t, this.options.log, this.options.logError, () => this.onSessionClosed());
         this.sessions.set(sessionId, session);
       } else {
         session.title = t.title || session.title;
@@ -273,7 +277,35 @@ export class CdpManager {
     for (const s of this.sessions.values()) {
       if (s.connected && /^cursor agents$/i.test(s.title.trim())) return s;
     }
+    this.rediscoverSoon();
     return null;
+  }
+
+  /** Picks up an Agents window opened (or reopened) after the last discovery, at most every few seconds. */
+  private rediscoverSoon(): void {
+    if (this.disposed || !this.connected || this.rediscovering) return;
+    if (Date.now() - this.lastRediscoverAt < REDISCOVER_THROTTLE_MS) return;
+    this.lastRediscoverAt = Date.now();
+    this.rediscovering = this.rediscover()
+      .catch((e) => {
+        this.options.logError("[CDP] Rediscovery failed", e);
+        this.connected = false;
+        this.lastError = e instanceof Error ? e.message : String(e);
+        this.scheduleReconnect();
+      })
+      .finally(() => {
+        this.rediscovering = null;
+      });
+  }
+
+  /** With every window gone, Cursor itself probably quit: reconnect until it is back. */
+  private onSessionClosed(): void {
+    if (this.disposed) return;
+    if ([...this.sessions.values()].some((s) => s.connected)) return;
+    this.connected = false;
+    this.lastError = "All Cursor windows closed";
+    this.stopPolling();
+    this.scheduleReconnect();
   }
 
   /** Prefer the "Cursor Agents" window for sidebar history scrape. */
@@ -561,13 +593,7 @@ export class CdpManager {
     if (this.disposed || !this.options.enabled) return;
     if (this.reconnectTimer) return;
     const attempt = ++this.reconnectAttempts;
-    if (attempt > 8) {
-      this.options.log(
-        "[CDP] Max reconnect attempts reached. Use cdp_status / restart Cursor with CDP."
-      );
-      return;
-    }
-    const delay = Math.min(30000, 1000 * Math.pow(2, attempt - 1));
+    const delay = Math.min(RECONNECT_MAX_DELAY_MS, 1000 * Math.pow(2, Math.min(attempt, 16) - 1));
     this.options.log(`[CDP] Reconnecting in ${delay}ms (attempt ${attempt})...`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;

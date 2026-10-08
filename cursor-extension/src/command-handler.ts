@@ -16,7 +16,8 @@ export class CommandHandler {
   constructor(
     outputChannel?: vscode.OutputChannel,
     wsServer?: WebSocketServer,
-    useCLIMode: boolean = true
+    useCLIMode: boolean = true,
+    storageDir?: string
   ) {
     this.outputChannel = outputChannel || null;
     this.wsServer = wsServer || null;
@@ -28,7 +29,7 @@ export class CommandHandler {
       workspaceFolders && workspaceFolders.length > 0
         ? workspaceFolders[0].uri.fsPath
         : undefined;
-    this.cliHandler = new CLIHandler(outputChannel, wsServer, workspaceRoot);
+    this.cliHandler = new CLIHandler(outputChannel, wsServer, workspaceRoot, storageDir);
     this.log("[Cursor Remote] CLI mode available");
   }
 

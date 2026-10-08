@@ -1,5 +1,5 @@
-import 'dart:convert';
 import 'dart:async';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -148,14 +148,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // Transport (Local / Tunnel / Relay) and the Agents window state
   late final CursorConnection _conn = CursorConnection(relayUrl: kRelayServerUrl);
   late final ChatStore _chats =
-      ChatStore(send: (command) async => (await _conn.send(command)).error);
+      ChatStore(send: (command) async => (await _conn.send(command)).failure);
   String? get _sessionId => _conn.sessionId;
-  String get _deviceId => _conn.deviceId;
   bool get _isConnected => _conn.connected;
   bool get _isConnecting => _conn.connecting;
   bool get _isReconnecting => _conn.reconnecting;
   int get _reconnectAttempts => _conn.reconnectAttempts;
   String? get _lastConnectionError => _conn.lastError;
+  bool _hadConnection = false;
+  /// A dropped connection that is being retried keeps the chat on screen.
+  bool get _showSession => _isConnected || (_hadConnection && (_isReconnecting || _isConnecting));
   bool _isWaitingForResponse = false; // waiting for AI response
 
   // Cursor CLI 세션 관련
@@ -170,10 +172,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Map<String, dynamic>? _sessionInfo; // 현재 세션 정보
   List<Map<String, dynamic>> _chatHistory = []; // 대화 히스토리 목록
   List<String> _availableSessions = []; // 사용 가능한 세션 목록
-  List<Map<String, dynamic>> _pendingCommandApprovals = [];
-  List<Map<String, dynamic>> _recentCommandEvents = [];
-  bool _loadingCommandApprovals = false;
-  bool _loadingCommandEvents = false;
   /// 같은 세션 재연결 시 메인 목록에 히스토리 반영용 (get_chat_history 응답 시 사용)
   bool _loadingSessionHistoryForDisplay = false;
 
@@ -289,6 +287,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// Runs after every successful connect, whatever the transport.
   void _onConnected() {
     if (!mounted) return;
+    _hadConnection = true;
     final relay = _conn.type == ConnectionType.relay;
     _saveConnectionSettings();
     AppSettings().addConnectionHistory(relay
@@ -310,10 +309,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     Future.delayed(const Duration(milliseconds: 300), () {
       if (!mounted) return;
       _loadChatHistory(sessionId: relay ? _sessionId : null);
-      if (relay) {
-        _loadCommandApprovals(silent: true);
-        _loadCommandEvents(silent: true);
-      }
     });
     Future.delayed(const Duration(milliseconds: 500), () {
       if (mounted && _selectedAgentBackend == 'cdp') _refreshAgents();
@@ -389,8 +384,42 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _localIpController.text = host;
     _localPortController.text = port.toString();
 
+    if (scheme == 'ws') {
+      if (kIsWeb) {
+        await showDialog<void>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Local mode is not available in the browser'),
+            content: const Text(
+                'Browsers block unencrypted ws:// connections from this page, and the pairing code and chats '
+                'would cross the network in plain text. Use Relay, or a Tunnel (wss://) URL from the Cursor extension.'),
+            actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK'))],
+          ),
+        );
+        return;
+      }
+      if (!isPrivateHost(host) && !await _confirmPlainConnection(host)) return;
+    }
+
     await _conn.connectLocal('$scheme://$host:$port',
         tunnel: asTunnel, label: asTunnel ? host : '$host:$port');
+  }
+
+  Future<bool> _confirmPlainConnection(String host) async {
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Unencrypted connection'),
+        content: Text('$host is not a home or office network address. Over ws:// your pairing code, '
+            'chats and code travel in plain text that anyone on the path can read.\n\n'
+            'Use Relay, or a Tunnel (wss://) URL, unless you know this network is private.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Connect anyway')),
+        ],
+      ),
+    );
+    return go == true && mounted;
   }
 
   Future<String?> _showLocalPairDialog() async {
@@ -952,13 +981,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _disconnect() async {
+    _hadConnection = false;
     _chats.reset();
     if (mounted) {
       setState(() {
-        _pendingCommandApprovals = [];
-        _recentCommandEvents = [];
-        _loadingCommandApprovals = false;
-        _loadingCommandEvents = false;
         _isWaitingForResponse = false;
       });
     }
@@ -1053,19 +1079,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     final result = await _conn.send(commandData);
     if (!mounted) return;
+    final failure = result.failure;
     setState(() {
-      if (result.policyDecision == 'approval_required') {
-        _messages.add(MessageItem(
-            '⏳ Approval required: ${result.approvalId} (risk: ${result.riskLevel})',
-            type: MessageType.system));
-        _isWaitingForResponse = false;
-      } else if (result.policyDecision == 'deny') {
-        _messages.add(MessageItem(
-            '🚫 Policy blocked: ${result.error ?? 'command denied'}',
-            type: MessageType.system));
-        _isWaitingForResponse = false;
-      } else if (result.error != null) {
-        _messages.add(MessageItem('❌ Send failed: ${result.error}',
+      if (failure != null) {
+        _messages.add(MessageItem('❌ Send failed: $failure',
             type: MessageType.system));
         _isWaitingForResponse = false;
       } else {
@@ -1076,10 +1093,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             type: MessageType.system));
       }
     });
-    if (result.policyDecision == 'approval_required') {
-      _loadCommandApprovals(silent: true);
-      _loadCommandEvents(silent: true);
-    }
     _scrollToBottom();
   }
 
@@ -1518,6 +1531,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       ..onInbound = _handleInbound
       ..onSystem = _onSystem
       ..onConnected = _onConnected
+      ..onGaveUp = (() => _hadConnection = false)
       ..askPairingCode = (({required bool relay}) =>
           relay ? _showPinDialog() : _showLocalPairDialog())
       ..isBusy = (() => _chats.running || _chats.awaitingReply || _isWaitingForResponse)
@@ -1687,190 +1701,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           limit: limit);
     } catch (e) {
       // 에러는 조용히 무시
-    }
-  }
-
-  Future<void> _loadCommandApprovals({bool silent = false}) async {
-    if (!_isConnected || _sessionId == null) return;
-    if (_connectionType != ConnectionType.relay) return;
-    if (_loadingCommandApprovals) return;
-
-    if (mounted) {
-      setState(() => _loadingCommandApprovals = true);
-    }
-
-    try {
-      final response = await _conn.relayGet('/api/command-approvals', {});
-      if (response == null) {
-        if (mounted) setState(() => _loadingCommandApprovals = false);
-        return;
-      }
-      final body = response.body.isNotEmpty
-          ? jsonDecode(response.body) as Map<String, dynamic>
-          : <String, dynamic>{};
-
-      if (!mounted) return;
-      if (response.statusCode == 200 && body['success'] == true) {
-        final data = body['data'] as Map<String, dynamic>? ?? {};
-        final approvals =
-            List<Map<String, dynamic>>.from((data['approvals'] as List? ?? [])
-                .map((e) => Map<String, dynamic>.from(e as Map)));
-
-        setState(() {
-          _pendingCommandApprovals = approvals;
-          _loadingCommandApprovals = false;
-        });
-
-        if (!silent) {
-          setState(() {
-            _messages.add(MessageItem('🔐 Pending approvals: ${approvals.length}',
-                type: MessageType.system));
-          });
-          _scrollToBottom();
-        }
-      } else {
-        setState(() => _loadingCommandApprovals = false);
-        if (!silent) {
-          setState(() {
-            _messages.add(MessageItem(
-                '❌ Failed to load approvals: ${body['error'] ?? 'HTTP ${response.statusCode}'}',
-                type: MessageType.system));
-          });
-          _scrollToBottom();
-        }
-      }
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _loadingCommandApprovals = false);
-      if (!silent) {
-        setState(() {
-          _messages.add(
-              MessageItem('❌ Failed to load approvals: $e', type: MessageType.system));
-        });
-        _scrollToBottom();
-      }
-    }
-  }
-
-  Future<void> _loadCommandEvents({int limit = 20, bool silent = false}) async {
-    if (!_isConnected || _sessionId == null) return;
-    if (_connectionType != ConnectionType.relay) return;
-    if (_loadingCommandEvents) return;
-
-    if (mounted) {
-      setState(() => _loadingCommandEvents = true);
-    }
-
-    try {
-      final response = await _conn.relayGet('/api/command-events', {'limit': '$limit'});
-      if (response == null) {
-        if (mounted) setState(() => _loadingCommandEvents = false);
-        return;
-      }
-      final body = response.body.isNotEmpty
-          ? jsonDecode(response.body) as Map<String, dynamic>
-          : <String, dynamic>{};
-
-      if (!mounted) return;
-      if (response.statusCode == 200 && body['success'] == true) {
-        final data = body['data'] as Map<String, dynamic>? ?? {};
-        final events =
-            List<Map<String, dynamic>>.from((data['events'] as List? ?? [])
-                .map((e) => Map<String, dynamic>.from(e as Map)));
-        setState(() {
-          _recentCommandEvents = events;
-          _loadingCommandEvents = false;
-        });
-
-        if (!silent) {
-          setState(() {
-            _messages.add(MessageItem('📚 Command events: ${events.length}',
-                type: MessageType.system));
-          });
-          _scrollToBottom();
-        }
-      } else {
-        setState(() => _loadingCommandEvents = false);
-        if (!silent) {
-          setState(() {
-            _messages.add(MessageItem(
-                '❌ Failed to load command events: ${body['error'] ?? 'HTTP ${response.statusCode}'}',
-                type: MessageType.system));
-          });
-          _scrollToBottom();
-        }
-      }
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _loadingCommandEvents = false);
-      if (!silent) {
-        setState(() {
-          _messages.add(MessageItem('❌ Failed to load command events: $e',
-              type: MessageType.system));
-        });
-        _scrollToBottom();
-      }
-    }
-  }
-
-  Future<void> _resolveCommandApproval(String approvalId, String action) async {
-    if (!_isConnected || _sessionId == null) return;
-    if (_connectionType != ConnectionType.relay) return;
-
-    try {
-      final response = await _conn.relayPost('/api/resolve-command-approval', {
-        'approvalId': approvalId,
-        'action': action,
-        'resolvedBy': _deviceId,
-        'reason': 'resolved via mobile app',
-      });
-      if (response == null) return;
-      final body = response.body.isNotEmpty
-          ? jsonDecode(response.body) as Map<String, dynamic>
-          : <String, dynamic>{};
-
-      if (!mounted) return;
-      if (response.statusCode == 200 && body['success'] == true) {
-        final status =
-            (body['data'] as Map<String, dynamic>? ?? {})['status'] ?? action;
-        setState(() {
-          _messages.add(MessageItem('✅ Approval resolved: $approvalId → $status',
-              type: MessageType.system));
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Approval $action completed')),
-        );
-        _scrollToBottom();
-        await _loadCommandApprovals(silent: true);
-        await _loadCommandEvents(silent: true);
-      } else {
-        setState(() {
-          _messages.add(MessageItem(
-              '❌ Failed to resolve approval: ${body['error'] ?? 'HTTP ${response.statusCode}'}',
-              type: MessageType.system));
-        });
-        _scrollToBottom();
-      }
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _messages.add(
-            MessageItem('❌ Failed to resolve approval: $e', type: MessageType.system));
-      });
-      _scrollToBottom();
-    }
-  }
-
-  Color _riskColor(String? riskLevel) {
-    switch (riskLevel) {
-      case 'critical':
-        return Colors.red;
-      case 'high':
-        return Colors.orange;
-      case 'medium':
-        return Colors.amber.shade700;
-      default:
-        return Colors.blueGrey;
     }
   }
 
@@ -2296,13 +2126,27 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ),
           const SizedBox(width: 6),
         ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(1),
-          child: Container(height: 1, color: Cr.borderSubtle),
-        ),
+        bottom: _showSession && !_isConnected
+            ? PreferredSize(
+                preferredSize: const Size.fromHeight(29),
+                child: Container(
+                  height: 29,
+                  color: Cr.surfaceHigh,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: const Row(children: [
+                    SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: Cr.warning)),
+                    SizedBox(width: 8),
+                    Text('Reconnecting…', style: TextStyle(color: Cr.warning, fontSize: 13)),
+                  ]),
+                ),
+              )
+            : PreferredSize(
+                preferredSize: const Size.fromHeight(1),
+                child: Container(height: 1, color: Cr.borderSubtle),
+              ),
       ),
       body: SafeArea(
-        child: !_isConnected
+        child: !_showSession
           ? _buildConnectionLanding()
           : _selectedAgentBackend == 'cdp'
           ? Listener(
@@ -4354,342 +4198,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                         ),
                                       ),
                                     ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                            Container(
-                              margin: const EdgeInsets.only(top: 8.0),
-                              child: Card(
-                                child: ExpansionTile(
-                                  title: Text(
-                                    'Command approvals & events',
-                                    style: TextStyle(
-                                      fontSize: 15,
-                                      fontWeight: FontWeight.w600,
-                                      color: Theme.of(context)
-                                          .colorScheme
-                                          .onSurface,
-                                    ),
-                                  ),
-                                  subtitle: Text(
-                                    'pending: ${_pendingCommandApprovals.length}',
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      color: Theme.of(context)
-                                          .colorScheme
-                                          .onSurfaceVariant,
-                                    ),
-                                  ),
-                                  leading: Container(
-                                    padding: const EdgeInsets.all(6),
-                                    decoration: BoxDecoration(
-                                      color: Theme.of(context)
-                                          .colorScheme
-                                          .tertiaryContainer,
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    child: Icon(
-                                      Icons.security,
-                                      size: 18,
-                                      color: Theme.of(context)
-                                          .colorScheme
-                                          .onTertiaryContainer,
-                                    ),
-                                  ),
-                                  children: [
-                                    Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 12, vertical: 8),
-                                      child: Row(
-                                        children: [
-                                          OutlinedButton.icon(
-                                            onPressed: _isConnected
-                                                ? () {
-                                                    _loadCommandApprovals();
-                                                    _loadCommandEvents();
-                                                  }
-                                                : null,
-                                            icon: const Icon(Icons.refresh,
-                                                size: 16),
-                                            label: const Text('Refresh'),
-                                          ),
-                                          const SizedBox(width: 8),
-                                          if (_loadingCommandApprovals ||
-                                              _loadingCommandEvents)
-                                            const SizedBox(
-                                              width: 16,
-                                              height: 16,
-                                              child: CircularProgressIndicator(
-                                                  strokeWidth: 2),
-                                            ),
-                                        ],
-                                      ),
-                                    ),
-                                    Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 12, vertical: 4),
-                                      child: Align(
-                                        alignment: Alignment.centerLeft,
-                                        child: Text(
-                                          'Pending approvals',
-                                          style: TextStyle(
-                                            fontSize: 13,
-                                            fontWeight: FontWeight.w600,
-                                            color: Theme.of(context)
-                                                .colorScheme
-                                                .onSurface,
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                    if (_pendingCommandApprovals.isEmpty)
-                                      Padding(
-                                        padding: const EdgeInsets.fromLTRB(
-                                            12, 0, 12, 8),
-                                        child: Align(
-                                          alignment: Alignment.centerLeft,
-                                          child: Text(
-                                            'No pending approvals.',
-                                            style: TextStyle(
-                                              fontSize: 12,
-                                              color: Theme.of(context)
-                                                  .colorScheme
-                                                  .onSurfaceVariant,
-                                            ),
-                                          ),
-                                        ),
-                                      )
-                                    else
-                                      ..._pendingCommandApprovals
-                                          .take(5)
-                                          .map((approval) {
-                                        final approvalId =
-                                            approval['approval_id']
-                                                    ?.toString() ??
-                                                '';
-                                        final commandMessage =
-                                            approval['command_message']
-                                                    as Map<String, dynamic>? ??
-                                                {};
-                                        final commandData =
-                                            commandMessage['data']
-                                                    as Map<String, dynamic>? ??
-                                                {};
-                                        final commandRaw =
-                                            commandData['command']
-                                                    ?.toString() ??
-                                                '(unknown)';
-                                        final policy = approval['policy']
-                                                as Map<String, dynamic>? ??
-                                            {};
-                                        final riskLevel =
-                                            policy['risk_level']?.toString() ??
-                                                'unknown';
-                                        final reasons = (policy['reasons']
-                                                    as List? ??
-                                                [])
-                                            .map((e) => e.toString())
-                                            .join(', ');
-                                        return Card(
-                                          margin: const EdgeInsets.fromLTRB(
-                                              12, 4, 12, 4),
-                                          elevation: 0,
-                                          shape: RoundedRectangleBorder(
-                                            borderRadius:
-                                                BorderRadius.circular(10),
-                                            side: BorderSide(
-                                              color: Theme.of(context)
-                                                  .colorScheme
-                                                  .outline
-                                                  .withValues(alpha: 0.2),
-                                            ),
-                                          ),
-                                          child: Padding(
-                                            padding: const EdgeInsets.all(10),
-                                            child: Column(
-                                              crossAxisAlignment:
-                                                  CrossAxisAlignment.start,
-                                              children: [
-                                                Row(
-                                                  children: [
-                                                    Expanded(
-                                                      child: Text(
-                                                        commandRaw,
-                                                        style: const TextStyle(
-                                                          fontSize: 12,
-                                                          fontFamily:
-                                                              'monospace',
-                                                          fontWeight:
-                                                              FontWeight.w600,
-                                                        ),
-                                                      ),
-                                                    ),
-                                                    Container(
-                                                      padding: const EdgeInsets
-                                                          .symmetric(
-                                                          horizontal: 8,
-                                                          vertical: 2),
-                                                      decoration: BoxDecoration(
-                                                        color: _riskColor(
-                                                                riskLevel)
-                                                            .withValues(alpha: 0.14),
-                                                        borderRadius:
-                                                            BorderRadius
-                                                                .circular(12),
-                                                      ),
-                                                      child: Text(
-                                                        riskLevel,
-                                                        style: TextStyle(
-                                                          fontSize: 10,
-                                                          fontWeight:
-                                                              FontWeight.w700,
-                                                          color: _riskColor(
-                                                              riskLevel),
-                                                        ),
-                                                      ),
-                                                    ),
-                                                  ],
-                                                ),
-                                                if (reasons.isNotEmpty) ...[
-                                                  const SizedBox(height: 4),
-                                                  Text(
-                                                    reasons,
-                                                    style: TextStyle(
-                                                      fontSize: 11,
-                                                      color: Theme.of(context)
-                                                          .colorScheme
-                                                          .onSurfaceVariant,
-                                                    ),
-                                                  ),
-                                                ],
-                                                const SizedBox(height: 8),
-                                                Row(
-                                                  children: [
-                                                    Expanded(
-                                                      child: OutlinedButton(
-                                                        onPressed: () {
-                                                          _resolveCommandApproval(
-                                                              approvalId,
-                                                              'reject');
-                                                        },
-                                                        child:
-                                                            const Text('Reject'),
-                                                      ),
-                                                    ),
-                                                    const SizedBox(width: 8),
-                                                    Expanded(
-                                                      child: FilledButton(
-                                                        onPressed: () {
-                                                          _resolveCommandApproval(
-                                                              approvalId,
-                                                              'approve');
-                                                        },
-                                                        child:
-                                                            const Text('Approve'),
-                                                      ),
-                                                    ),
-                                                  ],
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                        );
-                                      }),
-                                    const Divider(height: 20),
-                                    Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 12, vertical: 4),
-                                      child: Align(
-                                        alignment: Alignment.centerLeft,
-                                        child: Text(
-                                          'Recent command events',
-                                          style: TextStyle(
-                                            fontSize: 13,
-                                            fontWeight: FontWeight.w600,
-                                            color: Theme.of(context)
-                                                .colorScheme
-                                                .onSurface,
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                    if (_recentCommandEvents.isEmpty)
-                                      Padding(
-                                        padding: const EdgeInsets.fromLTRB(
-                                            12, 0, 12, 12),
-                                        child: Align(
-                                          alignment: Alignment.centerLeft,
-                                          child: Text(
-                                            'No command events to show.',
-                                            style: TextStyle(
-                                              fontSize: 12,
-                                              color: Theme.of(context)
-                                                  .colorScheme
-                                                  .onSurfaceVariant,
-                                            ),
-                                          ),
-                                        ),
-                                      )
-                                    else
-                                      ..._recentCommandEvents
-                                          .take(5)
-                                          .map((event) {
-                                        final result = event['result']
-                                                as Map<String, dynamic>? ??
-                                            {};
-                                        final command = event['command']
-                                                as Map<String, dynamic>? ??
-                                            {};
-                                        final approval = event['approval']
-                                                as Map<String, dynamic>? ??
-                                            {};
-                                        final risk = event['risk']
-                                                as Map<String, dynamic>? ??
-                                            {};
-                                        final status =
-                                            result['status']?.toString() ??
-                                                'unknown';
-                                        final raw = command['raw']
-                                                ?.toString() ??
-                                            '(unknown)';
-                                        final approvalStatus =
-                                            approval['status']?.toString() ??
-                                                'not_required';
-                                        final riskLevel =
-                                            risk['level']?.toString() ?? 'low';
-                                        Color statusColor;
-                                        switch (status) {
-                                          case 'success':
-                                            statusColor = Colors.green;
-                                            break;
-                                          case 'error':
-                                          case 'cancelled':
-                                            statusColor = Colors.red;
-                                            break;
-                                          default:
-                                            statusColor = Colors.orange;
-                                        }
-
-                                        return ListTile(
-                                          dense: true,
-                                          leading: Icon(Icons.bolt,
-                                              size: 16, color: statusColor),
-                                          title: Text(
-                                            '$status • $raw',
-                                            style:
-                                                const TextStyle(fontSize: 12),
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                          ),
-                                          subtitle: Text(
-                                            'risk: $riskLevel · approval: $approvalStatus',
-                                            style:
-                                                const TextStyle(fontSize: 11),
-                                          ),
-                                        );
-                                      }),
-                                    const SizedBox(height: 8),
                                   ],
                                 ),
                               ),

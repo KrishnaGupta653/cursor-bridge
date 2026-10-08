@@ -75,6 +75,48 @@ class ChatMarkdown extends StatelessWidget {
       softLineBreak: true,
       styleSheet: sheet(),
       builders: {'code': _CodeBlockBuilder()},
+      // Transcripts are untrusted: never fetch remote images (that leaks the phone's IP to whoever wrote the URL).
+      imageBuilder: (uri, title, alt) => _ImagePlaceholder(alt: alt, host: uri.host),
+      onTapLink: (text, href, title) => confirmLink(context, href),
+    );
+  }
+
+  /// Shows the full destination before anything happens; only https links are offered.
+  static Future<void> confirmLink(BuildContext context, String? href) async {
+    final uri = Uri.tryParse(href ?? '');
+    if (uri == null || uri.scheme != 'https' || uri.host.isEmpty) {
+      ScaffoldMessenger.maybeOf(context)
+          ?.showSnackBar(const SnackBar(content: Text('Only https links can be opened from a chat.')));
+      return;
+    }
+    final copy = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Link to ${uri.host}'),
+        content: SelectableText(uri.toString()),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Copy link')),
+        ],
+      ),
+    );
+    if (copy == true) await Clipboard.setData(ClipboardData(text: uri.toString()));
+  }
+}
+
+class _ImagePlaceholder extends StatelessWidget {
+  final String? alt;
+  final String host;
+  const _ImagePlaceholder({this.alt, required this.host});
+
+  @override
+  Widget build(BuildContext context) {
+    final label = (alt ?? '').trim().isEmpty ? 'Image' : alt!.trim();
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(borderRadius: BorderRadius.circular(6), border: Border.all(color: Cr.border)),
+      child: Text('🖼 $label${host.isEmpty ? '' : ' · $host'} (not loaded)',
+          style: const TextStyle(color: Cr.textSecondary, fontSize: 12.5)),
     );
   }
 }

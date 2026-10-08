@@ -199,7 +199,6 @@ CLI 응답 (AI 답변)
 | 포트 | 프로토콜 | 용도 |
 |------|----------|------|
 | 8766 | WebSocket | Extension WebSocket 서버 (로컬 모드 클라이언트 연결) |
-| 8768 | HTTP | Extension 훅 서버 (Rules 기반 채팅 등) |
 
 ## 보안 고려사항
 

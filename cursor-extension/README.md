@@ -34,7 +34,6 @@ Cursor Remote is an extension that allows you to remotely control Cursor AI from
 ### Features
 
 - 🌐 **WebSocket Server**: Real-time bidirectional communication (default port: 8766)
-- 🔌 **HTTP Hook Endpoint**: Internal hook receiver (default port: 8768, `POST /hook`)
 - 📝 **Prompt Sending**: Send prompts to Cursor AI from mobile
 - ⚡ **CLI Integration**: AI interaction through Cursor CLI (`agent`) command
 - 💬 **AI Response Capture**: Forward AI responses to mobile in real-time
@@ -136,7 +135,6 @@ If another PC is using the same Session ID, you'll get a **409 error**. Solution
 The extension currently uses internal defaults:
 
 - WebSocket: `8766` (auto-fallback to next available port)
-- HTTP hook endpoint: `8768` (`POST /hook`, local only)
 
 ### API
 
@@ -158,16 +156,6 @@ ws.onmessage = (event) => {
   const data = JSON.parse(event.data);
   console.log(data);
 };
-```
-
-#### HTTP Hook Endpoint
-
-This endpoint is used internally for hook-based message delivery:
-
-```bash
-curl -X POST http://localhost:8768/hook \
-  -H "Content-Type: application/json" \
-  -d '{"type":"chat_response","text":"example"}'
 ```
 
 There is no public `/status` or `/command` REST API in the extension.
@@ -242,7 +230,6 @@ Cursor Remote는 모바일 기기에서 Cursor AI를 원격으로 제어할 수 
 ### 기능
 
 - 🌐 **WebSocket 서버**: 실시간 양방향 통신 (기본 포트: 8766)
-- 🔌 **HTTP Hook 엔드포인트**: 내부 훅 수신용 (기본 포트: 8768, `POST /hook`)
 - 📝 **프롬프트 전송**: 모바일에서 Cursor AI에 프롬프트 전송
 - ⚡ **CLI 통합**: Cursor CLI(`agent`) 명령어를 통한 AI 상호작용
 - 💬 **AI 응답 캡처**: AI 응답을 실시간으로 모바일로 전달
@@ -346,7 +333,6 @@ Extension이 설치되면 자동으로 서버가 시작됩니다. 상태바에�
 현재 익스텐션은 내부 기본값을 사용합니다.
 
 - WebSocket: `8766` (충돌 시 다음 사용 가능한 포트로 자동 시작)
-- HTTP 훅 엔드포인트: `8768` (`POST /hook`, 로컬 전용)
 
 ### API
 
@@ -368,16 +354,6 @@ ws.onmessage = (event) => {
   const data = JSON.parse(event.data);
   console.log(data);
 };
-```
-
-#### HTTP Hook 엔드포인트
-
-이 엔드포인트는 훅 기반 메시지 전달을 위한 내부 용도입니다.
-
-```bash
-curl -X POST http://localhost:8768/hook \
-  -H "Content-Type: application/json" \
-  -d '{"type":"chat_response","text":"example"}'
 ```
 
 익스텐션에는 공개 `/status`, `/command` REST API가 없습니다.

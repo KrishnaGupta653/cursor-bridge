@@ -6,9 +6,6 @@ export const CONFIG = {
   // WebSocket server port
   WEBSOCKET_PORT: 8766,
 
-  // HTTP server port (for hooks)
-  HTTP_PORT: 8768,
-
   // Relay server URL
   RELAY_SERVER_URL: process.env.RELAY_SERVER_URL || "https://cursor-remote-rela.vercel.app",
 
@@ -19,9 +16,6 @@ export const CONFIG = {
   CDP_HOST: process.env.CDP_HOST || "127.0.0.1",
   CDP_PORT: Number(process.env.CDP_PORT || 9222),
   CDP_POLL_INTERVAL_MS: Number(process.env.CDP_POLL_INTERVAL_MS || 1000),
-
-  // Port range for finding available ports
-  PORT_SEARCH_MAX_ATTEMPTS: 10,
 
   // File paths
   CHAT_SUMMARY_FILE: ".cursor/CHAT_SUMMARY",

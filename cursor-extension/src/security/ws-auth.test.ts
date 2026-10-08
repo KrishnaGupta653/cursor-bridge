@@ -72,6 +72,10 @@ test("real WebSocket rejects session requests before auth and accepts them after
     client.send(JSON.stringify({ type: "get_sessions", id: "expired", deadline: Date.now() - 1 }));
     assert.equal(JSON.parse((await expired)[0].toString()).status, "invalid_or_expired_command");
     assert.equal(dispatched, 1);
+    const pong = once(client, "message");
+    client.send(JSON.stringify({ type: "ping" }));
+    assert.deepEqual(JSON.parse((await pong)[0].toString()), { type: "pong" });
+    assert.equal(dispatched, 1, "a heartbeat never reaches the command router");
     const reconnect = new WebSocket(url);
     await once(reconnect, "message");
     const reauthenticated = once(reconnect, "message");
@@ -97,15 +101,22 @@ test("real WebSocket rejects session requests before auth and accepts them after
 });
 
 test("typed command policy denies execution aliases and untargeted CDP prompts", () => {
-  for (const type of ["execute_command", "execute_action", "unknown", "approve_action", "reject_action", "stop_prompt"]) {
+  for (const type of ["execute_command", "execute_action", "unknown", "approve_action", "reject_action"]) {
     assert.ok(remoteCommandError({ type }));
   }
+  assert.equal(remoteCommandError({ type: "stop_prompt" }), null);
   for (const terminal of [true, "true", 1, "1", {}]) {
     assert.ok(remoteCommandError({ type: "insert_text", terminal, prompt: true }));
   }
   assert.ok(remoteCommandError({ type: "insert_text" }));
   assert.ok(remoteCommandError({ type: "agent_prompt" }));
   assert.equal(remoteCommandError({ type: "get_sessions" }), null);
-  assert.equal(remoteCommandError({ type: "agent_prompt", sessionId: "explicit-session" }), null);
+  assert.match(remoteCommandError({ type: "agent_prompt", sessionId: "explicit-session" }) || "", /chatId or newChat/);
+  assert.match(remoteCommandError({ type: "agent_prompt" }) || "", /chatId or newChat/);
+  assert.equal(remoteCommandError({ type: "agent_prompt", chatId: "abcdef12-3456" }), null);
+  assert.equal(remoteCommandError({ type: "agent_prompt", newChat: true }), null);
+  assert.match(remoteCommandError({ type: "insert_text", prompt: true, agentBackend: "cdp", sessionId: "s" }) || "", /Agents-window/);
+  assert.equal(remoteCommandError({ type: "insert_text", prompt: true, agentBackend: "cli" }), null);
+  assert.equal(remoteCommandError({ type: "insert_text", prompt: true }), null);
   assert.equal(remoteCommandError({ type: "insert_text", prompt: true }), null);
 });

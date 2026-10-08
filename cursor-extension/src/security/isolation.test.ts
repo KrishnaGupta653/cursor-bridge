@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { CHAT_CHANGED } from "../cdp/agents-window";
 
 // Only the editor host is faked; no Telegram API or Cursor process is started.
 const Module = require("node:module");
@@ -133,23 +134,6 @@ test("Telegram /stop, /model and /newchat go through the command router", async 
   ]);
 });
 
-test("Telegram /open opens only an item from the caller's history list", async () => {
-  const opened: string[] = [];
-  const sent: Array<{ chat: number; text: string }> = [];
-  const handler = {
-    getAgentHistory: async () => ({ items: [{ id: "hist-a", title: "A" }, { id: "hist-b", title: "B" }] }),
-    openAgentHistory: async (id: string) => { opened.push(id); return { ok: true }; },
-  };
-  const bridge = new TelegramBridge({ appendLine() {} }, {}, handler, {}, "");
-  bridge.sendText = async (chat: number, text: string) => { sent.push({ chat, text }); };
-  const state = bridge.getState(1, 1);
-  await bridge.dispatch(1, 1, state, "/open 2");
-  await bridge.dispatch(1, 1, state, "/open 99");
-  assert.deepEqual(opened, ["hist-b"]);
-  assert.match(sent[0].text, /Opened/);
-  assert.match(sent[1].text, /Not found/);
-});
-
 test("only one Cursor window may own the Telegram bot", () => {
   const { acquireTelegramLock, releaseTelegramLock } = require("../telegram-bridge");
   const { mkdtempSync, writeFileSync, existsSync } = require("node:fs");
@@ -166,48 +150,36 @@ test("only one Cursor window may own the Telegram bot", () => {
   assert.deepEqual(acquireTelegramLock(lock, process.pid), { ok: true });
 });
 
-test("Telegram /to selects the target session and prompts it", async () => {
-  const selected: string[] = [];
+test("Telegram legacy window-session commands are gone and never reach Cursor", async () => {
   const commands: any[] = [];
-  const handler = {
-    refreshCdpTargets: async () => [],
-    listCdpSessions: async () => [{ id: "s-a", title: "A" }, { id: "s-b", title: "B" }],
-    selectCdpSession: (id: string) => { selected.push(id); return true; },
-  };
-  const router = { handleCommand: async (c: any) => { commands.push(c); } };
-  const bridge = new TelegramBridge({ appendLine() {} }, router, handler, {}, "");
-  bridge.sendText = async () => {};
-  const state = bridge.getState(1, 1);
-  await bridge.dispatch(1, 1, state, "/to 2 run the tests");
-  assert.deepEqual(selected, ["s-b"]);
-  assert.equal(commands.length, 1);
-  assert.equal(commands[0].type, "agent_prompt");
-  assert.equal(commands[0].sessionId, "s-b");
-  assert.equal(commands[0].text, "run the tests");
-  assert.equal(commands[0].clientId, "telegram:1:1");
-});
-
-test("Telegram tappable /use_2 and /last_2 work like /use 2 and /last 2", async () => {
-  const selected: string[] = [];
   const sent: string[] = [];
-  const handler = {
-    refreshCdpTargets: async () => [],
-    listCdpSessions: async () => [{ id: "s-a", title: "A" }, { id: "s-b", title: "Repo B" }],
-    selectCdpSession: (id: string) => { if (!id.startsWith("s-")) return false; selected.push(id); return true; },
-    getAgentState: async () => ({ title: "Repo B", messages: [
-      { role: "assistant", text: "older" }, { role: "user", text: "q" }, { role: "assistant", text: "full latest reply" },
-    ] }),
-  };
-  const bridge = new TelegramBridge({ appendLine() {} }, {}, handler, {}, "");
+  const router = { handleCommand: async (c: any) => { commands.push(c); } };
+  const bridge = new TelegramBridge({ appendLine() {} }, router, {}, {}, "");
   bridge.sendText = async (_: number, text: string) => { sent.push(text); };
   const state = bridge.getState(1, 1);
-  await bridge.dispatch(1, 1, state, "/use_2");
-  await bridge.dispatch(1, 1, state, "/last_2");
-  assert.deepEqual(selected, ["s-b", "s-b"]);
-  assert.match(sent[1], /full latest reply/);
-  assert.doesNotMatch(sent[1], /older/);
-  await bridge.dispatch(1, 1, state, "/use nosuch");
-  assert.match(sent[2], /No session matches/);
+  for (const text of ["/sessions", "/use 2", "/use_2", "/to 2 run the tests", "/history", "/open 3", "/state", "/plan", "/messages"]) {
+    await bridge.dispatch(1, 1, state, text);
+  }
+  assert.deepEqual(commands, []);
+  assert.equal(sent.length, 9);
+  assert.ok(sent.every((t) => /\/chats/.test(t)), sent.join("\n"));
+  sent.length = 0;
+  state.backend = "cdp";
+  await bridge.dispatch(1, 1, state, "run the tests");
+  await bridge.dispatch(1, 1, state, "/last");
+  assert.deepEqual(commands, []);
+  assert.ok(sent.every((t) => /\/chats/.test(t)), sent.join("\n"));
+});
+
+test("Telegram drops messages queued for more than two minutes", async () => {
+  const { bridge } = fixture();
+  let dispatched = 0;
+  bridge.dispatch = async () => { dispatched++; };
+  const now = Math.floor(Date.now() / 1000);
+  await bridge.handleUpdate({ message: { date: now - 600, from: { id: 1 }, chat: { id: 1, type: "private" }, text: "/status" } });
+  assert.equal(dispatched, 0);
+  await bridge.handleUpdate({ message: { date: now - 5, from: { id: 1 }, chat: { id: 1, type: "private" }, text: "/status" } });
+  assert.equal(dispatched, 1);
 });
 
 test("Telegram never leaves a prompt hanging: CLI errors and empty replies are reported", () => {
@@ -408,7 +380,8 @@ test("remote approve/reject is bound to the open chat's exact request, confirmed
     agents: () => ({
       attached: true,
       composerState: async () => ({ok: true, state: {chatId: CHAT}}),
-      resolve: async (requestId: string, approve: boolean) => {
+      resolve: async (requestId: string, approve: boolean, chatId: string) => {
+        if (chatId !== CHAT) return {ok: false, error: CHAT_CHANGED};
         resolved.push([requestId, approve]);
         return requestId === "req-abc123" ? {ok: true, label: "Run"} : {ok: false, error: "That request is no longer pending"};
       },
@@ -441,4 +414,38 @@ test("remote approve/reject is bound to the open chat's exact request, confirmed
   assert.equal(lines.length, 8);
   assert.ok(lines.every((l) => l.includes("channel=relay") && !l.includes("phone")));
   assert.ok(lines.at(-1)!.includes("result=refused disabled"));
+});
+
+test("CLI stop is a typed, gated and audited remote action", async () => {
+  let stops = 0;
+  let enabled = true;
+  const audit: string[] = [];
+  const replies: any[] = [];
+  const router = new CommandRouter({ stopPrompt: async () => { stops++; return { success: true }; } },
+    {send: (raw: string) => replies.push(JSON.parse(raw))}, {appendLine: (l: string) => audit.push(l)});
+  router.log = () => {};
+  router.setChatServices({ index: {}, diff: {}, watcher: {}, remoteActionsEnabled: () => enabled, agents: () => null });
+  const stop = async () => {
+    await router.handleCommand({ type: "stop_prompt", id: "s1", clientId: "telegram:1:1" });
+    return replies.filter((r) => r.type === "command_result").at(-1);
+  };
+  assert.equal((await stop()).success, true);
+  enabled = false;
+  assert.equal((await stop()).success, false);
+  assert.equal(stops, 1);
+  const lines = audit.filter((l) => l.includes("[Audit]"));
+  assert.equal(lines.length, 2);
+  assert.ok(lines.at(-1)!.includes("result=refused disabled"));
+});
+
+test("Telegram /status, /file and /save go through the router, never the handler directly", async () => {
+  const commands: any[] = [];
+  const router = { handleCommand: async (c: any) => { commands.push(c); } };
+  const handler = new Proxy({}, { get: () => { throw new Error("handler called directly"); } });
+  const bridge = new TelegramBridge({ appendLine() {} }, router, handler, { getActualPort: () => 8766, isRunning: () => true }, "");
+  bridge.sendText = async () => {};
+  const state = bridge.getState(1, 1);
+  for (const text of ["/status", "/file", "/save"]) await bridge.dispatch(1, 1, state, text);
+  assert.deepEqual(commands.map((c) => c.type), ["get_cdp_status", "get_session_info", "get_active_file", "save_file"]);
+  assert.ok(commands.every((c) => c.clientId === "telegram:1:1"));
 });

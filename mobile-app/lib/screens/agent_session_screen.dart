@@ -114,6 +114,10 @@ class _AgentChatPaneState extends State<AgentChatPane> {
   }
 
   void _onStore() {
+    final failed = store.takeFailedPrompt();
+    if (failed != null && _input.text.trim().isEmpty) {
+      _input.value = TextEditingValue(text: failed, selection: TextSelection.collapsed(offset: failed.length));
+    }
     final items = store.thread?.items ?? const <ChatItem>[];
     final count = items.length;
     // The last answer grows in place while it streams; follow that too, not just new items.

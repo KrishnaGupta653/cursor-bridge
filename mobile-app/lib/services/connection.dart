@@ -11,10 +11,34 @@ import '../models/connection_models.dart';
 class SendResult {
   final String? error;
   final String policyDecision;
-  final String? approvalId;
-  final String riskLevel;
-  const SendResult({this.error, this.policyDecision = '', this.approvalId, this.riskLevel = ''});
+  const SendResult({this.error, this.policyDecision = ''});
   bool get ok => error == null && policyDecision != 'deny' && policyDecision != 'approval_required';
+
+  /// Why the command did not reach Cursor, or null if it did. A held or denied relay command is a failure.
+  String? get failure => error ?? switch (policyDecision) {
+        'approval_required' => 'The relay held this command for approval, so it was not sent to Cursor',
+        'deny' => 'The relay blocked this command',
+        _ => null,
+      };
+}
+
+/// Loopback, LAN, link-local, CGNAT/Tailscale, mDNS and single-label hosts: where plain ws:// is expected.
+bool isPrivateHost(String host) {
+  final h = host.trim().toLowerCase().replaceAll(RegExp(r'^\[|\]$'), '');
+  if (h.isEmpty) return false;
+  if (h == 'localhost' || h.endsWith('.local') || h.endsWith('.localhost')) return true;
+  final v4 = RegExp(r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$').firstMatch(h);
+  if (v4 != null) {
+    final o = [for (var i = 1; i <= 4; i++) int.parse(v4.group(i)!)];
+    if (o.any((n) => n > 255)) return false;
+    return o[0] == 10 || o[0] == 127 ||
+        (o[0] == 172 && o[1] >= 16 && o[1] <= 31) ||
+        (o[0] == 192 && o[1] == 168) ||
+        (o[0] == 169 && o[1] == 254) ||
+        (o[0] == 100 && o[1] >= 64 && o[1] <= 127);
+  }
+  if (h.contains(':')) return h == '::1' || RegExp(r'^f[cd]').hasMatch(h) || RegExp(r'^fe[89ab]').hasMatch(h);
+  return !h.contains('.');
 }
 
 /// Asks the user for a pairing code; null cancels.
@@ -34,6 +58,10 @@ class CursorConnection extends ChangeNotifier {
   static const activeWindow = Duration(minutes: 2);
   static const maxReconnectAttempts = 5;
 
+  /// Local/Tunnel sockets can die without a close frame (Wi-Fi drop, Mac asleep); a ping that
+  /// gets no frame back within one interval counts as a dead connection.
+  Duration heartbeatInterval = const Duration(seconds: 20);
+
   ConnectionType type = ConnectionType.relay;
   bool connected = false;
   bool connecting = false;
@@ -46,6 +74,8 @@ class CursorConnection extends ChangeNotifier {
   void Function(Map<String, dynamic> message)? onInbound;
   void Function(String text)? onSystem;
   VoidCallback? onConnected;
+  /// Automatic reconnection stopped (attempts used up, or the credential was refused).
+  VoidCallback? onGaveUp;
   PairingPrompt? askPairingCode;
 
   /// True while a reply is expected, so polling stays fast.
@@ -65,6 +95,8 @@ class CursorConnection extends ChangeNotifier {
   bool _visible = true;
   DateTime _lastActivity = DateTime.now();
   Timer? _reconnectTimer;
+  Timer? _heartbeat;
+  DateTime _lastInbound = DateTime.now();
 
   bool get isLocal => type == ConnectionType.local || type == ConnectionType.tunnel;
 
@@ -115,6 +147,7 @@ class CursorConnection extends ChangeNotifier {
       await _socket?.sink.close();
     } catch (_) {}
     _socket = null;
+    _stopHeartbeat();
     _stopPolling();
     stopReconnect();
     type = tunnel ? ConnectionType.tunnel : ConnectionType.local;
@@ -146,7 +179,26 @@ class CursorConnection extends ChangeNotifier {
         lastError = technical ?? userMessage;
       });
       _system('❌ $userMessage');
-      if (retry) scheduleReconnect();
+      if (retry) {
+        scheduleReconnect();
+      } else {
+        onGaveUp?.call();
+      }
+    }
+
+    void lost(WebSocketChannel socket, String message) {
+      if (_socket != socket) return;
+      _socket = null;
+      _stopHeartbeat();
+      try {
+        socket.sink.close();
+      } catch (_) {}
+      _set(() {
+        connected = false;
+        connecting = false;
+      });
+      _system(message);
+      scheduleReconnect();
     }
 
     void succeed() {
@@ -161,6 +213,8 @@ class CursorConnection extends ChangeNotifier {
         lastError = null;
       });
       stopReconnect();
+      final socket = _socket;
+      if (socket != null) _startHeartbeat(socket, () => lost(socket, 'Connection lost (no reply from Cursor).'));
       _system(tunnel ? '✅ Connected via Cloudflare Tunnel ($label)' : '✅ Connected to Cursor Remote server at $label');
       onConnected?.call();
     }
@@ -168,6 +222,7 @@ class CursorConnection extends ChangeNotifier {
     try {
       final socket = WebSocketChannel.connect(Uri.parse(wsUrl));
       _socket = socket;
+      _lastInbound = DateTime.now();
       timeout = Timer(const Duration(seconds: 120), () {
         fail(
           tunnel
@@ -179,6 +234,7 @@ class CursorConnection extends ChangeNotifier {
       socket.stream.listen(
         (message) {
           if (_socket != socket) return;
+          _lastInbound = DateTime.now();
           final raw = message.toString();
           if (!handshakeComplete) {
             try {
@@ -200,6 +256,10 @@ class CursorConnection extends ChangeNotifier {
         },
         onError: (Object error) {
           if (_socket != socket) return;
+          if (handshakeComplete) {
+            lost(socket, 'Connection lost.');
+            return;
+          }
           fail(
             tunnel
                 ? 'Tunnel unreachable. This network may block Cloudflare edge. Use Local on same Wi‑Fi — port may be 8767 if 8766 was busy.'
@@ -224,13 +284,7 @@ class CursorConnection extends ChangeNotifier {
             );
             return;
           }
-          _socket = null;
-          _set(() {
-            connected = false;
-            connecting = false;
-          });
-          _system('Connection closed.');
-          scheduleReconnect();
+          lost(socket, 'Connection closed.');
         },
         cancelOnError: true,
       );
@@ -243,6 +297,33 @@ class CursorConnection extends ChangeNotifier {
         retry: false,
       );
     }
+  }
+
+  void _startHeartbeat(WebSocketChannel socket, VoidCallback onDead) {
+    _stopHeartbeat();
+    DateTime? pingedAt;
+    _heartbeat = Timer.periodic(heartbeatInterval, (_) {
+      if (_socket != socket) {
+        _stopHeartbeat();
+        return;
+      }
+      final sent = pingedAt;
+      if (sent != null && _lastInbound.isBefore(sent)) {
+        onDead();
+        return;
+      }
+      pingedAt = DateTime.now();
+      try {
+        socket.sink.add(jsonEncode({'type': 'ping'}));
+      } catch (_) {
+        onDead();
+      }
+    });
+  }
+
+  void _stopHeartbeat() {
+    _heartbeat?.cancel();
+    _heartbeat = null;
   }
 
   Future<void> _authenticateLocalFrame(String raw, String endpoint, WebSocketChannel socket,
@@ -345,13 +426,25 @@ class CursorConnection extends ChangeNotifier {
         } else {
           _set(() => connecting = false);
         }
-      } else if ([401, 403, 409, 429].contains(response.statusCode)) {
+      } else if ([401, 403].contains(response.statusCode)) {
         _relayCredentials.remove(session);
+        onGaveUp?.call();
         _set(() {
           connected = false;
           connecting = false;
           lastError = 'Relay authentication failed ($errorCode). Check the session and obtain a new pairing code in Cursor.';
         });
+      } else if (response.statusCode == 409 || response.statusCode == 429) {
+        final error = response.statusCode == 409
+            ? 'Your Mac is not connected to session $session yet. Keep Cursor open and awake; retrying…'
+            : 'The relay is busy. Retrying shortly…';
+        _set(() {
+          connected = false;
+          connecting = false;
+          lastError = error;
+        });
+        _system('⏳ $error');
+        scheduleReconnect(atLeast: response.statusCode == 429 ? const Duration(seconds: 30) : null);
       } else {
         final error = errorMessage.isNotEmpty
             ? errorMessage
@@ -361,7 +454,11 @@ class CursorConnection extends ChangeNotifier {
           lastError = error;
         });
         _system('❌ Connection failed: $error');
-        if (!error.toLowerCase().contains('session not found')) scheduleReconnect();
+        if (!error.toLowerCase().contains('session not found')) {
+          scheduleReconnect();
+        } else {
+          onGaveUp?.call();
+        }
       }
     } catch (e) {
       _set(() {
@@ -410,7 +507,10 @@ class CursorConnection extends ChangeNotifier {
         return;
       }
       _stopPolling();
-      if ([401, 403].contains(response.statusCode)) _relayCredentials.remove(session);
+      if ([401, 403].contains(response.statusCode)) {
+        _relayCredentials.remove(session);
+        onGaveUp?.call();
+      }
       _set(() {
         connected = false;
         lastError = 'Relay polling failed (HTTP ${response.statusCode}). Reconnect to continue.';
@@ -456,7 +556,11 @@ class CursorConnection extends ChangeNotifier {
       _system('Received: $raw');
       return;
     }
-    if (decoded is Map) onInbound?.call(Map<String, dynamic>.from(decoded));
+    if (decoded is! Map) return;
+    // Heartbeat replies: `pong`, or the id-less rejection an older extension sends for a ping.
+    if (decoded['type'] == 'pong') return;
+    if (decoded['type'] == 'command_result' && decoded['id'] == null && decoded['status'] == 'invalid_or_expired_command') return;
+    onInbound?.call(Map<String, dynamic>.from(decoded));
   }
 
   /// Relay queue entries wrap the extension payload in `data` (sometimes as a JSON string).
@@ -517,8 +621,6 @@ class CursorConnection extends ChangeNotifier {
             ? null
             : (body?['error']?.toString() ?? 'HTTP ${response.statusCode}'),
         policyDecision: decision,
-        approvalId: meta['approvalId']?.toString(),
-        riskLevel: meta['riskLevel']?.toString() ?? '',
       );
     } catch (e) {
       return SendResult(error: e is TimeoutException ? 'The relay did not respond in time' : 'Send error: $e');
@@ -527,15 +629,17 @@ class CursorConnection extends ChangeNotifier {
 
   // ---- Reconnect / disconnect -----------------------------------------------------
 
-  void scheduleReconnect() {
+  void scheduleReconnect({Duration? atLeast}) {
     if (reconnecting || connected) return;
     if (reconnectAttempts >= maxReconnectAttempts) {
+      onGaveUp?.call();
       _set(() => reconnecting = false);
       _system('❌ Reconnection failed after $maxReconnectAttempts attempts. Please reconnect manually.');
       return;
     }
     reconnectAttempts++;
-    final delay = Duration(seconds: 2 * (1 << (reconnectAttempts - 1)));
+    var delay = Duration(seconds: 2 * (1 << (reconnectAttempts - 1)));
+    if (atLeast != null && delay < atLeast) delay = atLeast;
     _set(() => reconnecting = true);
     _system('🔄 Reconnecting in ${delay.inSeconds}s... (attempt $reconnectAttempts/$maxReconnectAttempts)');
     _reconnectTimer = Timer(delay, () {
@@ -564,6 +668,7 @@ class CursorConnection extends ChangeNotifier {
     final relaySession = type == ConnectionType.relay ? sessionId : null;
     final headers = relayHeaders();
     _stopPolling();
+    _stopHeartbeat();
     stopReconnect();
     try {
       await _socket?.sink.close();
@@ -593,6 +698,7 @@ class CursorConnection extends ChangeNotifier {
   @override
   void dispose() {
     _stopPolling();
+    _stopHeartbeat();
     stopReconnect();
     _socket?.sink.close();
     super.dispose();

@@ -39,6 +39,14 @@ class ChatStore extends ChangeNotifier {
   bool awaitingReply = false;
   String? pendingPrompt;
   String? error;
+  String? _failedPrompt;
+
+  /// The text of a prompt Cursor did not take, once, so the composer can give it back.
+  String? takeFailedPrompt() {
+    final p = _failedPrompt;
+    _failedPrompt = null;
+    return p;
+  }
 
   final Map<String, String> _sent = {};
   /// The chat each outstanding `get_chat` was for, so a late failure only touches that chat.
@@ -154,6 +162,7 @@ class ChatStore extends ChangeNotifier {
     final row = chats.where((c) => c.id == chatId).firstOrNull;
     selectedChatId = chatId;
     draft = false;
+    _resyncing = false;
     if (!keepPrompt) {
       pendingPrompt = null;
       awaitingReply = false;
@@ -200,6 +209,7 @@ class ChatStore extends ChangeNotifier {
     if (id == null) {
       awaitingReply = false;
       pendingPrompt = null;
+      _failedPrompt = prompt;
       notifyListeners();
     }
   }
@@ -297,6 +307,7 @@ class ChatStore extends ChangeNotifier {
     awaitingReply = false;
     pendingPrompt = null;
     error = null;
+    _resyncing = false;
     notifyListeners();
   }
 
@@ -404,6 +415,7 @@ class ChatStore extends ChangeNotifier {
         .map((f) => FileEdit.fromJson(Map<String, dynamic>.from(f)))
         .toList();
     t.loading = false;
+    _resyncing = false;
     final prompt = pendingPrompt;
     if (prompt != null && items.any((i) => i.role == 'user' && i.text.trim() == prompt)) pendingPrompt = null;
     unawaited(_command('watch_chat', {'chatId': t.chatId, 'fromTotal': t.total}));
@@ -455,6 +467,7 @@ class ChatStore extends ChangeNotifier {
     if (type == 'agent_prompt') {
       _sent.remove(correlationId);
       awaitingReply = false;
+      _failedPrompt = pendingPrompt;
       pendingPrompt = null;
     }
     _settle(type, forChat);
