@@ -39,6 +39,30 @@ export async function resumeSavedRelaySession(
   return client.isConnectedToSession() ? "connected" : "failed";
 }
 
+/** The relay client as Telegram sees it: status and single-use codes only, never stored credentials. */
+export interface TelegramRelay {
+  status(): { sessionId: string | null; connected: boolean };
+  createSingleUseCode(): Promise<{ code: string; expiresInSeconds: number }>;
+  onTelegramCode?(sessionId: string): void;
+}
+
+/** Codes made for Telegram are always single use, whatever cursorRemote.reusablePairingCode says. */
+export function relayForTelegram(
+  client: () => Pick<RelayClient, "getSessionId" | "isConnectedToSession" | "getPairingCode"> | null,
+  onTelegramCode?: (sessionId: string) => void
+): TelegramRelay {
+  return {
+    status: () => ({ sessionId: client()?.getSessionId() ?? null, connected: client()?.isConnectedToSession() ?? false }),
+    createSingleUseCode: async () => {
+      const relay = client();
+      if (!relay) throw new Error("No relay client");
+      const pairing = await relay.getPairingCode(false);
+      return { code: pairing.code, expiresInSeconds: Math.max(1, Math.round((pairing.expiresAt - Date.now()) / 1000)) };
+    },
+    onTelegramCode,
+  };
+}
+
 export interface RelayMessage {
   type: string;
   data?: any;

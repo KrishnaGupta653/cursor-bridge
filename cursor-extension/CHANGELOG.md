@@ -5,6 +5,18 @@ All notable changes to the "Cursor Remote" extension will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-10-09
+
+### Added
+- **Pair Relay Client**: a Copy button in the pairing dialog's title bar copies the code again (the code is still copied automatically when the dialog opens)
+- **Telegram `/pair`**: a single-use, 5-minute pairing code for the current relay session, so you can pair a phone from Telegram when away from the Mac. Always single use, even with `cursorRemote.reusablePairingCode` on; needs remote actions on and the Mac connected to a relay session; at most 3 codes per 15 minutes. The message is deleted when the code expires (or when the bot stops), the Mac shows a notification, and every attempt is audited without the code
+- **Telegram `/relay`** (session ID and whether the Mac is connected) and **`/app`** (link to the web app); `/start` and `/help` end with the app link
+- **Telegram**: "A new device joined relay session …" is also sent to the authorized chats with sync on
+- **App**: a `?session=ABC123` link pre-fills the Relay session field, unless the app already has a saved login. Pairing codes are never read from the URL
+
+### Changed
+- MTProto bridge: a send can carry a `ref` (answered with the sent message's id) and HTML formatting, and a new `delete` command removes a message. Plain sends work as before
+
 ## [0.6.0] - 2026-10-09
 
 ### Changed

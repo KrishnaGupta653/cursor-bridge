@@ -10,8 +10,15 @@ Protocol (stdin/stdout, one JSON object per line):
   out: {"type":"message","chat_id":1,"user_id":2,"text":"..."}
   out: {"type":"error","error":"..."}
   out: {"type":"log","message":"..."}
-  in:  {"type":"send","chat_id":1,"text":"..."}
+  out: {"type":"sent","ref":"<id>","message_id":5}   (only for a send with "ref"; message_id is
+       null when the send failed, and is the first part's id if the text was split)
+  in:  {"type":"send","chat_id":1,"text":"...","ref":"<id>","html":true}   (ref and html optional;
+       html sends with parse_mode="html", otherwise Telethon's default formatting as before)
+  in:  {"type":"delete","chat_id":1,"message_id":5}   (only failures are logged)
+  in:  {"type":"set_commands","commands":[{"command":"...","description":"..."}]}
   in:  {"type":"stop"}
+
+Never log message text: sent messages can carry pairing codes.
 """
 
 from __future__ import annotations
@@ -65,9 +72,66 @@ async def stdin_loop(client, queue: asyncio.Queue) -> None:
         try:
             msg = json.loads(line)
         except json.JSONDecodeError:
-            emit({"type": "error", "error": f"bad stdin json: {line[:80]}"})
+            emit({"type": "error", "error": "bad stdin json"})
             continue
         await queue.put(msg)
+
+
+async def handle_command(client, msg: dict) -> bool:
+    """Runs one stdin command. Returns False when the bridge should stop."""
+    mtype = msg.get("type")
+    if mtype == "stop":
+        return False
+    if mtype == "send":
+        chat_id = msg.get("chat_id")
+        text = msg.get("text") or ""
+        ref = msg.get("ref")
+        if chat_id is None or not text:
+            return True
+        kwargs = {"parse_mode": "html"} if msg.get("html") is True else {}
+        message_id = None
+        # Telegram hard limit ~4096. A failed send must not take the whole bot down.
+        chunk = text
+        while chunk:
+            part, chunk = chunk[:3900], chunk[3900:]
+            try:
+                sent = await client.send_message(int(chat_id), part, **kwargs)
+                if message_id is None:
+                    message_id = getattr(sent, "id", None)
+            except Exception as e:  # noqa: BLE001
+                wait = getattr(e, "seconds", None)
+                if isinstance(wait, int) and 0 < wait <= 60:
+                    await asyncio.sleep(wait)
+                    chunk = part + chunk
+                    continue
+                emit({"type": "log", "message": f"send failed: {type(e).__name__}"})
+                break
+        if isinstance(ref, str) and ref:
+            emit({"type": "sent", "ref": ref, "message_id": message_id})
+    elif mtype == "delete":
+        chat_id = msg.get("chat_id")
+        message_id = msg.get("message_id")
+        if chat_id is None or message_id is None:
+            return True
+        try:
+            await client.delete_messages(int(chat_id), [int(message_id)])
+        except Exception as e:  # noqa: BLE001
+            emit({"type": "log", "message": f"delete failed: {type(e).__name__}"})
+    elif mtype == "set_commands":
+        try:
+            from telethon.tl.functions.bots import SetBotCommandsRequest
+            from telethon.tl.types import BotCommand, BotCommandScopeDefault
+
+            commands = [
+                BotCommand(command=str(c["command"]), description=str(c["description"]))
+                for c in msg.get("commands") or []
+            ]
+            await client(SetBotCommandsRequest(scope=BotCommandScopeDefault(), lang_code="", commands=commands))
+        except Exception as e:  # noqa: BLE001
+            emit({"type": "log", "message": f"set_commands failed: {type(e).__name__}"})
+    else:
+        emit({"type": "log", "message": f"ignored stdin type={mtype}"})
+    return True
 
 
 async def main() -> None:
@@ -144,44 +208,8 @@ async def main() -> None:
     stdin_task = asyncio.create_task(stdin_loop(client, queue))
 
     try:
-        while True:
-            msg = await queue.get()
-            mtype = msg.get("type")
-            if mtype == "stop":
-                break
-            if mtype == "send":
-                chat_id = msg.get("chat_id")
-                text = msg.get("text") or ""
-                if chat_id is None or not text:
-                    continue
-                # Telegram hard limit ~4096. A failed send must not take the whole bot down.
-                chunk = text
-                while chunk:
-                    part, chunk = chunk[:3900], chunk[3900:]
-                    try:
-                        await client.send_message(int(chat_id), part)
-                    except Exception as e:  # noqa: BLE001
-                        wait = getattr(e, "seconds", None)
-                        if isinstance(wait, int) and 0 < wait <= 60:
-                            await asyncio.sleep(wait)
-                            chunk = part + chunk
-                            continue
-                        emit({"type": "log", "message": f"send failed: {type(e).__name__}"})
-                        break
-            elif mtype == "set_commands":
-                try:
-                    from telethon.tl.functions.bots import SetBotCommandsRequest
-                    from telethon.tl.types import BotCommand, BotCommandScopeDefault
-
-                    commands = [
-                        BotCommand(command=str(c["command"]), description=str(c["description"]))
-                        for c in msg.get("commands") or []
-                    ]
-                    await client(SetBotCommandsRequest(scope=BotCommandScopeDefault(), lang_code="", commands=commands))
-                except Exception as e:  # noqa: BLE001
-                    emit({"type": "log", "message": f"set_commands failed: {type(e).__name__}"})
-            else:
-                emit({"type": "log", "message": f"ignored stdin type={mtype}"})
+        while await handle_command(client, await queue.get()):
+            pass
     finally:
         stdin_task.cancel()
         await client.disconnect()

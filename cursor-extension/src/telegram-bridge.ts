@@ -25,12 +25,16 @@ import * as vscode from "vscode";
 import { CLI_NOT_INSTALLED } from "./cli-handler";
 import { isStaleTelegramMessage, readTelegramOffset, writeTelegramOffset } from "./private-state";
 import { CommandHandler } from "./command-handler";
-import { CommandRouter } from "./command-router";
+import { CommandRouter, REMOTE_ACTIONS_OFF } from "./command-router";
 import {
+  MtprotoSendTracker,
   ensureTelethonVenv,
   loadTelegcliApiCredentials,
+  mtprotoDeleteLine,
+  mtprotoSendLine,
   resolveMtprotoScript,
 } from "./telegram-mtproto";
+import type { TelegramRelay } from "./relay-client";
 import { AgentMode, CommandMessage } from "./types";
 import { WebSocketServer } from "./websocket-server";
 import { ChatWatcher } from "./chat-watcher";
@@ -46,6 +50,18 @@ export interface TelegramSecrets {
   /** auto | botapi | mtproto */
   transport?: string;
 }
+
+export const APP_URL = "https://cursor-remote-app.vercel.app/";
+
+/** The web app link; the session ID pre-fills the app's Relay field. Never carries a pairing code. */
+export function appLink(sessionId: string | null | undefined): string {
+  return sessionId && /^[A-Z0-9]{6}$/.test(sessionId) ? `${APP_URL}?session=${sessionId}` : APP_URL;
+}
+
+const NO_RELAY_SESSION =
+  "No relay session. On the Mac run Cursor Remote: Start New Relay Session or Connect to Relay Session.";
+const PAIR_LIMIT = 3;
+const PAIR_WINDOW_MS = 15 * 60 * 1000;
 
 interface TgUserState {
   chatId: number;
@@ -96,8 +112,13 @@ const HELP_TEXT = [
   "/file · /save",
   "/sync [on|off]   Send replies here automatically (default on)",
   "/status · /whoami",
+  "/app             Open the Cursor Remote web app",
+  "/relay           Relay session ID and status",
+  "/pair            One-time pairing code for the phone (works once, 5 min)",
   "",
   "Replies arrive when the agent pauses.",
+  "",
+  `App: ${APP_URL}`,
 ].join("\n");
 
 const BOT_COMMANDS = [
@@ -114,6 +135,9 @@ const BOT_COMMANDS = [
   { command: "save", description: "Save the active file" },
   { command: "sync", description: "Auto-send replies on/off" },
   { command: "status", description: "Connection status" },
+  { command: "app", description: "Open the Cursor Remote web app" },
+  { command: "relay", description: "Relay session ID and status" },
+  { command: "pair", description: "One-time pairing code for the phone (5 min)" },
   { command: "help", description: "All commands" },
 ];
 
@@ -289,6 +313,10 @@ function stripBotCommand(text: string): { cmd: string; args: string } {
   return { cmd, args };
 }
 
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 function truncate(s: string, max: number): string {
   const t = (s || "").replace(/\s+/g, " ").trim();
   if (t.length <= max) return t;
@@ -333,6 +361,13 @@ export class TelegramBridge {
   private captures = new Map<string, any[]>();
   private approvalCodes = new Map<string, ApprovalCode>();
   private lastAlertRequestId = "";
+  private relay: TelegramRelay | null;
+  private pairTimes = new Map<number, number[]>();
+  /** Pairing-code messages to delete when the code expires, keyed by their timer. */
+  private pairingDeletes = new Map<NodeJS.Timeout, { chatId: number; messageId: number }>();
+  private mtprotoSends = new MtprotoSendTracker();
+  private now = () => Date.now();
+  private schedule = (fn: () => void, ms: number): NodeJS.Timeout => setTimeout(fn, ms);
 
   constructor(
     outputChannel: vscode.OutputChannel,
@@ -340,7 +375,8 @@ export class TelegramBridge {
     commandHandler: CommandHandler,
     wsServer: WebSocketServer,
     extensionPath: string,
-    chatWatcher: ChatWatcher | null = null
+    chatWatcher: ChatWatcher | null = null,
+    relay: TelegramRelay | null = null
   ) {
     this.outputChannel = outputChannel;
     this.commandRouter = commandRouter;
@@ -348,6 +384,7 @@ export class TelegramBridge {
     this.wsServer = wsServer;
     this.extensionPath = extensionPath;
     this.chatWatcher = chatWatcher;
+    this.relay = relay;
     this.secretsPath = DEFAULT_SECRETS_PATH;
   }
 
@@ -644,7 +681,9 @@ export class TelegramBridge {
             this.log(`MTProto non-json: ${line.slice(0, 120)}`);
             continue;
           }
-          if (msg.type === "log") {
+          if (this.mtprotoSends.handle(msg)) {
+            continue;
+          } else if (msg.type === "log") {
             this.log(String(msg.message || ""));
           } else if (msg.type === "error") {
             this.log(`MTProto error: ${msg.error}`);
@@ -673,7 +712,10 @@ export class TelegramBridge {
 
       child.on("exit", (code) => {
         this.log(`MTProto bridge exited code=${code}`);
-        if (this.mtprotoChild === child) this.mtprotoChild = null;
+        if (this.mtprotoChild === child) {
+          this.mtprotoChild = null;
+          this.mtprotoSends.clear();
+        }
         // Exited after it was ready and nobody called stop(): reconnect instead of going silent.
         if (settled && this.running && this.mode === "mtproto") {
           this.running = false;
@@ -726,6 +768,8 @@ export class TelegramBridge {
 
   async stop(): Promise<void> {
     this.stopCount++;
+    const hadPairingDeletes = this.pairingDeletes.size > 0;
+    await this.flushPairingDeletes();
     this.running = false;
     if (this.mtprotoRestartTimer) clearTimeout(this.mtprotoRestartTimer);
     this.mtprotoRestartTimer = null;
@@ -739,19 +783,28 @@ export class TelegramBridge {
     this.chunkByChat.clear();
 
     if (this.mtprotoChild) {
+      const child = this.mtprotoChild;
+      this.mtprotoChild = null;
+      this.mtprotoSends.clear();
       try {
-        this.mtprotoChild.stdin.write(
+        child.stdin.write(
           JSON.stringify({ type: "stop" }) + "\n"
         );
       } catch {
         /* ignore */
       }
+      // The bridge handles stdin in order: give it a moment to run the deletes queued above.
+      if (hadPairingDeletes && child.exitCode === null) {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 3000);
+          child.once("exit", () => { clearTimeout(timer); resolve(); });
+        });
+      }
       try {
-        this.mtprotoChild.kill();
+        child.kill();
       } catch {
         /* ignore */
       }
-      this.mtprotoChild = null;
     }
 
     if (this.pollPromise) {
@@ -835,6 +888,77 @@ export class TelegramBridge {
       if (!res.ok) {
         this.log(`sendMessage failed: ${res.description || "unknown"}`);
       }
+    }
+  }
+
+  /** One short HTML message; resolves its message id so it can be deleted later, or null. */
+  private async sendTracked(chatId: number, html: string): Promise<number | null> {
+    if (this.mode === "mtproto") {
+      const child = this.mtprotoChild;
+      if (!child?.stdin.writable) return null;
+      const ref = crypto.randomBytes(8).toString("hex");
+      const sent = this.mtprotoSends.track(ref);
+      try {
+        child.stdin.write(mtprotoSendLine(chatId, html, { ref, html: true }));
+      } catch {
+        return null;
+      }
+      return sent;
+    }
+    const res = await this.api("sendMessage", {
+      chat_id: chatId,
+      text: html,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    });
+    const id = res.result?.message_id;
+    return res.ok && Number.isSafeInteger(id) ? id : null;
+  }
+
+  private async deleteMessage(chatId: number, messageId: number): Promise<void> {
+    let ok = false;
+    if (this.mode === "mtproto") {
+      const child = this.mtprotoChild;
+      if (child?.stdin.writable) {
+        try {
+          child.stdin.write(mtprotoDeleteLine(chatId, messageId));
+          ok = true;
+        } catch {
+          /* logged below */
+        }
+      }
+    } else if (this.mode === "botapi") {
+      ok = (await this.api("deleteMessage", { chat_id: chatId, message_id: messageId })).ok;
+    }
+    if (!ok) this.log("pairing message delete failed");
+  }
+
+  private schedulePairingDelete(chatId: number, messageId: number, seconds: number): void {
+    const timer = this.schedule(() => {
+      this.pairingDeletes.delete(timer);
+      void this.deleteMessage(chatId, messageId);
+    }, seconds * 1000);
+    timer.unref?.();
+    this.pairingDeletes.set(timer, { chatId, messageId });
+  }
+
+  private async flushPairingDeletes(): Promise<void> {
+    const pending = [...this.pairingDeletes];
+    this.pairingDeletes.clear();
+    if (!pending.length) return;
+    const deletes = Promise.allSettled(pending.map(([timer, m]) => {
+      clearTimeout(timer);
+      return this.deleteMessage(m.chatId, m.messageId);
+    }));
+    await Promise.race([deletes, new Promise((resolve) => setTimeout(resolve, 3000).unref?.())]);
+  }
+
+  /** A phone joined the relay session: tell the authorized chats with sync on. No codes or tokens. */
+  notifyDevicePaired(sessionId: string): void {
+    if (!this.running) return;
+    for (const userId of this.allowed) {
+      if (!this.allowedChats.has(userId) || this.userState.get(userId)?.sync === false) continue;
+      void this.sendText(userId, `📱 A new device joined relay session ${sessionId}.`);
     }
   }
 
@@ -1043,6 +1167,25 @@ export class TelegramBridge {
       case "start":
       case "help":
         await this.sendText(chatId, HELP_TEXT);
+        return;
+
+      case "app":
+        await this.sendText(chatId, `Open Cursor Remote: ${appLink(this.relay?.status().sessionId)}`);
+        return;
+
+      case "relay": {
+        const relay = this.relay?.status();
+        await this.sendText(
+          chatId,
+          relay?.sessionId
+            ? `Relay session ${relay.sessionId}\nMac: ${relay.connected ? "connected" : "not connected"}\nApp: ${appLink(relay.sessionId)}`
+            : NO_RELAY_SESSION
+        );
+        return;
+      }
+
+      case "pair":
+        await this.pair(userId, chatId);
         return;
 
       case "whoami":
@@ -1329,6 +1472,62 @@ export class TelegramBridge {
           `Unknown /${cmd}\n\nSend /help for every command.`
         );
     }
+  }
+
+  /** Always a single-use code, even when the Mac's pairing dialog uses reusable ones. Never logs the code. */
+  private async pair(userId: number, chatId: number): Promise<void> {
+    const audit = (ok: boolean, detail = "") =>
+      this.commandRouter.auditAction(`telegram:${chatId}:${userId}`, "telegram_pair", ok, detail);
+    if (!this.commandRouter.remoteActionsEnabled()) {
+      audit(false, "disabled");
+      await this.sendText(chatId, `❌ ${REMOTE_ACTIONS_OFF}`);
+      return;
+    }
+    const relay = this.relay?.status();
+    if (!this.relay || !relay?.connected || !relay.sessionId) {
+      audit(false, "not-connected");
+      await this.sendText(chatId, relay?.sessionId
+        ? `The Mac isn't connected to relay session ${relay.sessionId}. On the Mac run Cursor Remote: Connect to Relay Session or Start New Relay Session.`
+        : NO_RELAY_SESSION);
+      return;
+    }
+    const now = this.now();
+    const recent = (this.pairTimes.get(userId) || []).filter((t) => now - t < PAIR_WINDOW_MS);
+    if (recent.length >= PAIR_LIMIT) {
+      this.pairTimes.set(userId, recent);
+      const minutes = Math.max(1, Math.ceil((recent[0] + PAIR_WINDOW_MS - now) / 60_000));
+      audit(false, "rate-limited");
+      await this.sendText(chatId, `Too many pairing codes; try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`);
+      return;
+    }
+    recent.push(now);
+    this.pairTimes.set(userId, recent);
+
+    const sessionId = relay.sessionId;
+    let pairing: { code: string; expiresInSeconds: number };
+    try {
+      pairing = await this.relay.createSingleUseCode();
+    } catch {
+      audit(false, "relay-error");
+      await this.sendText(chatId, "❌ Couldn't create a pairing code. Check the Cursor Remote log on the Mac.");
+      return;
+    }
+    this.relay.onTelegramCode?.(sessionId);
+    const seconds = Number.isFinite(pairing.expiresInSeconds) && pairing.expiresInSeconds > 0 ? pairing.expiresInSeconds : 300;
+    const minutes = Math.max(1, Math.round(seconds / 60));
+    const messageId = await this.sendTracked(chatId, [
+      `Relay session ${escapeHtml(sessionId)}`,
+      `Pairing code: <code>${escapeHtml(pairing.code)}</code>`,
+      `Works once, expires in ${minutes} minute${minutes === 1 ? "" : "s"}. In the app: Relay → enter the session ID and this code.`,
+      `App: ${escapeHtml(appLink(sessionId))}`,
+    ].join("\n"));
+    if (messageId == null) {
+      audit(false, "send-failed");
+      this.log("pairing message send failed or unconfirmed; it can't be auto-deleted");
+      return;
+    }
+    audit(true);
+    this.schedulePairingDelete(chatId, messageId, seconds);
   }
 
   private async sendPrompt(

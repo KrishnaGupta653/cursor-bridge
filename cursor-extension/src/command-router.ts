@@ -24,6 +24,7 @@ export interface ChatServices {
 
 export const SESSION_CONTROL_OFF =
   "Session control is off on your Mac. In Cursor, run “Cursor Remote: Restart Cursor with Session Control”, then try again.";
+export const REMOTE_ACTIONS_OFF = "Remote actions are turned off on this Mac (cursorRemote.remoteActions)";
 export const AGENTS_WINDOW_CLOSED =
   "The Cursor Agents window isn't open on your Mac. Open it in Cursor, then try again.";
 
@@ -43,12 +44,20 @@ export class CommandRouter {
     this.chat = services;
   }
 
-  /** One line per remote action: channel, action, chat. Never includes prompt text or credentials. */
   private audit(command: CommandMessage, ok: boolean, detail = ""): void {
-    const chatId = typeof command.chatId === "string" ? command.chatId : "-";
+    this.auditAction(command.clientId, command.type, ok, detail, typeof command.chatId === "string" ? command.chatId : "-");
+  }
+
+  /** One line per remote action: channel, action, chat. Never includes prompt text or credentials. */
+  auditAction(clientId: string | undefined, action: string, ok: boolean, detail = "", chatId = "-"): void {
     this.outputChannel.appendLine(
-      `[${new Date().toISOString()}] [Audit] channel=${channelOf(command.clientId)} action=${command.type} chat=${chatId} result=${ok ? "ok" : "refused"}${detail ? ` ${detail}` : ""}`
+      `[${new Date().toISOString()}] [Audit] channel=${channelOf(clientId)} action=${action} chat=${chatId} result=${ok ? "ok" : "refused"}${detail ? ` ${detail}` : ""}`
     );
+  }
+
+  /** Unknown (no chat services yet) counts as off. */
+  remoteActionsEnabled(): boolean {
+    return this.chat?.remoteActionsEnabled() ?? false;
   }
 
   constructor(
@@ -116,7 +125,7 @@ export class CommandRouter {
       }
       if (REMOTE_ACTIONS.has(command.type) && this.chat && !this.chat.remoteActionsEnabled()) {
         this.audit(command, false, "disabled");
-        throw new Error("Remote actions are turned off on this Mac (cursorRemote.remoteActions)");
+        throw new Error(REMOTE_ACTIONS_OFF);
       }
       let result: CommandResult | null = null;
 

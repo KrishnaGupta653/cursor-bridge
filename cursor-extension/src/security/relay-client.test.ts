@@ -2,7 +2,7 @@ import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createServer } from "node:http";
-import { RelayClient, devicePairedMessage, pairingCodeTerms, resumeSavedRelaySession } from "../relay-client";
+import { RelayClient, devicePairedMessage, pairingCodeTerms, relayForTelegram, resumeSavedRelaySession } from "../relay-client";
 
 test("extension relay client persists device credentials and authenticates reconnect, pairing and revocation", async () => {
   const requests: Array<{ path: string; authorization?: string; body: any }> = [];
@@ -391,5 +391,29 @@ test("device_paired notices from the relay reach the callback, update the code's
     await (relay.client as any).pollMessages();
     assert.equal(devicePairedMessage(paired[2]), "Cursor Remote: a new device joined relay session NOTICE.");
     assert.ok(paired.every((e) => !JSON.stringify(e).includes(code.code)));
+  } finally { await relay.close(); }
+});
+
+test("Telegram codes are always single use and leave the session's reusable code as it was", async () => {
+  let minted = 0;
+  const relay = await fakeRelay({
+    "/api/pair": (body) => [200, { success: true, data: body.reusable === true
+      ? { pairingCode: `r${++minted}`.padEnd(43, "r"), expiresInSeconds: 3600, reusable: true, usesLeft: 3 }
+      : { pairingCode: `s${++minted}`.padEnd(43, "s"), expiresInSeconds: 300 } }],
+  });
+  const telegram = relayForTelegram(() => relay.client);
+  try {
+    assert.deepEqual(telegram.status(), { sessionId: null, connected: false });
+    await assert.rejects(telegram.createSingleUseCode());
+    await relay.client.connectToSessionById("TGPAIR");
+    assert.deepEqual(telegram.status(), { sessionId: "TGPAIR", connected: true });
+    const reusable = await relay.client.getPairingCode(true);
+    const saved = new Map(relay.secrets);
+    const single = await telegram.createSingleUseCode();
+    assert.notEqual(single.code, reusable.code);
+    assert.ok(single.expiresInSeconds > 290 && single.expiresInSeconds <= 300);
+    assert.deepEqual(relay.requests.filter((r) => r.path === "/api/pair").map((r) => r.body.reusable), [true, undefined]);
+    assert.deepEqual(relay.secrets, saved, "the stored reusable code is untouched");
+    assert.equal((await relay.client.getPairingCode(true)).code, reusable.code);
   } finally { await relay.close(); }
 });

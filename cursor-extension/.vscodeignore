@@ -10,3 +10,4 @@ tsconfig.json
 ../**
 out/**/*.test.js
 python/__pycache__/**
+python/test_*.py

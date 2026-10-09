@@ -4,7 +4,7 @@ import { WebSocketServer } from "./websocket-server";
 import { CommandHandler } from "./command-handler";
 import { CommandRouter } from "./command-router";
 import { StatusBarManager } from "./status-bar";
-import { RELAY_LOCK_PATH, RelayClient, devicePairedMessage, pairingCodeTerms, resumeSavedRelaySession } from "./relay-client";
+import { RELAY_LOCK_PATH, RelayClient, devicePairedMessage, pairingCodeTerms, relayForTelegram, resumeSavedRelaySession } from "./relay-client";
 import { CONFIG } from "./config";
 import { CdpManager } from "./cdp/cdp-manager";
 import { claimOnce, cursorBinary, scheduleRelaunchWithCdp } from "./cdp/relaunch";
@@ -12,6 +12,7 @@ import { ChatWatcher } from "./chat-watcher";
 import { TranscriptIndex } from "./transcripts/transcript-index";
 import { WorkspaceDiff } from "./transcripts/workspace-diff";
 import { CloudflareTunnelManager } from "./cloudflare-tunnel";
+import { showPairingCodeBox } from "./pairing-box";
 import {
   TelegramBridge,
   defaultTelegramSecretsPath,
@@ -177,6 +178,12 @@ function relayServerUrl(): string {
     .replace(/\/+$/, "");
   return /^https:\/\/[^\s/]+/i.test(v) ? v : CONFIG.RELAY_SERVER_URL;
 }
+
+const telegramRelay = relayForTelegram(() => relayClient, (sessionId) => {
+  void vscode.window
+    .showInformationMessage(`Telegram created a pairing code for relay session ${sessionId}.`, "Start New Relay Session")
+    .then((pick) => pick && vscode.commands.executeCommand("cursorRemote.newRelaySession"));
+});
 
 function escapeHtml(s: string): string {
   return s
@@ -575,7 +582,8 @@ export async function activate(context: vscode.ExtensionContext) {
           commandHandler,
           wsServer,
           context.extensionPath,
-          chatWatcher
+          chatWatcher,
+          telegramRelay
         );
       }
       if (telegramBridge.isRunning()) {
@@ -889,9 +897,9 @@ export async function activate(context: vscode.ExtensionContext) {
       const wantReusable = vscode.workspace.getConfiguration("cursorRemote").get<boolean>("reusablePairingCode", false);
       const pairing = await relayClient!.getPairingCode(wantReusable);
       await vscode.env.clipboard.writeText(pairing.code);
-      await vscode.window.showInputBox({
+      await showPairingCodeBox(() => vscode.window.createInputBox(), (text) => vscode.env.clipboard.writeText(text), {
         title: `Relay session ${relayClient!.getSessionId()} — pairing code copied (${pairingCodeTerms(pairing, wantReusable)})`,
-        value: pairing.code, ignoreFocusOut: true,
+        code: pairing.code,
         prompt: pairing.reusable
           ? "In the app, enter the session ID above and this code. Anyone with this code can join until the session ends; Start New Relay Session cancels it."
           : "In the app, enter the session ID above and this code. Keep the code private." });
@@ -997,6 +1005,7 @@ export async function activate(context: vscode.ExtensionContext) {
   relayClient.setOnTargetGone((clientId) => chatWatcher?.forgetClient(clientId));
   relayClient.setOnDevicePaired((event) => {
     updateConnectionsView();
+    telegramBridge?.notifyDevicePaired(event.sessionId);
     void vscode.window
       .showInformationMessage(devicePairedMessage(event), "Start New Relay Session")
       .then((pick) => pick && vscode.commands.executeCommand("cursorRemote.newRelaySession"));
@@ -1125,7 +1134,8 @@ export async function activate(context: vscode.ExtensionContext) {
         commandHandler,
         wsServer,
         context.extensionPath,
-        chatWatcher
+        chatWatcher,
+        telegramRelay
       );
       const bridge = telegramBridge;
       let lockNoticeShown = false;

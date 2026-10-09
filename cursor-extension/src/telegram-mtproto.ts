@@ -104,6 +104,56 @@ async function findSystemPython(): Promise<string | null> {
   return null;
 }
 
+/** A stdin line for the bridge. With a ref, the bridge answers {"type":"sent","ref","message_id"}. */
+export function mtprotoSendLine(chatId: number, text: string, opts: { ref?: string; html?: boolean } = {}): string {
+  return JSON.stringify({
+    type: "send", chat_id: chatId, text,
+    ...(opts.ref ? { ref: opts.ref } : {}),
+    ...(opts.html ? { html: true } : {}),
+  }) + "\n";
+}
+
+export function mtprotoDeleteLine(chatId: number, messageId: number): string {
+  return JSON.stringify({ type: "delete", chat_id: chatId, message_id: messageId }) + "\n";
+}
+
+/** Matches "sent" replies to sends by ref; a reply that never comes resolves null after the timeout. */
+export class MtprotoSendTracker {
+  private pending = new Map<string, { resolve: (id: number | null) => void; timer: NodeJS.Timeout }>();
+
+  constructor(private timeoutMs = 10_000) {}
+
+  track(ref: string): Promise<number | null> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => this.finish(ref, null), this.timeoutMs);
+      timer.unref?.();
+      this.pending.set(ref, { resolve, timer });
+    });
+  }
+
+  /** True when `msg` was a "sent" reply (handled here). */
+  handle(msg: any): boolean {
+    if (msg?.type !== "sent") return false;
+    if (typeof msg.ref === "string") {
+      this.finish(msg.ref, Number.isSafeInteger(msg.message_id) && msg.message_id > 0 ? msg.message_id : null);
+    }
+    return true;
+  }
+
+  /** Bridge gone: nothing more will arrive. */
+  clear(): void {
+    for (const ref of [...this.pending.keys()]) this.finish(ref, null);
+  }
+
+  private finish(ref: string, id: number | null): void {
+    const entry = this.pending.get(ref);
+    if (!entry) return;
+    this.pending.delete(ref);
+    clearTimeout(entry.timer);
+    entry.resolve(id);
+  }
+}
+
 /** Merge apiId/apiHash from telegcli config if present and secrets lack them. */
 export function loadTelegcliApiCredentials(): {
   apiId?: number;
