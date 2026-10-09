@@ -121,6 +121,58 @@ void main() {
     expect(launchSessionId(link('session=ABC123'), login), isNull);
   });
 
+  test('a pasted pairing code is found inside stray spaces or the whole Telegram line', () {
+    final code = 'Ab_-${'9' * 39}';
+    expect(extractPairingCode(code), code);
+    expect(extractPairingCode(' \n$code\n'), code);
+    expect(extractPairingCode('Or enter it by hand: $code'), code);
+    expect(extractPairingCode('${code}x'), '${code}x', reason: 'too long is not silently cut');
+    expect(extractPairingCode(' short '), 'short');
+  });
+
+  test('a one-tap pairing link needs a valid session and code', () {
+    final code = 'c' * 43;
+    Uri link(String query) => Uri.parse('https://cursor-remote-app.vercel.app/?$query');
+    final ok = LaunchPairing.from(link('session=ABC123'), code)!;
+    expect((ok.sessionId, ok.code), ('ABC123', code));
+    expect(LaunchPairing.from(link('session=ABC123'), null), isNull);
+    expect(LaunchPairing.from(link('session=ABC123'), 'c' * 42), isNull);
+    expect(LaunchPairing.from(link('session=abc123'), code), isNull);
+    expect(LaunchPairing.from(link(''), code), isNull);
+  });
+
+  testWidgets('a one-tap pairing link connects at once with its code, over a saved login',
+      (WidgetTester tester) async {
+    final code = 'c' * 43;
+    final old = RelayLogin(sessionId: 'XYZ789', deviceId: 'mobile-1', token: 'a' * 43,
+        expiresAt: DateTime.now().add(const Duration(hours: 2)).millisecondsSinceEpoch);
+    SharedPreferences.setMockInitialValues({RelayLogin.storageKey: jsonEncode(old.toJson())});
+    final connects = <http.Request>[];
+    final relay = MockClient((req) async {
+      if (req.url.path == '/api/connect') {
+        connects.add(req);
+        return http.Response(jsonEncode({'success': true, 'protocolVersion': 2,
+          'data': {'deviceId': 'mobile-9', 'token': 'n' * 43, 'credentialExpiresAt': old.expiresAt}}), 200);
+      }
+      return http.Response(jsonEncode({'success': true, 'data': {'messages': []}}), 200);
+    });
+    await tester.binding.setSurfaceSize(const Size(1100, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await http.runWithClient(() async {
+      await tester.pumpWidget(MyApp(savedLogin: old, launchPairing: LaunchPairing('ABC123', code)));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+    }, () => relay);
+    expect(connects, hasLength(1));
+    expect(jsonDecode(connects.single.body), containsPair('sessionId', 'ABC123'));
+    expect(jsonDecode(connects.single.body), containsPair('pairingCode', code));
+    expect(connects.single.headers['Authorization'], isNull);
+    final saved = RelayLogin.fromJson(jsonDecode((await SharedPreferences.getInstance()).getString(RelayLogin.storageKey)!))!;
+    expect((saved.sessionId, saved.token), ('ABC123', 'n' * 43));
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 1));
+  });
+
   testWidgets('a session from the link pre-fills the Relay field over the last session ID, and no code',
       (WidgetTester tester) async {
     SharedPreferences.setMockInitialValues({'last_session_id': 'OLD999', 'connection_type': 'local'});

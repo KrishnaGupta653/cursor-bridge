@@ -278,6 +278,30 @@ void main() {
       });
     }
 
+    test('a new pairing code beats a stale saved login, and a wrong code keeps a login that still works', () async {
+      SharedPreferences.setMockInitialValues({RelayLogin.storageKey: savedJson()});
+      final fake = relay(connect: (req) => switch (jsonDecode(req.body)['pairingCode']) {
+            null => http.Response(jsonEncode({'success': true, 'protocolVersion': 2,
+                'data': {'deviceId': 'mobile-1', 'credentialExpiresAt': later}}), 200),
+            final c when c == 'g' * 43 => http.Response(jsonEncode({'success': true, 'protocolVersion': 2,
+                'data': {'deviceId': 'mobile-2', 'token': 'n' * 43, 'credentialExpiresAt': later}}), 200),
+            _ => http.Response(jsonEncode({'success': false, 'errorCode': 'PAIRING_CODE_INVALID_OR_EXPIRED'}), 403),
+          });
+      final conn = connection()..setVisible(false);
+      await http.runWithClient(() async {
+        await conn.restoreRelayLogin(await RelayLogin.load());
+        await conn.connectRelay('ABC123', 'b' * 43);
+      }, () => fake.client);
+      final attempts = fake.requests.where((r) => r.url.path == '/api/connect').toList();
+      expect(attempts.last.headers['Authorization'], isNull, reason: 'a code is never shadowed by the old login');
+      expect(conn.lastError, contains('Send /pair in Telegram'));
+      expect(await saved(), savedJson(), reason: 'a wrong code does not log you out');
+
+      await http.runWithClient(() => conn.connectRelay('ABC123', 'g' * 43), () => fake.client);
+      expect(conn.connected, isTrue);
+      expect(RelayLogin.fromJson(jsonDecode((await saved())!))!.token, 'n' * 43);
+    });
+
     test('a used-up reusable pairing code gets its own message', () async {
       final fake = relay(connect: (_) => http.Response(jsonEncode({'success': false, 'errorCode': 'PAIRING_CODE_USED_UP'}), 403));
       final conn = connection();

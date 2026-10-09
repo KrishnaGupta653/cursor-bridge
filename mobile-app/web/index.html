@@ -40,6 +40,17 @@
   </style>
 </head>
 <body>
+  <script>
+    // One-tap pairing links (Telegram /pair) carry a single-use code in #code=. Take it before
+    // Flutter starts and drop it from the address bar and history.
+    (function () {
+      var hash = window.location.hash;
+      if (hash.indexOf('code=') === -1) return;
+      var m = /^#code=([A-Za-z0-9_-]{43})$/.exec(hash);
+      if (m) window.crLaunchPairingCode = m[1];
+      history.replaceState(null, '', window.location.pathname + window.location.search);
+    })();
+  </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

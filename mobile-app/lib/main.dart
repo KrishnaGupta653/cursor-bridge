@@ -8,6 +8,8 @@ import 'models/connection_models.dart';
 import 'services/app_settings.dart';
 import 'services/chat_store.dart';
 import 'services/connection.dart';
+import 'services/launch_code_stub.dart'
+    if (dart.library.js_interop) 'services/launch_code_web.dart';
 import 'screens/agent_control_center.dart';
 import 'screens/connection_landing.dart';
 import 'theme/app_theme.dart';
@@ -23,7 +25,12 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await AppSettings().load();
   final savedLogin = await RelayLogin.load();
-  runApp(MyApp(savedLogin: savedLogin, launchSessionId: launchSessionId(Uri.base, savedLogin)));
+  final launchPairing = LaunchPairing.from(Uri.base, takeLaunchPairingCode());
+  runApp(MyApp(
+    savedLogin: savedLogin,
+    launchSessionId: launchSessionId(Uri.base, savedLogin),
+    launchPairing: launchPairing,
+  ));
 }
 
 final ThemeData darkTheme = buildCrDarkTheme();
@@ -32,10 +39,11 @@ final ThemeData darkTheme = buildCrDarkTheme();
 // App Root
 // ============================================================
 class MyApp extends StatelessWidget {
-  const MyApp({super.key, this.savedLogin, this.launchSessionId});
+  const MyApp({super.key, this.savedLogin, this.launchSessionId, this.launchPairing});
 
   final RelayLogin? savedLogin;
   final String? launchSessionId;
+  final LaunchPairing? launchPairing;
 
   // Dark-only, like Cursor's Agents window: the screens use fixed Cr colors.
   @override
@@ -45,19 +53,22 @@ class MyApp extends StatelessWidget {
       theme: darkTheme,
       darkTheme: darkTheme,
       themeMode: ThemeMode.dark,
-      home: HomePage(savedLogin: savedLogin, launchSessionId: launchSessionId),
+      home: HomePage(savedLogin: savedLogin, launchSessionId: launchSessionId, launchPairing: launchPairing),
     );
   }
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key, this.savedLogin, this.launchSessionId});
+  const HomePage({super.key, this.savedLogin, this.launchSessionId, this.launchPairing});
 
   /// Read before the first frame, so a refresh goes straight to "Connecting…" instead of the landing page.
   final RelayLogin? savedLogin;
 
   /// Pre-fills the Relay session field (from `?session=`); a saved login wins.
   final String? launchSessionId;
+
+  /// A one-tap pairing link: connects with its code at once and replaces any saved login.
+  final LaunchPairing? launchPairing;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -744,17 +755,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Text(
-                'Run Cursor Remote: Pair Relay Client in Cursor and paste the single-use code.',
+                'Paste the single-use code from Cursor (Cursor Remote: Pair Relay Client) or from /pair in Telegram.',
                 style: TextStyle(fontSize: 14),
               ),
               const SizedBox(height: 16),
               TextField(
                 controller: controller,
                 keyboardType: TextInputType.text,
-                maxLength: 43,
                 autofocus: true,
                 textInputAction: TextInputAction.done,
-                onSubmitted: (_) => navigator.pop(controller.text.trim()),
+                onSubmitted: (_) => navigator.pop(extractPairingCode(controller.text)),
                 enableSuggestions: false,
                 autocorrect: false,
                 decoration: const InputDecoration(
@@ -773,7 +783,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             child: const Text('Cancel'),
           ),
           FilledButton(
-            onPressed: () => navigator.pop(controller.text.trim()),
+            onPressed: () => navigator.pop(extractPairingCode(controller.text)),
             child: const Text('OK'),
           ),
         ],
@@ -1542,7 +1552,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}:${time.second.toString().padLeft(2, '0')}';
   }
 
-  String? get _launchSessionId => widget.savedLogin == null ? widget.launchSessionId : null;
+  String? get _launchSessionId =>
+      widget.launchPairing?.sessionId ?? (widget.savedLogin == null ? widget.launchSessionId : null);
 
   @override
   void initState() {
@@ -1561,7 +1572,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       ..isBusy = (() => _chats.running || _chats.awaitingReply || _isWaitingForResponse)
       ..addListener(_onConnectionChanged);
     final saved = widget.savedLogin;
-    if (saved != null) {
+    final pairing = widget.launchPairing;
+    if (pairing != null) {
+      _connectionType = ConnectionType.relay;
+      _sessionIdController.text = pairing.sessionId;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _conn.connectRelay(pairing.sessionId, pairing.code);
+      });
+    } else if (saved != null) {
       if (!saved.expired) {
         _hadConnection = true;
         _restoringLogin = true;

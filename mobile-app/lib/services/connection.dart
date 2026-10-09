@@ -46,11 +46,32 @@ bool isPrivateHost(String host) {
 typedef PairingPrompt = Future<String?> Function({required bool relay});
 
 /// The relay session ID from a link like `/?session=ABC123` (Telegram /relay and /pair), to pre-fill
-/// the Relay field. Ignored when a saved login exists. A pairing code is never taken from a URL.
+/// the Relay field. Ignored when a saved login exists.
 String? launchSessionId(Uri uri, RelayLogin? savedLogin) {
   if (savedLogin != null) return null;
   final session = uri.queryParameters['session'];
   return session != null && RegExp(r'^[A-Z0-9]{6}$').hasMatch(session) ? session : null;
+}
+
+/// A one-tap pairing link from Telegram /pair: `/?session=ABC123#code=<code>`. web/index.html takes the
+/// code from the fragment (never sent to a server) and strips it before the app starts.
+class LaunchPairing {
+  final String sessionId;
+  final String code;
+  const LaunchPairing(this.sessionId, this.code);
+
+  static LaunchPairing? from(Uri uri, String? code) {
+    final session = uri.queryParameters['session'];
+    if (session == null || !RegExp(r'^[A-Z0-9]{6}$').hasMatch(session)) return null;
+    if (code == null || !RegExp(r'^[A-Za-z0-9_-]{43}$').hasMatch(code)) return null;
+    return LaunchPairing(session, code);
+  }
+}
+
+/// The 43-character pairing code inside pasted text (stray spaces, newlines or the whole Telegram line).
+String extractPairingCode(String raw) {
+  final match = RegExp(r'(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])').firstMatch(raw);
+  return match?.group(0) ?? raw.trim();
 }
 
 /// The relay login kept across page refreshes and app restarts (localStorage on web). Only the
@@ -499,7 +520,9 @@ class CursorConnection extends ChangeNotifier {
     }
     deviceId = _relayDeviceIds[session] ?? deviceId;
     if (deviceId.isEmpty) deviceId = 'mobile-${DateTime.now().millisecondsSinceEpoch}';
-    final hadCredential = _relayCredentials[session] != null;
+    // A pairing code always enrolls afresh: a stale saved login must not shadow it.
+    final usingCode = pairingCode != null && pairingCode.isNotEmpty;
+    final hadCredential = !usingCode && _relayCredentials[session] != null;
     _set(() {
       connecting = true;
       lastError = null;
@@ -512,12 +535,12 @@ class CursorConnection extends ChangeNotifier {
       final response = await http
           .post(
             Uri.parse('$relayUrl/api/connect'),
-            headers: relayHeaders(session),
+            headers: usingCode ? const {'Content-Type': 'application/json'} : relayHeaders(session),
             body: jsonEncode({
               'sessionId': session,
               'deviceId': deviceId,
               'deviceType': 'mobile',
-              if (pairingCode != null && pairingCode.isNotEmpty) 'pairingCode': pairingCode,
+              if (usingCode) 'pairingCode': pairingCode,
             }),
           )
           .timeout(const Duration(seconds: 15));
@@ -570,15 +593,18 @@ class CursorConnection extends ChangeNotifier {
           _set(() => connecting = false);
         }
       } else if ([401, 403].contains(response.statusCode)) {
-        await _forgetRelayLogin(session);
+        if (!usingCode) await _forgetRelayLogin(session);
         if (hadCredential) {
           _relaySessionEnded(session);
           return;
         }
         onGaveUp?.call();
-        final error = errorCode == 'PAIRING_CODE_USED_UP'
-            ? pairingCodeUsedUpMessage
-            : 'Relay authentication failed ($errorCode). Check the session and obtain a new pairing code in Cursor.';
+        final error = switch (errorCode) {
+          'PAIRING_CODE_USED_UP' => pairingCodeUsedUpMessage,
+          'PAIRING_CODE_INVALID_OR_EXPIRED' =>
+            'That pairing code is wrong, expired or already used, or belongs to another session. Send /pair in Telegram for a new one.',
+          _ => 'Relay authentication failed ($errorCode). Check the session and obtain a new pairing code in Cursor.',
+        };
         _set(() {
           connected = false;
           connecting = false;
