@@ -9,6 +9,10 @@ export interface Principal {
   epoch: string; expiresAt: number; verifier: string;
 }
 interface SessionSecurity { epoch: string; expiresAt: number }
+interface Invitation { sessionId: string; epoch: string; expiresAt: number; reusable?: boolean }
+export interface PairingInvite { pairingCode: string; expiresInSeconds: number; reusable: boolean; usesLeft?: number }
+/** A reusable code enrolls at most this many devices; it never outlives the session or its epoch. */
+export const MAX_REUSABLE_PAIRINGS = 3;
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 export const validSessionId = (value: unknown): value is string => typeof value === "string" && /^[A-Z0-9]{6,32}$/.test(value);
 export const validDeviceId = (value: unknown): value is string => typeof value === "string" && /^[a-zA-Z0-9:_-]{1,128}$/.test(value);
@@ -76,6 +80,9 @@ export class RelaySecurity {
       throw error;
     }
   }
+  private secondsUntil(expiresAt: number): number {
+    return Math.max(1, Math.ceil((expiresAt - this.now()) / 1000));
+  }
   async invite(principal: Principal): Promise<string> {
     if (principal.role !== "pc") throw new SecurityError(403, "PC_CAPABILITY_REQUIRED");
     const state = await this.state(principal.sessionId);
@@ -88,22 +95,74 @@ export class RelaySecurity {
     if (!stored) throw new SecurityError(503, "PAIRING_ISSUANCE_FAILED");
     return pairingCode;
   }
-  /** [beforeConsume] runs after the code is known valid and before it is used up; if it throws, the code stays valid. */
+  /**
+   * One code for the rest of the session, good for [MAX_REUSABLE_PAIRINGS] devices. Minting a new
+   * one invalidates the previous one; the session's epoch and expiry bound it like any credential.
+   */
+  async reusableInvite(principal: Principal): Promise<PairingInvite> {
+    if (principal.role !== "pc") throw new SecurityError(403, "PC_CAPABILITY_REQUIRED");
+    const state = await this.state(principal.sessionId);
+    if (state.epoch !== principal.epoch) throw new SecurityError(401, "CREDENTIAL_REVOKED");
+    await this.limit(`invite:${principal.sessionId}`, 10);
+    await this.dropReusableInvite(principal.sessionId);
+    const pairingCode = randomBytes(32).toString("base64url");
+    const verifier = hash(pairingCode);
+    const ttl = this.secondsUntil(state.expiresAt);
+    // The pointer is claimed first, so of two concurrent mints only one code ever becomes valid.
+    if (!await this.store.put(`invite-reusable:${principal.sessionId}`, { verifier }, ttl)) {
+      throw new SecurityError(409, "PAIRING_ISSUANCE_CONFLICT");
+    }
+    const stored = await this.store.put(`invite:${verifier}`, {
+      sessionId: principal.sessionId, epoch: principal.epoch, expiresAt: state.expiresAt, reusable: true,
+    } satisfies Invitation, ttl);
+    if (!stored) {
+      await this.store.delete(`invite-reusable:${principal.sessionId}`);
+      throw new SecurityError(503, "PAIRING_ISSUANCE_FAILED");
+    }
+    return { pairingCode, expiresInSeconds: ttl, reusable: true, usesLeft: MAX_REUSABLE_PAIRINGS };
+  }
+  private async dropReusableInvite(sessionId: string): Promise<void> {
+    const previous = await this.store.take<{ verifier: string }>(`invite-reusable:${sessionId}`);
+    if (previous?.verifier) await this.store.delete(`invite:${previous.verifier}`);
+  }
+  /**
+   * [beforeConsume] runs after the code is known valid and before it is used up; if it throws, the code stays valid.
+   * Every successful redeem enrolls a new device ID, so a phone that pairs again counts as another use.
+   */
   async redeem(sessionId: string, deviceId: string, pairingCode: unknown, beforeConsume?: () => Promise<void>) {
     if (typeof pairingCode !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(pairingCode)) throw new SecurityError(403, "PAIRING_CODE_REQUIRED");
-    const key = `invite:${hash(pairingCode)}`;
-    const preview = await this.store.get<{ sessionId: string }>(key);
+    const verifier = hash(pairingCode);
+    const key = `invite:${verifier}`;
+    const usesKey = `invite-uses:${verifier}`;
+    const [preview, uses] = await Promise.all([this.store.get<Invitation>(key), this.store.get<number>(usesKey)]);
     if (!preview || preview.sessionId !== sessionId) throw new SecurityError(403, "PAIRING_CODE_INVALID_OR_EXPIRED");
+    if (preview.reusable && Number(uses) >= MAX_REUSABLE_PAIRINGS) throw new SecurityError(403, "PAIRING_CODE_USED_UP");
     await beforeConsume?.();
-    const invitation = await this.store.take<{ sessionId: string; epoch: string; expiresAt: number }>(key);
+    if (preview.reusable) {
+      const [state, current] = await Promise.all([
+        this.state(sessionId), this.store.get<{ verifier: string }>(`invite-reusable:${sessionId}`),
+      ]);
+      if (preview.epoch !== state.epoch || preview.expiresAt <= this.now() || current?.verifier !== verifier) {
+        throw new SecurityError(403, "PAIRING_CODE_INVALID_OR_EXPIRED");
+      }
+      const used = await this.store.increment(usesKey, this.secondsUntil(preview.expiresAt));
+      if (used > MAX_REUSABLE_PAIRINGS) throw new SecurityError(403, "PAIRING_CODE_USED_UP");
+      const issued = await this.issue(sessionId, `mobile-${randomUUID()}`, "mobile");
+      return { ...issued, reusable: true, usesLeft: MAX_REUSABLE_PAIRINGS - used };
+    }
+    const invitation = await this.store.take<Invitation>(key);
     const state = await this.state(sessionId);
     if (!invitation || invitation.sessionId !== sessionId || invitation.epoch !== state.epoch || invitation.expiresAt <= this.now()) {
       throw new SecurityError(403, "PAIRING_CODE_INVALID_OR_EXPIRED");
     }
-    return this.issue(sessionId, `mobile-${randomUUID()}`, "mobile");
+    const issued = await this.issue(sessionId, `mobile-${randomUUID()}`, "mobile");
+    return { ...issued, reusable: false, usesLeft: 0 };
   }
   async revoke(principal: Principal): Promise<void> {
-    if (principal.role === "pc") await this.store.delete(`session:${principal.sessionId}`);
+    if (principal.role === "pc") {
+      await this.store.delete(`session:${principal.sessionId}`);
+      await this.dropReusableInvite(principal.sessionId);
+    }
     await this.store.delete(`token:${principal.verifier}`);
   }
   async claimCommand(principal: Principal, id: unknown, deadline: unknown): Promise<boolean> {

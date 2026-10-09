@@ -5,7 +5,8 @@ export type DeviceType = "mobile" | "pc";
 export interface RelayMessage {
   id: string;
   type: string;
-  from: DeviceType;
+  /** "relay" marks notices the relay itself queues (e.g. `device_paired`). */
+  from: DeviceType | "relay";
   to: DeviceType;
   data: Record<string, unknown>;
   timestamp: number;

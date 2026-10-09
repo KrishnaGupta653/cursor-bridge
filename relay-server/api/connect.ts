@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { getSession, joinSession } from "../lib/store.js";
+import { getSession, joinSession, sendMessage } from "../lib/store.js";
 import { admission, authorize, body, cors, relaySecurity, securityFailure } from "../lib/relay-auth.js";
 import { SecurityError, validDeviceId, validSessionId, type Principal } from "../lib/relay-security.js";
 
@@ -8,6 +9,15 @@ async function requireJoinable(sessionId: string, role: Principal["role"]): Prom
   const existing = await getSession(sessionId);
   if (!existing) throw new SecurityError(404, "SESSION_NOT_FOUND");
   if (role === "mobile" && (!existing.pcDeviceId || !existing.pcLastSeenAt || Date.now() - existing.pcLastSeenAt > 120_000)) throw new SecurityError(409, "PC_MUST_CONNECT_FIRST");
+}
+
+/** `from: "relay"` can't be set through /api/send, so the Mac can tell this notice from a phone's message. */
+function notifyDevicePaired(sessionId: string, deviceId: string, pairing: { reusable: boolean; usesLeft: number }) {
+  const at = Date.now();
+  return sendMessage(sessionId, {
+    id: `${at}-${randomUUID()}`, type: "device_paired", from: "relay", to: "pc", timestamp: at, senderDeviceId: deviceId,
+    data: { type: "device_paired", deviceId, at, reusable: pairing.reusable, usesLeft: pairing.usesLeft },
+  });
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -20,6 +30,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!validSessionId(sessionId) || !validDeviceId(input.deviceId) || !["mobile", "pc"].includes(input.deviceType)) throw new SecurityError(400, "VALID_SESSION_AND_DEVICE_REQUIRED");
     let token: string | undefined;
     let principal;
+    let pairing: { reusable: boolean; usesLeft: number } | undefined;
     if (req.headers.authorization) {
       principal = await authorize(req);
       await requireJoinable(principal.sessionId, principal.role);
@@ -31,10 +42,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         () => requireJoinable(sessionId, "mobile"));
       token = result.token;
       principal = result.principal;
+      pairing = { reusable: result.reusable, usesLeft: result.usesLeft };
     }
     const session = await joinSession(principal.sessionId, principal.deviceId, principal.role);
     if (!session) throw new SecurityError(503, "SESSION_JOIN_FAILED");
+    // The Mac hears about every new device before the phone gets its credential.
+    if (pairing) await notifyDevicePaired(principal.sessionId, principal.deviceId, pairing);
     return res.status(200).json({ success: true, protocolVersion: 2,
-      data: { ...session, deviceId: principal.deviceId, ...(token ? { token } : {}), credentialExpiresAt: principal.expiresAt }, timestamp: Date.now() });
+      data: { ...session, deviceId: principal.deviceId, ...(token ? { token } : {}), credentialExpiresAt: principal.expiresAt,
+        ...(pairing?.reusable ? { pairing } : {}) }, timestamp: Date.now() });
   } catch (error) { return securityFailure(res, error, req); }
 }

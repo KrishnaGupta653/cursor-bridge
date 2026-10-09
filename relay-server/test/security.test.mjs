@@ -174,6 +174,59 @@ test('a pairing code survives a refused join and can be used once the Mac is bac
   await assert.rejects(security.redeem('ABC123', 'mobile', code, async () => {}), /INVALID_OR_EXPIRED/);
 });
 
+test('a reusable pairing code enrolls up to 3 distinct devices, atomically, then is used up', async () => {
+  const { security, owner, store } = await fixture();
+  const invite = await security.reusableInvite(owner.principal);
+  assert.equal(invite.reusable, true);
+  assert.equal(invite.usesLeft, 3);
+  assert.equal(invite.expiresInSeconds, 86_400);
+  await assert.rejects(security.redeem('OTHER1', 'mobile', invite.pairingCode), /INVALID_OR_EXPIRED/);
+  const offline = async () => { throw new SecurityError(409, 'PC_MUST_CONNECT_FIRST'); };
+  await assert.rejects(security.redeem('ABC123', 'mobile', invite.pairingCode, offline), /PC_MUST_CONNECT_FIRST/);
+  const results = await Promise.allSettled(Array.from({ length: 5 }, (_, i) =>
+    security.redeem('ABC123', `mobile-${i}`, invite.pairingCode, async () => {})));
+  const joined = results.filter(r => r.status === 'fulfilled').map(r => r.value);
+  assert.equal(joined.length, 3, 'a refused join does not count; only 3 of 5 concurrent redeems win');
+  assert.deepEqual(joined.map(j => j.usesLeft).sort(), [0, 1, 2]);
+  assert.equal(new Set(joined.map(j => j.principal.deviceId)).size, 3);
+  for (const j of joined) assert.equal((await security.authenticate(j.token)).role, 'mobile');
+  for (const r of results.filter(r => r.status === 'rejected')) assert.match(r.reason.code, /PAIRING_CODE_USED_UP/);
+  await assert.rejects(security.redeem('ABC123', 'mobile', invite.pairingCode), /PAIRING_CODE_USED_UP/);
+  assert.ok(!JSON.stringify([...store.records]).includes(invite.pairingCode), 'only the hash is stored');
+});
+
+test('a reusable code dies with a new code, a revoked session and the session expiry', async () => {
+  const { security, owner, advance } = await fixture();
+  const first = await security.reusableInvite(owner.principal);
+  const second = await security.reusableInvite(owner.principal);
+  await assert.rejects(security.redeem('ABC123', 'mobile', first.pairingCode), /INVALID_OR_EXPIRED/, 'minting replaces the old code');
+  const phone = await security.redeem('ABC123', 'mobile', second.pairingCode);
+  assert.equal(phone.usesLeft, 2);
+  const single = await security.invite(owner.principal);
+  assert.equal(typeof single, 'string', 'single-use codes are unchanged');
+  const viaSingle = await security.redeem('ABC123', 'mobile', single);
+  assert.equal(viaSingle.reusable, false);
+  await assert.rejects(security.redeem('ABC123', 'mobile', single), /INVALID_OR_EXPIRED/);
+  assert.equal((await security.redeem('ABC123', 'mobile', second.pairingCode)).usesLeft, 1, 'single-use pairings do not count');
+
+  await security.revoke(owner.principal);
+  await security.reserve('ABC123');
+  const newOwner = await security.issue('ABC123', 'pc-owner', 'pc');
+  await assert.rejects(security.redeem('ABC123', 'mobile', second.pairingCode), /INVALID_OR_EXPIRED/, 'a new epoch invalidates it');
+  await assert.rejects(security.authenticate(phone.token), /REVOKED|INVALID_OR_EXPIRED/);
+
+  const late = await security.reusableInvite(newOwner.principal);
+  advance(86_400_001);
+  await assert.rejects(security.redeem('ABC123', 'mobile', late.pairingCode), /INVALID_OR_EXPIRED/);
+  await assert.rejects(security.reusableInvite(newOwner.principal), /INVALID_OR_EXPIRED/);
+});
+
+test('only the Mac can mint a reusable code', async () => {
+  const { security, owner } = await fixture();
+  const phone = await security.redeem('ABC123', 'mobile', await security.invite(owner.principal));
+  await assert.rejects(security.reusableInvite(phone.principal), /PC_CAPABILITY_REQUIRED/);
+});
+
 test('unexpected failures log the route, error code and request ID, never the error text', async () => {
   const lines = [];
   const original = console.error;

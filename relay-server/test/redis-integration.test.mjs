@@ -109,8 +109,8 @@ test('real Redis: authenticated create/pair/send/poll/revoke lifecycle', { timeo
 
   const poll = await call('poll','GET',{},pcToken,{sessionId:'REDIS1'});
   assert.equal(poll.code,200,poll.data?.error);
-  assert.equal(poll.data.data.messages.length,1);
-  assert.equal(poll.data.data.messages[0].senderDeviceId,joined.data.data.deviceId);
+  assert.deepEqual(poll.data.data.messages.map(m => m.type).sort(), ['device_paired','get_sessions']);
+  assert.ok(poll.data.data.messages.every(m => m.senderDeviceId === joined.data.data.deviceId));
   assert.notEqual(joined.data.data.deviceId,'mobile-test');
   const disconnected = await call('disconnect','POST',{sessionId:'REDIS1'},pcToken);
   assert.equal(disconnected.code,200,disconnected.data?.error);
@@ -187,9 +187,64 @@ test('real Redis: a pairing code is kept when the Mac is offline and works once 
   assert.equal(reused.code,403);
 });
 
+test('real Redis: a reusable code lives as long as the session, counts 3 devices and tells the Mac about each', { timeout: 45000 }, async () => {
+  const owner = await createPc('REUSE1');
+  const single = await call('pair','POST',{sessionId:'REUSE1'},owner.token);
+  assert.equal(single.data.data.expiresInSeconds, 300);
+  assert.equal(single.data.data.reusable, undefined, 'single-use stays the default');
+  const minted = await call('pair','POST',{sessionId:'REUSE1',reusable:true},owner.token);
+  assert.equal(minted.code,200,minted.data?.error);
+  const { pairingCode, expiresInSeconds, reusable, usesLeft } = minted.data.data;
+  assert.equal(reusable, true);
+  assert.equal(usesLeft, 3);
+  const expiresAt = owner.credentialExpiresAt;
+  assert.ok(Math.abs(Date.now() + expiresInSeconds * 1000 - expiresAt) < 5000, 'valid until the session ends');
+  const ttl = key => Number(cli('PTTL', `security:v2:${key}`));
+  assert.ok(ttl('invite-reusable:REUSE1') > 86_000_000 && ttl('invite-reusable:REUSE1') <= 86_400_000);
+
+  await pollCount('REUSE1', owner.token);
+  const join = () => call('connect','POST',{sessionId:'REUSE1',deviceId:'mobile-test',deviceType:'mobile',pairingCode});
+  const joins = await Promise.all([join(), join(), join(), join()]);
+  const ok = joins.filter(r => r.code === 200);
+  assert.equal(ok.length, 3);
+  assert.deepEqual(ok.map(r => r.data.data.pairing.usesLeft).sort(), [0, 1, 2]);
+  const refused = joins.find(r => r.code !== 200);
+  assert.equal(refused.code, 403);
+  assert.equal(refused.data.errorCode, 'PAIRING_CODE_USED_UP');
+  const usesKey = cli('KEYS', 'security:v2:invite-uses:*');
+  assert.ok(Number(cli('PTTL', usesKey)) > 86_000_000, 'the use counter expires with the session');
+
+  const poll = await call('poll','GET',{},owner.token,{sessionId:'REUSE1',limit:'20'});
+  const notices = poll.data.data.messages.filter(m => m.type === 'device_paired');
+  assert.equal(notices.length, 3);
+  assert.ok(notices.every(m => m.from === 'relay' && m.to === 'pc'));
+  assert.deepEqual(notices.map(m => m.data.deviceId).sort(), ok.map(r => r.data.data.deviceId).sort());
+  assert.deepEqual(notices.map(m => m.data.usesLeft).sort(), [0, 1, 2]);
+  assert.ok(!JSON.stringify(notices).includes(pairingCode) && !ok.some(r => JSON.stringify(notices).includes(r.data.data.token)));
+
+  const fresh = (await call('pair','POST',{sessionId:'REUSE1',reusable:true},owner.token)).data.data.pairingCode;
+  assert.equal((await join()).code, 403, 'the used-up code stays refused');
+  const replaced = await call('connect','POST',{sessionId:'REUSE1',deviceId:'mobile-test',deviceType:'mobile',pairingCode:fresh});
+  assert.equal(replaced.code,200,replaced.data?.error);
+  await call('disconnect','POST',{sessionId:'REUSE1'},owner.token);
+  assert.equal(cli('EXISTS','security:v2:invite-reusable:REUSE1'),'0', 'revoking the session drops its code');
+  const afterRevoke = await call('connect','POST',{sessionId:'REUSE1',deviceId:'mobile-test',deviceType:'mobile',pairingCode:fresh});
+  assert.equal(afterRevoke.code,403);
+});
+
+test('real Redis: a single-use pairing also tells the Mac', { timeout: 45000 }, async () => {
+  const owner = await createPc('NOTE01');
+  await pollCount('NOTE01', owner.token);
+  const phone = await pairPhone('NOTE01', owner.token);
+  const poll = await call('poll','GET',{},owner.token,{sessionId:'NOTE01'});
+  assert.deepEqual(poll.data.data.messages.map(m => [m.type, m.from, m.data.deviceId, m.data.reusable, m.data.usesLeft]),
+    [['device_paired', 'relay', phone.deviceId, false, 0]]);
+});
+
 test('real Redis: oversized phone commands are rejected with 413 before anything is queued', { timeout: 45000 }, async () => {
   const { token: pcToken } = await createPc('SIZE01');
   const phone = await pairPhone('SIZE01', pcToken);
+  assert.equal(await pollCount('SIZE01', pcToken), 1, 'the device_paired notice');
   const big = 'x'.repeat(300 * 1024);
   const rejected = await call('send','POST',{sessionId:'SIZE01',...command('agent_prompt', { newChat: true, text: big })},phone.token);
   assert.equal(rejected.code,413);
