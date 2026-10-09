@@ -1,71 +1,45 @@
 ---
-description: Git Flow 규칙 - 모든 코드 변경은 Git Flow를 따라야 함 (강화된 규칙)
+description: Git Flow rules - all code changes must follow Git Flow (strict rules)
 alwaysApply: true
 priority: 1
 ---
+# Git Flow Rules (Strict) - Never Violate
 
-# ⚠️ Git Flow 규칙 (강화 버전) - 절대 위반 금지
+**This rule has top priority and cannot be bypassed. Every code change must follow Git Flow.**
 
-## 🚨 CRITICAL: 이 규칙은 절대 위반할 수 없습니다
+## Prohibited
 
-**이 규칙은 최우선순위입니다. 모든 코드 변경 작업은 반드시 Git Flow 규칙을 따라야 합니다.**
+1. **Never commit directly to `main`.**
+2. **Never commit directly to `develop`** (even for docs-only changes; use a feature branch).
+3. **Never use `git merge` directly.** Use `git flow feature finish` or `git flow bugfix finish` instead.
+4. **Never commit without first checking the current branch.**
 
-### 규칙 위반 시 동작
-- `main` 또는 `develop` 브랜치에서 커밋 시도 감지 시: **즉시 중단하고 사용자에게 알림**
-- 브랜치 확인 없이 커밋 시도 시: **즉시 중단하고 브랜치 확인 요청**
-- `git merge` 직접 사용 시도 시: **즉시 중단하고 `git flow feature finish` 사용 요청**
+## Workflow
 
-## 🚫 금지 사항 (절대 금지)
+1. **Check the current branch** (required before any change and before every commit):
+   ```bash
+   git branch --show-current
+   ```
+2. **Decide:**
+   - On `main` or `develop`: create a feature/bugfix branch first.
+   - On `feature/*` or `bugfix/*`: proceed.
+3. **Create a branch from `develop`** (if needed):
+   ```bash
+   git checkout develop
+   git pull origin develop
 
-1. ❌ **`main` 브랜치에 직접 커밋 절대 금지**
-2. ❌ **`develop` 브랜치에 직접 커밋 절대 금지** (문서만 수정하는 경우도 feature 브랜치 권장)
-3. ❌ **`git merge` 직접 사용 금지** - 반드시 `git flow feature finish` 또는 `git flow bugfix finish` 사용
-4. ❌ **브랜치 확인 없이 커밋 금지**
+   git flow feature start <feature-name>   # new feature
+   git flow bugfix start <bugfix-name>     # bug fix
+   ```
+4. **Make changes and commit** using Conventional Commits.
+5. **Finish** (run by the user, or by the AI only when the user explicitly asks):
+   ```bash
+   git flow feature finish <feature-name>
+   git flow bugfix finish <bugfix-name>
+   ```
 
-## 📋 작업 전 필수 절차
+## Commit Message Format (Conventional Commits)
 
-코드 변경 작업을 시작하기 전에 **반드시** 다음 순서를 따라야 합니다:
-
-### Step 1: 현재 브랜치 확인 (필수)
-```bash
-git branch --show-current
-```
-
-### Step 2: 브랜치 판단
-- **`main` 또는 `develop`에 있으면**: 즉시 feature/bugfix 브랜치 생성 필요
-- **`feature/*` 또는 `bugfix/*`에 있으면**: 작업 진행 가능
-
-### Step 3: 브랜치 생성 (필요한 경우)
-```bash
-# develop 브랜치로 이동
-git checkout develop
-git pull origin develop
-
-# feature 브랜치 생성 (새 기능)
-git flow feature start <feature-name>
-
-# 또는 bugfix 브랜치 생성 (버그 수정)
-git flow bugfix start <bugfix-name>
-```
-
-### Step 4: 작업 진행
-- 코드 변경
-- 커밋 (Conventional Commits 형식)
-
-### Step 5: 작업 완료 (사용자가 직접 실행)
-```bash
-# Feature 완료
-git flow feature finish <feature-name>
-
-# Bugfix 완료
-git flow bugfix finish <bugfix-name>
-```
-
-**⚠️ 중요**: `git flow feature finish` 또는 `git flow bugfix finish`는 사용자가 명시적으로 요청하지 않는 한 AI가 자동으로 실행하지 않습니다.
-
-## 커밋 메시지 규칙
-
-### 형식
 ```
 <type>: <subject>
 
@@ -74,164 +48,100 @@ git flow bugfix finish <bugfix-name>
 <footer>
 ```
 
-### Type 종류
-- `feat`: 새로운 기능
-- `fix`: 버그 수정
-- `docs`: 문서만 변경
-- `style`: 코드 스타일 변경 (의미 변경 없음)
-- `refactor`: 리팩토링
-- `test`: 테스트 추가/수정
-- `chore`: 빌드 프로세스 또는 보조 도구 변경
+Types:
+- `feat`: new feature
+- `fix`: bug fix
+- `docs`: documentation only
+- `style`: code style change (no change in meaning)
+- `refactor`: refactoring
+- `test`: add/update tests
+- `chore`: build process or tooling changes
 
-### 예시
+Example:
 ```
-feat: 세션 격리 및 클라이언트 제어 세션 관리
+feat: session isolation and client-controlled session management
 
-- 클라이언트별 독립적인 세션 관리
-- WebSocket 연결 시 고유 clientId 자동 생성
-- 클라이언트에서 새 세션 시작 여부 결정
+- Independent session management per client
+- Automatically generate a unique clientId on WebSocket connect
+- Client decides whether to start a new session
 
 Closes #123
 ```
 
-## 작업 흐름 체크리스트
+## Mandatory Rules for AI Assistants
 
-코드 변경 작업을 시작할 때:
+If any of these rules is violated, stop immediately.
 
-1. ✅ 현재 브랜치 확인 (`git branch --show-current`)
-2. ✅ `main` 또는 `develop`에 있으면 feature/bugfix 브랜치 생성
-3. ✅ 작업 진행
-4. ✅ 커밋 (Conventional Commits 형식)
-5. ✅ 작업 완료 시 `git flow feature finish` 또는 `git flow bugfix finish`
+### Rule 1: Check the branch before every commit (never skip)
 
-## 🤖 AI Assistant 강화된 가이드라인 (MANDATORY)
+Before every `git commit`, run `git branch --show-current` (or `git status`):
+- `main` or `develop`: **do not commit.**
+- `feature/*` or `bugfix/*`: committing is allowed.
 
-**이 섹션은 AI Assistant가 반드시 따라야 하는 규칙입니다. 위반 시 즉시 중단해야 합니다.**
+If a commit on `main` or `develop` is about to happen, abort it and show the user:
+```
+⚠️ Git Flow rule violation: you cannot commit directly to the main or develop branch.
+Please create a feature branch first:
+git flow feature start <feature-name>
+```
 
-### 🚨 Rule 1: 커밋 전 필수 확인 (절대 생략 불가)
+### Rule 2: Always create a branch
 
-**모든 `git commit` 명령 실행 전에 반드시 다음을 수행:**
+When on `main` or `develop`, never run `git commit`. Create a branch first, then work:
+- New feature: `git flow feature start <name>`
+- Bug fix: `git flow bugfix start <name>`
+- Docs change: `git flow feature start docs-<description>`
+- Other changes: `git flow feature start <description>`
 
-1. **현재 브랜치 확인** (필수):
-   ```bash
-   git branch --show-current
-   ```
-   또는
-   ```bash
-   git status
-   ```
+### Rule 3: No direct `git merge`
 
-2. **브랜치 검증**:
-   - 결과가 `main` 또는 `develop`이면: **즉시 커밋 중단**
-   - 결과가 `feature/*` 또는 `bugfix/*`이면: 커밋 진행 가능
+- Do not run `git merge feature/xxx`.
+- Use `git flow feature finish <name>`, and only when the user explicitly asks.
 
-3. **위반 시 동작**:
-   - `main` 또는 `develop`에서 커밋 시도 감지 시:
-     - ❌ **커밋 명령 실행 중단**
-     - ✅ **사용자에게 다음 메시지 전달:**
-       ```
-       ⚠️ Git Flow 규칙 위반: main 또는 develop 브랜치에서 직접 커밋할 수 없습니다.
-       먼저 feature 브랜치를 생성해주세요:
-       git flow feature start <feature-name>
-       ```
+### Rule 4: Follow the commit message format
 
-### 🚨 Rule 2: 브랜치 생성 강제
+Use Conventional Commits with the right type (`feat:`, `fix:`, `docs:`, `chore:`, etc.).
 
-**`main` 또는 `develop`에 있으면:**
+### Rule 5: Finish only on explicit request
 
-- ❌ **절대 `git commit` 실행하지 않음**
-- ✅ **반드시 feature/bugfix 브랜치 생성 후 작업**
-- 새 기능: `git flow feature start <name>`
-- 버그 수정: `git flow bugfix start <name>`
-- 문서 수정: `git flow feature start docs-<description>`
-- 기타 변경: `git flow feature start <description>`
+Run `git flow feature finish` / `git flow bugfix finish` only when the user explicitly asks to "finish" / "feature finish". Never use `git merge`.
 
-### 🚨 Rule 3: git merge 직접 사용 금지
+### Rule 6: Handling violations
 
-**절대 `git merge`를 직접 사용하지 않음:**
-- ❌ `git merge feature/xxx` 사용 금지
-- ✅ `git flow feature finish <name>` 사용 (사용자 명시적 요청 시에만)
+When a violation is detected:
+1. Stop immediately.
+2. Tell the user clearly what was blocked.
+3. Show how to create the correct branch.
+4. Resume work after the branch is created.
 
-### 🚨 Rule 4: 커밋 메시지 형식 준수
+## Enforcing Git Flow (Local + Remote)
 
-- Conventional Commits 형식 사용
-- `feat:`, `fix:`, `docs:`, `chore:` 등 적절한 type 사용
+### Local: Git hooks (strongly recommended)
 
-### 🚨 Rule 5: 작업 완료 시 (사용자 명시적 요청 시에만)
-
-- 사용자가 명시적으로 "finish" 또는 "feature finish" 요청 시에만 실행
-- `git flow feature finish` 또는 `git flow bugfix finish` 사용
-- 직접 `git merge` 사용 절대 금지
-
-### 🚨 Rule 6: 에러 처리 및 복구
-
-**규칙 위반 감지 시:**
-1. 즉시 중단
-2. 사용자에게 명확한 안내 메시지 전달
-3. 올바른 브랜치 생성 방법 제시
-4. 브랜치 생성 후 작업 재개
-
-## 🔧 Git Flow 확실히 적용하기 (로컬 + 원격)
-
-규칙을 **자동으로** 지키려면 아래를 한 번씩 설정하세요.
-
-### 로컬: Git 훅 설치 (필수 권장)
-
-프로젝트 루트에서 아래를 실행하면 **main/develop 에서의 커밋이 차단**되고, **커밋 메시지(Conventional Commits)** 가 검사됩니다.
-
+From the project root:
 ```bash
 chmod +x scripts/install-git-flow-hooks.sh
 ./scripts/install-git-flow-hooks.sh
 ```
 
-- **pre-commit**: `main` 또는 `develop` 이면 커밋 거부
-- **commit-msg**: 첫 줄이 `type: subject` 형식( feat, fix, docs 등)이 아니면 거부
+- **pre-commit**: rejects commits on `main` or `develop`.
+- **commit-msg**: rejects messages whose first line is not `type: subject` (feat, fix, docs, etc.).
 
-클론/새로 받을 때마다 훅은 복사되지 않으므로, **새로 클론한 환경에서는 위 설치 스크립트를 다시 실행**해야 합니다.
+Hooks are not copied on clone, so **re-run the install script in every freshly cloned environment**.
 
-### 원격: GitHub 브랜치 보호 (선택)
+### Remote: GitHub branch protection (optional)
 
-`main` / `develop` 에 직접 push 되지 않도록 하려면 GitHub에서:
-
+To block direct pushes to `main` / `develop`:
 1. **Settings → Branches → Add branch protection rule**
-2. **Branch name pattern**: `main` 또는 `develop` 입력
-3. **Protect matching branches** 에서 예:
-   - "Require a pull request before merging" (선택)
-   - "Do not allow bypassing the above settings" (관리자도 PR 경로 권장)
-4. 저장 후, 해당 브랜치로의 **직접 push** 가 거부됨 (PR로만 반영 가능)
+2. **Branch name pattern**: `main` or `develop`
+3. Under **Protect matching branches**, enable for example:
+   - "Require a pull request before merging" (optional)
+   - "Do not allow bypassing the above settings" (PRs recommended even for admins)
+4. Save. Direct pushes to that branch are then rejected (changes land only via PR).
 
-로컬 훅으로 커밋을 막고, 원격 보호로 직접 push 를 막으면 Git Flow 위반을 확실히 줄일 수 있습니다.
+Local hooks block the commits and remote protection blocks the direct pushes, so together they catch most Git Flow violations.
 
----
+## Exceptions (very limited)
 
-## 📝 예외 상황 (매우 제한적)
-
-- **문서만 수정하는 경우**: feature 브랜치 권장 (`git flow feature start docs-<description>`)
-- **긴급 수정 (hotfix)**: `main`에서 `hotfix/*` 브랜치 생성 (`git flow hotfix start <name>`)
-
-## ⚠️ 중요 사항 (반복 강조)
-
-1. **절대 `main` 브랜치에 직접 커밋하지 마세요!**
-2. **절대 `develop` 브랜치에 직접 커밋하지 마세요!**
-3. **절대 `git merge`를 직접 사용하지 마세요!**
-4. **커밋 전에 반드시 브랜치를 확인하세요!**
-5. **`git flow feature finish`는 사용자가 명시적으로 요청할 때만 실행하세요!**
-
-## 🔍 체크리스트 (모든 커밋 전 - MANDATORY)
-
-**코드 변경 작업을 시작하기 전에 반드시 다음을 확인:**
-
-1. ✅ **현재 브랜치 확인** (`git branch --show-current`)
-2. ✅ **브랜치 검증**: `main` 또는 `develop`이면 브랜치 생성 필수
-3. ✅ **feature/bugfix 브랜치에서 작업 진행**
-4. ✅ **커밋 메시지 형식 확인** (Conventional Commits)
-5. ✅ **작업 완료 시 `git flow feature finish` 사용** (사용자 명시적 요청 시에만)
-
-## ⚠️ 최종 경고
-
-**이 규칙을 위반하면:**
-- 코드 변경 작업이 중단됩니다
-- 사용자에게 명확한 안내가 제공됩니다
-- 올바른 브랜치 생성 후 작업을 재개해야 합니다
-
-**이 규칙은 절대 우회할 수 없습니다.**
+- **Docs-only changes**: still use a feature branch (`git flow feature start docs-<description>`).
+- **Urgent fixes (hotfix)**: create a `hotfix/*` branch from `main` (`git flow hotfix start <name>`).

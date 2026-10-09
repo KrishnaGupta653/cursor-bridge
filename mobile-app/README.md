@@ -1,17 +1,17 @@
 # Cursor Remote Mobile App
 
-Flutter 기반 모바일 앱으로, Cursor IDE를 원격으로 제어합니다.
+A Flutter app for controlling the Cursor IDE remotely.
 
-## 기능
+## Features
 
-- 서버 연결 (WebSocket)
-- 텍스트 입력 전송
-- 명령 실행
-- 메시지 로그 확인
+- Server connection (WebSocket)
+- Sending text input
+- Running commands
+- Viewing the message log
 
-## Web 배포 (Vercel)
+## Web deployment (Vercel)
 
-Flutter Web은 **Vercel**로 배포합니다. Vercel에는 Flutter 빌드 환경이 없으므로, **로컬에서 이미 빌드한 결과물**(`build/web`)만 Vercel에 올립니다.
+Flutter Web is deployed to **Vercel** at https://cursor-remote-app.vercel.app. Vercel has no Flutter build environment, so only the **locally built output** (`build/web`) is uploaded.
 
 ```bash
 cd mobile-app
@@ -21,24 +21,24 @@ cp vercel-build-output.json build/web/vercel.json
 cd build/web && vercel --prod
 ```
 
-자세한 절차는 [DEPLOY_INSTRUCTIONS.md](DEPLOY_INSTRUCTIONS.md)를 참고하세요.
+See [DEPLOY_INSTRUCTIONS.md](DEPLOY_INSTRUCTIONS.md) for the full procedure.
 
-## 빌드 (모바일)
+## Build (mobile)
 
 ```bash
 flutter pub get
 flutter build apk
 ```
 
-## 실행
+## Run
 
 ```bash
 flutter run
 ```
 
-## 사용법
+## Usage
 
-1. 앱 실행
-2. 서버 주소 입력 (예: `192.168.0.10`)
-3. Connect 버튼 클릭
-4. 명령 입력 및 전송
+1. Launch the app
+2. Enter the server address (e.g. `192.168.0.10`)
+3. Tap Connect
+4. Enter and send commands

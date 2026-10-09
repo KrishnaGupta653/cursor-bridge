@@ -16,7 +16,7 @@ interface SendRequest {
   deviceType: DeviceType;
   type: string;
   data: Record<string, unknown>;
-  targetDeviceId?: string; // 유니캐스트 응답용 - 특정 클라이언트에게만 전송
+  targetDeviceId?: string; // unicast reply: deliver only to this client
 }
 
 /** Phone commands are small. Mac replies (chat pages, diffs up to 256 KB of text) stay under Vercel's 4.5 MB cap. */
@@ -33,7 +33,6 @@ function bodyBytes(req: VercelRequest): number {
   return Buffer.byteLength(typeof raw === "string" ? raw : JSON.stringify(raw));
 }
 
-// UUID 생성
 function generateMessageId(): string {
   return `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 }
@@ -70,16 +69,16 @@ function extractCommandId(data: Record<string, unknown>): string | null {
 }
 
 async function handler(req: VercelRequest, res: VercelResponse, principal: Principal) {
-  // CORS 헤더 설정
+  // CORS headers
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
     "Content-Type, Authorization, X-Device-Id, X-Device-Type"
   );
-  res.setHeader("Access-Control-Max-Age", "86400"); // 24시간
+  res.setHeader("Access-Control-Max-Age", "86400"); // 24 hours
 
-  // CORS preflight - OPTIONS 요청 처리
+  // CORS preflight
   if (req.method === "OPTIONS") {
     res.writeHead(200, {
       "Access-Control-Allow-Origin": "*",
@@ -116,7 +115,6 @@ async function handler(req: VercelRequest, res: VercelResponse, principal: Princ
     } = (req.body || {}) as SendRequest;
     const data = normalizeDataWithCommandId(type, rawData || {});
 
-    // 입력 검증
     if (!sessionId || !deviceId || !deviceType || !type) {
       const response: ApiResponse = {
         success: false,
@@ -126,7 +124,6 @@ async function handler(req: VercelRequest, res: VercelResponse, principal: Princ
       return res.status(400).json(response);
     }
 
-    // 세션 존재 확인
     const session = await getSession(sessionId);
     if (!session) {
       const response: ApiResponse = {
@@ -137,17 +134,16 @@ async function handler(req: VercelRequest, res: VercelResponse, principal: Princ
       return res.status(404).json(response);
     }
 
-    // 대상 디바이스 타입 결정
     const targetType: DeviceType = deviceType === "pc" ? "mobile" : "pc";
 
-    // targetDeviceId 결정 (body에서 직접 전달받거나 data에서 추출)
+    // targetDeviceId comes from the body or, failing that, from data
     const targetDeviceId = providedTargetDeviceId || (data?.targetDeviceId as string | undefined);
     if (targetDeviceId && (typeof targetDeviceId !== "string" ||
         (deviceType === "pc" ? !session.mobileDeviceIds?.includes(targetDeviceId) : targetDeviceId !== session.pcDeviceId))) {
       throw new SecurityError(403, "TARGET_MEMBERSHIP_REQUIRED");
     }
 
-    // 정책 평가 (execute_command 기준 게이팅)
+    // Policy evaluation (gates execute_command)
     const commandRaw = extractCommandRaw(type, data || {});
     const policy = evaluateCommandPolicy({ messageType: type, commandRaw, data, deviceType });
 
@@ -227,7 +223,6 @@ async function handler(req: VercelRequest, res: VercelResponse, principal: Princ
       return res.status(403).json(response);
     }
 
-    // 메시지 생성
     const message: RelayMessage = {
       id: generateMessageId(),
       type,
@@ -235,11 +230,11 @@ async function handler(req: VercelRequest, res: VercelResponse, principal: Princ
       to: targetType,
       data: data || {},
       timestamp: Date.now(),
-      senderDeviceId: deviceId,  // 요청자 ID 포함 (유니캐스트 응답용)
-      targetDeviceId: targetDeviceId,  // 유니캐스트 응답용 - 특정 클라이언트에게만 전송
+      senderDeviceId: deviceId,  // requester ID, used for unicast replies
+      targetDeviceId: targetDeviceId,  // unicast reply: deliver only to this client
     };
 
-    // 메시지 큐에 추가: a reply goes only to the phone that asked; anything else to every live phone
+    // Enqueue: a reply goes only to the phone that asked; anything else to every live phone
     const recipients = targetDeviceId ? [targetDeviceId] : session.mobileDeviceIds ?? [];
     await sendMessage(sessionId, message, recipients);
 

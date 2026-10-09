@@ -234,7 +234,7 @@ export class CommandRouter {
           return;
       }
 
-      // result.success를 실제 응답 success에 반영
+      // Propagate result.success to the response's success
       const { success: resultSuccess = true, ...resultWithoutSuccess } =
         result || { success: true };
 
@@ -310,12 +310,12 @@ export class CommandRouter {
   }
 
   /**
-   * Cursor 스트림 JSON(시스템/유저 라인)이 그대로 text로 오면 사용자 발화만 추출
+   * If raw Cursor stream JSON (system/user lines) arrives as text, extract only the user's message
    */
   private normalizePromptText(raw: string): string {
     const trimmed = (raw ?? "").trim();
     if (!trimmed) return trimmed;
-    // 한 줄에 하나의 JSON인 스트림 형식: {"type":"system",...}\n{"type":"user","message":{...}}
+    // Stream format with one JSON object per line: {"type":"system",...}\n{"type":"user","message":{...}}
     const lines = trimmed.split("\n").filter((line) => line.trim().length > 0);
     for (const line of lines) {
       try {
@@ -331,10 +331,10 @@ export class CommandRouter {
           }
         }
       } catch {
-        // JSON이 아니면 무시
+        // Not JSON; ignore
       }
     }
-    // 단일 JSON 객체로 전체가 감싸진 경우 (예: message.content[0].text)
+    // Whole text is a single JSON object (e.g. message.content[0].text)
     try {
       const obj = JSON.parse(trimmed) as {
         type?: string;
@@ -348,7 +348,7 @@ export class CommandRouter {
         }
       }
     } catch {
-      // 전체가 JSON이 아니면 원문 그대로 사용
+      // Not JSON; use the original text as-is
     }
     return trimmed;
   }

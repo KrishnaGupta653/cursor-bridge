@@ -5,112 +5,127 @@ All notable changes to the "Cursor Remote" extension will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-10-09
+
+### Changed
+- **Publisher**: the extension is now published by `krishnagupta653`, so the extension ID is `krishnagupta653.cursor-remote-extension`
+- **Repository**: moved to [KrishnaGupta653/cursor-bridge](https://github.com/KrishnaGupta653/cursor-bridge)
+- The repository, UI strings, logs and docs are now English-only
+
+### Removed
+- Legacy `pc-server` and `cursor-cli` packages
+- Old root relay test scripts, which used the old relay protocol that the relay now rejects
+
+### Upgrading
+- Uninstall the old `jaloveeye.cursor-remote-extension` first (Extensions view, or `cursor --uninstall-extension jaloveeye.cursor-remote-extension`), then install `krishnagupta653.cursor-remote-extension`
+- Pair the phone again and re-enter the Telegram settings, because stored credentials are tied to the extension ID
+
 ## [0.5.1] - 2026-10-09
 
 ### Added
-- **재사용 페어링 코드 (선택)**: `cursorRemote.reusablePairingCode`를 켜면 릴레이 세션 전체에 코드 하나로 최대 3대를 페어링합니다. Pair Relay Client를 다시 실행하면 같은 코드와 남은 횟수·유효 시간을 보여 줍니다. 코드를 본 사람은 세션이 끝나거나 새 세션을 시작할 때까지 접속할 수 있습니다. 기본값은 일회용 코드입니다
-- **새 기기 알림**: 릴레이가 기기를 페어링할 때마다 "A new device joined relay session …" 알림과 `Start New Relay Session` 버튼을 표시합니다
-- **앱**: 페이지 새로 고침·앱 재시작 후에도 세션이 끝날 때까지 로그인을 유지하고, 사이드바·상단 버튼·설정에 **Log out**을 추가했습니다
+- **Reusable pairing code (optional)**: with `cursorRemote.reusablePairingCode` on, one code pairs up to 3 devices for the whole relay session. Running Pair Relay Client again shows the same code with the remaining uses and time left. Anyone who sees the code can join until the session ends or you start a new session. Single-use codes remain the default
+- **New device notification**: every time the relay pairs a device, a "A new device joined relay session …" notification is shown with a `Start New Relay Session` button
+- **App**: stays logged in through page refreshes and app restarts until the session ends, and adds **Log out** to the sidebar, the top bar and settings
 
 ### Changed
-- **릴레이**: `POST /api/pair`가 `{ "reusable": true }`를 받습니다 (세션 만료까지, 최대 3회, 새 코드·세션 폐기 시 무효). 모든 페어링 후 Mac에 `device_paired` 알림을 보냅니다
-- 재사용 코드는 Start New Relay Session, Revoke Relay Session, 세션 만료 시 Extension 저장소에서도 지워집니다
+- **Relay**: `POST /api/pair` accepts `{ "reusable": true }` (valid until the session expires, at most 3 uses, invalidated by a new code or by revoking the session). After every pairing the Mac receives a `device_paired` notification
+- The reusable code is also cleared from the extension's storage on Start New Relay Session, Revoke Relay Session and session expiry
 
 ## [0.5.0] - 2026-10-08
 
 ### Added
-- **세션 제어 재시작**: `Cursor Remote: Restart Cursor with Session Control` 명령으로 Agents 창 제어(CDP, 127.0.0.1 전용)를 켠 채 Cursor를 다시 엽니다
-- **Cursor 재시작 후 릴레이 자동 재연결**: 저장된 세션이 있으면 한 창만 마지막 세션에 다시 연결합니다. 다른 창에서 릴레이 명령을 실행하면 이미 연결된 창이 있다고 알려줍니다
-- **새 릴레이 세션 버튼**: 릴레이가 세션을 거절하면 폴링을 멈추고 `Start New Relay Session` 버튼이 있는 알림을 표시합니다
-- **앱**: 끊겼을 때 화면을 유지하고 "Reconnecting…" 배너 표시, 전송 실패 시 입력한 텍스트 복원
+- **Restart with session control**: the `Cursor Remote: Restart Cursor with Session Control` command reopens Cursor with Agents window control (CDP, 127.0.0.1 only) turned on
+- **Relay auto-reconnect after Cursor restarts**: if a session is saved, exactly one window reconnects to the last session. Running a relay command in another window tells you a window is already connected
+- **New relay session button**: when the relay rejects a session, polling stops and a notification with a `Start New Relay Session` button is shown
+- **App**: keeps the screen when disconnected and shows a "Reconnecting…" banner; restores the typed text if sending fails
 
 ### Changed
-- **릴레이**: Upstash Redis 전용. 세션 24시간, 페어링 코드 5분 일회용(접속 실패 시 소모되지 않음), 토큰은 해시로만 저장, 메시지 5분 후 만료, 응답은 요청한 휴대폰에만 전달, 약 2분간 폴링하지 않은 휴대폰은 세션에서 제외
-- **릴레이 연결 유지**: Extension이 더 이상 `/api/heartbeat`를 호출하지 않습니다. 폴링만으로 Mac 연결 상태가 갱신됩니다
-- **승인·거절·중지**: 화면에 표시된 바로 그 요청에만 적용되며, `cursorRemote.remoteActions`로 끌 수 있고 모든 원격 작업이 `[Audit]` 로그에 남습니다
-- **프롬프트 전송**: 여러 요청이 동시에 와도 각 채팅에 정확히 들어가도록 순서대로 처리하고, Mac 입력창에 작성 중인 내용이 있으면 덮어쓰지 않고 거절합니다
-- **Agents 창**: 늦게 열리거나 다시 열린 Agents 창을 자동으로 다시 찾고, CDP 재연결을 포기하지 않고 계속 시도합니다
-- **Telegram**: 모든 명령이 정책·`remoteActions`·감사 로그를 거치며, `allowedChatIds`가 필요하고, Mac이 깨어날 때 오래된 메시지를 다시 실행하지 않습니다
-- **CLI 기록**: 워크스페이스 대신 Extension 전용 저장소에 0600 권한으로 저장
-- 로컬 Wi-Fi 명령을 릴레이 휴대폰으로 전달하지 않습니다
+- **Relay**: Upstash Redis only. Sessions last 24 hours, pairing codes are single-use and expire after 5 minutes (a failed connection does not consume them), tokens are stored only as hashes, messages expire after 5 minutes, replies go only to the phone that asked, and phones that have not polled for about 2 minutes are dropped from the session
+- **Relay keep-alive**: the extension no longer calls `/api/heartbeat`; polling alone keeps the Mac's connection status up to date
+- **Approve, reject and stop**: act only on the exact request shown on screen, can be turned off with `cursorRemote.remoteActions`, and every remote action is written to the `[Audit]` log
+- **Sending prompts**: concurrent requests are processed in order so each lands in the right chat, and a prompt is rejected rather than overwriting a draft in the Mac's input box
+- **Agents window**: an Agents window that opens late or is reopened is found again automatically, and CDP reconnection keeps retrying instead of giving up
+- **Telegram**: every command goes through the policy, `remoteActions` and the audit log; `allowedChatIds` is required; old messages are not replayed when the Mac wakes up
+- **CLI history**: stored in the extension's own storage with 0600 permissions instead of the workspace
+- Local Wi-Fi commands are no longer forwarded to relay phones
 
 ### Removed
-- `Cursor Remote: Check Relay Server` 명령, 릴레이 세션 자동 탐색 및 디버그 요청
-- 인증 없는 localhost `POST /hook` 서버와 규칙 관리 기능
-- 편집기에 텍스트를 직접 넣는 IDE 모드와 예전 CDP 승인 클릭 스크립트
-- 릴레이의 Supabase 저장소, SSE 스트림(`/api/stream`), 승인 API, PIN 접속
-- 앱의 예전 "Command approvals" 패널
+- The `Cursor Remote: Check Relay Server` command, relay session auto-discovery and debug requests
+- The unauthenticated localhost `POST /hook` server and rules management
+- The IDE mode that typed text straight into the editor, and the old CDP approval-click script
+- The relay's Supabase storage, SSE stream (`/api/stream`), approval API and PIN access
+- The app's old "Command approvals" panel
 
 ## [0.4.0] - 2026-02-03
 
 ### Added
-- **연결 정보에 릴레이 저장소 표시**: 상태줄 클릭 → 연결 정보에서 릴레이 서버가 사용 중인 저장소(Supabase / Upstash Redis) 및 서버 URL 표시
-- 릴레이 서버 `/api/store` 호출로 저장소 정보 조회 후 패널에 반영
+- **Relay storage in connection info**: clicking the status bar → connection info shows the storage the relay server uses (Supabase / Upstash Redis) and the server URL
+- Storage details are fetched from the relay server's `/api/store` and shown in the panel
 
 ## [0.3.8] - 2026-02-03
 
 ### Added
-- **릴레이 세션 ID 저장**: 챗 히스토리 저장 시 릴레이 세션 ID(relaySessionId) 함께 저장
-- **현재 세션 히스토리만 표시**: get_chat_history에 relaySessionId 필터 적용, 새 세션 접속 시 해당 세션 메시지만 표시
+- **Relay session ID saved**: the relay session ID (`relaySessionId`) is saved with the chat history
+- **Current session history only**: `get_chat_history` filters by `relaySessionId`, so joining a new session shows only that session's messages
 
 ### Changed
-- **메시지 수 표시**: 표시/전체 개수를 사용자 프롬프트+AI 응답만 카운트하도록 변경
-- **채팅 문서 감시**: 출력 채널(output)을 채팅 문서로 인식하지 않도록 수정
-- **모바일**: 릴레이 전송 후 응답 대기 상태 유지, 빈 메시지 영역 문구 단순화
-- **모바일**: 표시/전체·과거 메시지 불러오기 UI 잠시 숨김
+- **Message count**: the shown/total counts include only user prompts and AI replies
+- **Chat document watching**: output channels are no longer treated as chat documents
+- **Mobile**: keeps waiting for a reply after sending over the relay; simpler empty message area text
+- **Mobile**: shown/total count and load-older-messages UI temporarily hidden
 
 ### Fixed
-- 새 세션에서 프롬프트 1회·응답 1회 시 "표시 2 / 전체 2"로 올바르게 표시되도록 수정
+- A new session with one prompt and one reply now correctly shows "shown 2 / total 2"
 
 ## [0.3.7] - 2026-02-03
 
 ### Added
-- **Extension-first 연결 강제**: 익스텐션이 먼저 릴레이에 연결되어 있어야만 모바일이 해당 세션에 접속 가능
-- **모바일 UX 개선**: PIN 오류 시 알럿 표시, 최근 연결 삭제·재연결 기능 개선
+- **Extension-first connection enforced**: the mobile app can join a session only after the extension has connected to the relay
+- **Mobile UX improvements**: alert on a wrong PIN, better deletion and reconnection of recent connections
 
 ### Changed
-- **재연결 아이콘**: ethernet 아이콘으로 변경하여 직관성 향상
-- **PIN 다이얼로그**: 엔터 키로 확인 가능하도록 개선
+- **Reconnect icon**: changed to the ethernet icon for clarity
+- **PIN dialog**: can be confirmed with the Enter key
 
 ### Technical Details
-- `connect.ts`: `pcConnected` 플래그 확인 로직 추가, PC 미연결 시 403 반환
-- `mobile-app`: PIN 검증 실패 시 사용자 알럿, 연결 히스토리 관리 개선
+- `connect.ts`: added a `pcConnected` flag check; returns 403 when the PC is not connected
+- `mobile-app`: alert on PIN verification failure, improved connection history management
 
 ## [0.3.6] - 2026-02-02
 
 ### Added
-- **Session ID 입력/저장**: 익스텐션 시작 시 6자리 세션 ID 입력 프롬프트, globalState에 저장하여 재사용
-- **PC 먼저 연결 가능**: PC가 세션 ID를 입력하면 해당 ID로 세션 생성/연결 (모바일이 나중에 같은 ID로 접속)
-- **Heartbeat**: PC가 30초마다 heartbeat 전송, 2분간 없으면 연결 끊김으로 간주 (세션 해제)
-- **세션 충돌 방지**: 같은 세션 ID를 다른 PC에서 사용 시 409 에러 반환
-- **PIN 보안 (선택)**: PC가 PIN 설정 시 모바일은 해당 PIN을 알아야만 접속 가능
-- **새 명령어**: `세션 ID로 릴레이 연결`, `릴레이 세션 ID 설정`, `릴레이 서버 상태 확인`
+- **Session ID input/storage**: the extension prompts for a 6-character session ID on start and saves it in globalState for reuse
+- **PC can connect first**: when the PC enters a session ID, a session with that ID is created/joined (the mobile app joins later with the same ID)
+- **Heartbeat**: the PC sends a heartbeat every 30 seconds; after 2 minutes without one it is treated as disconnected (session released)
+- **Session conflict prevention**: using the same session ID from another PC returns a 409 error
+- **PIN security (optional)**: if the PC sets a PIN, the mobile app must know it to join
+- **New commands**: `Connect to Relay by Session ID`, `Set Relay Session ID`, `Check Relay Server`
 
 ### Changed
-- **세션 탐색 API 변경**: `sessions-waiting-for-pc` → `sessions-with-mobile` (모바일이 연결된 세션만 탐색)
-- **세션 ID 정규화**: 대문자로 정규화하여 PC/모바일 동일 키 매칭
-- **세션 연속성**: 24시간 TTL 내에서 같은 세션 ID로 재접속 가능
+- **Session discovery API**: `sessions-waiting-for-pc` → `sessions-with-mobile` (discovers only sessions with a mobile client connected)
+- **Session ID normalization**: normalized to upper case so PC and mobile match the same key
+- **Session continuity**: reconnecting with the same session ID works within the 24-hour TTL
 
 ### Technical Details
-- `relay-client.ts`: `start(sessionId, pin?)` 시그니처 변경, heartbeat interval 추가
-- `relay-client.ts`: `httpRequestWithStatus()` 메서드 추가 (404/409 상태 코드 구분)
-- `connect.ts`: PC 연결 시 세션 자동 생성, PIN 해시 저장/검증, pcLastSeenAt 기반 중복 체크
-- `heartbeat.ts`: 새 API 엔드포인트 추가 (pcLastSeenAt 갱신)
-- `types.ts`: Session 인터페이스에 `pcLastSeenAt`, `pcPinHash` 필드 추가
+- `relay-client.ts`: signature changed to `start(sessionId, pin?)`, heartbeat interval added
+- `relay-client.ts`: added `httpRequestWithStatus()` (distinguishes 404/409 status codes)
+- `connect.ts`: creates the session automatically when the PC connects, stores/verifies the PIN hash, duplicate check based on `pcLastSeenAt`
+- `heartbeat.ts`: new API endpoint (updates `pcLastSeenAt`)
+- `types.ts`: added `pcLastSeenAt` and `pcPinHash` fields to the Session interface
 
 ## [0.3.5] - 2026-02-02
 
 ### Changed
-- **Relay response: broadcast again (0.3.3 동작 복귀)**  
-  유니캐스트(0.3.4)에서 응답이 일부 환경에서 오지 않는 문제가 있어, 릴레이 모드 응답을 **브로드캐스트**로 되돌렸습니다.  
-  동일 세션의 모든 모바일 클라이언트가 응답을 받습니다.
+- **Relay response: broadcast again (back to 0.3.3 behavior)**  
+  Unicast (0.3.4) responses did not arrive in some environments, so relay mode responses are **broadcast** again.  
+  All mobile clients in the same session receive the responses.
 
 ### Fixed
-- 릴레이 모드에서 프롬프트 입력 후 응답이 오지 않던 현상 수정 (브로드캐스트 복귀로 해결)
+- Fixed responses not arriving after entering a prompt in relay mode (resolved by returning to broadcast)
 
 ### Technical Details
-- Extension: 릴레이 메시지 전달 시 `senderDeviceId` 병합 제거 (유니캐스트 경로 비활성화)
-- Relay server: PC→Mobile 시 항상 모든 디바이스 큐 + 레거시 큐에 전송
+- Extension: removed merging `senderDeviceId` when forwarding relay messages (unicast path disabled)
+- Relay server: PC→Mobile messages are always sent to every device queue plus the legacy queue
 
 ## [0.3.4] - 2026-02-02
 
@@ -189,7 +204,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Agent Mode Detection**: Automatic detection of appropriate agent mode (agent, ask, plan, debug) based on user prompt content
 - **Chat History Enhancement**: Agent mode information is now saved and displayed in chat history entries
-- **Mode Display Names**: User-friendly display names for agent modes (e.g., "Agent (코딩 작업)", "Ask (질문/학습)")
+- **Mode Display Names**: User-friendly display names for agent modes (e.g., "Agent (coding tasks)", "Ask (questions/learning)")
 
 ### Fixed
 - Fixed TypeScript compilation error in `cli-handler.ts` (missing closing brace in `getChatHistory` method)

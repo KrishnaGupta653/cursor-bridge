@@ -31,7 +31,8 @@ do not replace authentication or transport encryption.
 
 Native clients may omit Origin, but must implement the v2 handshake below.
 Older clients, including the standalone CLI, have no insecure compatibility
-bypass and need migration. This change does not update the legacy `pc-server`.
+bypass and need migration. The legacy `pc-server` and `cursor-cli` were removed
+from the repository in 0.6.0.
 
 ## WebSocket protocol v2
 
@@ -151,7 +152,8 @@ it. This is **not** transactional acknowledged delivery or durable exactly-once
 execution. Phase 5's queue work remains required. In-flight operations authorized
 before revocation are not cancelled retroactively.
 
-The legacy `pc-server` relay integration does not implement v2 and is rejected.
+The legacy `pc-server` relay integration never implemented v2; it (and `cursor-cli`)
+were removed from the repository in 0.6.0.
 Deploy/release these changes in a coordinated migration; do not point old clients
 at the updated relay expecting PIN-based compatibility.
 

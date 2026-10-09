@@ -2,16 +2,17 @@
   "name": "cursor-remote-extension",
   "displayName": "Cursor Remote",
   "description": "Remote control Cursor AI from your mobile device via WebSocket or Relay Server - Code anywhere, anytime with session-based connection",
-  "version": "0.5.1",
-  "publisher": "jaloveeye",
+  "version": "0.6.0",
+  "publisher": "krishnagupta653",
+  "author": "Krishna Gupta",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jaloveeye/cursor-remote.git"
+    "url": "https://github.com/KrishnaGupta653/cursor-bridge.git"
   },
-  "homepage": "https://github.com/jaloveeye/cursor-remote",
+  "homepage": "https://github.com/KrishnaGupta653/cursor-bridge",
   "bugs": {
-    "url": "https://github.com/jaloveeye/cursor-remote/issues"
+    "url": "https://github.com/KrishnaGupta653/cursor-bridge/issues"
   },
   "icon": "icon.png",
   "keywords": [

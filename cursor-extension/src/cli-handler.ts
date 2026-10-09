@@ -13,8 +13,8 @@ interface ChatHistoryEntry {
   userMessage: string;
   assistantResponse: string;
   timestamp: string;
-  agentMode?: string; // 에이전트 모드 (agent, ask, plan, debug, auto)
-  relaySessionId?: string; // 릴레이 모드일 때 릴레이 세션 ID
+  agentMode?: string; // Agent mode (agent, ask, plan, debug, auto)
+  relaySessionId?: string; // Relay session ID when in relay mode
 }
 
 interface ChatHistory {
@@ -31,15 +31,15 @@ export class CLIHandler {
   private preparingPrompt = false;
   private workspaceRoot: string | null = null;
   private processingOutput: boolean = false;
-  private lastChatId: string | null = null; // 마지막 채팅 세션 ID (대화형 모드 테스트용)
-  private clientSessions: Map<string, string> = new Map(); // 클라이언트별 세션 ID 관리
-  private chatHistoryFile: string | null = null; // 대화 히스토리 파일 경로
-  private pendingHistoryIds: Map<string, string> = new Map(); // clientId -> pending sessionId (실제 sessionId로 업데이트용)
-  private streamingBuffers: Map<string, string> = new Map(); // clientId -> stdout buffer (스트리밍용)
-  private lastStreamedText: Map<string, string> = new Map(); // clientId -> 마지막으로 전송한 텍스트 (중복 제거용)
-  private lastPromptByClient: Map<string, string> = new Map(); // clientId -> 마지막으로 실행한 프롬프트 (IME 중복 방지용)
-  private currentSenderDeviceId: string | null = null; // 유니캐스트 응답용 - 현재 요청을 보낸 모바일 디바이스 ID
-  private getRelaySessionId: (() => string | null) | null = null; // 릴레이 세션 ID 조회 (저장 시 사용)
+  private lastChatId: string | null = null; // Last chat session ID (for interactive-mode testing)
+  private clientSessions: Map<string, string> = new Map(); // Per-client session IDs
+  private chatHistoryFile: string | null = null; // Chat history file path
+  private pendingHistoryIds: Map<string, string> = new Map(); // clientId -> pending sessionId (replaced with the real sessionId later)
+  private streamingBuffers: Map<string, string> = new Map(); // clientId -> stdout buffer (for streaming)
+  private lastStreamedText: Map<string, string> = new Map(); // clientId -> last sent text (for dedup)
+  private lastPromptByClient: Map<string, string> = new Map(); // clientId -> last executed prompt (to suppress IME duplicates)
+  private currentSenderDeviceId: string | null = null; // For unicast replies: ID of the mobile device that sent the current request
+  private getRelaySessionId: (() => string | null) | null = null; // Relay session ID getter (used when saving)
 
   constructor(
     outputChannel?: vscode.OutputChannel,
@@ -51,7 +51,7 @@ export class CLIHandler {
     this.wsServer = wsServer || null;
     this.workspaceRoot = workspaceRoot || null;
 
-    // 대화 히스토리 파일 경로 설정 (워크스페이스가 없거나 루트(/)면 스킵 - F5 테스트 시 ENOENT 방지)
+    // Chat history file path (skip if no workspace or root is / — avoids ENOENT when testing with F5)
     const safeWorkspaceRoot =
       workspaceRoot && workspaceRoot !== "/" && workspaceRoot.length > 1;
     if (safeWorkspaceRoot && storageDir) {
@@ -59,7 +59,7 @@ export class CLIHandler {
     }
   }
 
-  /** 릴레이 모드일 때 저장되는 히스토리에 relaySessionId를 넣기 위한 getter 설정 */
+  /** Set the getter used to add relaySessionId to saved history in relay mode */
   setGetRelaySessionId(getter: () => string | null): void {
     this.getRelaySessionId = getter;
   }
@@ -80,11 +80,11 @@ export class CLIHandler {
   }
 
   /**
-   * Cursor CLI가 설치되어 있는지 확인
+   * Check whether the Cursor CLI is installed
    */
   private async checkCLIInstalled(): Promise<boolean> {
     return new Promise(async (resolve) => {
-      // PATH에서 찾기
+      // Look in PATH
       child_process.exec("which agent", (error) => {
         if (!error) {
           resolve(true);
@@ -97,7 +97,7 @@ export class CLIHandler {
             return;
           }
 
-          // 일반적인 설치 경로 확인
+          // Check common install locations
           const os = require("os");
           const homeDir = os.homedir();
           const commonPaths = [
@@ -121,7 +121,6 @@ export class CLIHandler {
             ),
           ];
 
-          // 파일 존재 여부 확인
           const exists = commonPaths.some((cliPath) => fs.existsSync(cliPath));
           resolve(exists);
         });
@@ -130,25 +129,25 @@ export class CLIHandler {
   }
 
   /**
-   * Cursor CLI 명령어 경로 찾기
+   * Find the Cursor CLI command path
    */
   private async findCLICommand(): Promise<string> {
     return new Promise((resolve) => {
-      // 1. PATH에서 'agent' 찾기
+      // 1. 'agent' in PATH
       child_process.exec("which agent", (error, stdout) => {
         if (!error && stdout.trim()) {
           resolve(stdout.trim());
           return;
         }
 
-        // 2. PATH에서 'cursor-agent' 찾기
+        // 2. 'cursor-agent' in PATH
         child_process.exec("which cursor-agent", (error2, stdout2) => {
           if (!error2 && stdout2.trim()) {
             resolve(stdout2.trim());
             return;
           }
 
-          // 3. 일반적인 설치 경로 확인
+          // 3. Common install locations
           const os = require("os");
           const homeDir = os.homedir();
           const commonPaths = [
@@ -172,7 +171,6 @@ export class CLIHandler {
             ),
           ];
 
-          // 파일 존재 여부 확인
           let found = false;
           for (const cliPath of commonPaths) {
             if (fs.existsSync(cliPath)) {
@@ -182,7 +180,7 @@ export class CLIHandler {
             }
           }
 
-          // 4. 찾지 못한 경우 기본값 (PATH에 있다고 가정)
+          // 4. Not found: fall back to the default (assume it's in PATH)
           if (!found) {
             resolve("agent");
           }
@@ -192,13 +190,13 @@ export class CLIHandler {
   }
 
   /**
-   * Cursor CLI에 프롬프트 전송
-   * @param text 프롬프트 텍스트
-   * @param execute 실행 여부
-   * @param clientId 클라이언트 ID (세션 격리용, 선택사항)
-   * @param newSession 새 세션 시작 여부 (클라이언트에서 결정, 기본값: false)
-   * @param agentMode 에이전트 모드 (agent, ask, plan, debug, auto)
-   * @param senderDeviceId 릴레이 모드에서 요청을 보낸 모바일 디바이스 ID (유니캐스트 응답용)
+   * Send a prompt to the Cursor CLI
+   * @param text Prompt text
+   * @param execute Whether to execute
+   * @param clientId Client ID (for session isolation, optional)
+   * @param newSession Whether to start a new session (decided by the client, default: false)
+   * @param agentMode Agent mode (agent, ask, plan, debug, auto)
+   * @param senderDeviceId In relay mode, ID of the mobile device that sent the request (for unicast replies)
    */
   async sendPrompt(...args: Parameters<CLIHandler["sendPromptInternal"]>): Promise<void> {
     if (this.preparingPrompt || this.currentProcess) {
@@ -217,7 +215,7 @@ export class CLIHandler {
     agentMode: "agent" | "ask" | "plan" | "debug" | "auto" = "auto",
     senderDeviceId?: string
   ): Promise<void> {
-    // 유니캐스트 응답용 디바이스 ID 저장
+    // Remember the device ID for unicast replies
     this.currentSenderDeviceId = senderDeviceId || null;
 
     this.log(
@@ -228,8 +226,8 @@ export class CLIHandler {
       }, newSession: ${newSession}, senderDeviceId: ${senderDeviceId || "none"}`
     );
 
-    // IME 중복 단일 문자 무시: 이미 실행 중인 프로세스가 있고, 새 프롬프트가 1글자이며
-    // 마지막 프롬프트가 그 글자로 끝나면 무시 (릴레이 모드 응답 유지)
+    // Ignore duplicate single-character IME input: if a process is already running, the new prompt is
+    // one character, and the last prompt ends with it, ignore it (keeps the relay-mode reply intact)
     if (this.currentProcess && text.length === 1) {
       const key = clientId || "global";
       const lastPrompt = this.lastPromptByClient.get(key);
@@ -241,26 +239,26 @@ export class CLIHandler {
       }
     }
 
-    // 에이전트 모드 설정 (히스토리 저장 및 CLI 실행에 사용)
-    let selectedMode: string = "agent"; // 기본값
+    // Agent mode (used for history and CLI execution)
+    let selectedMode: string = "agent"; // default
     if (agentMode && agentMode !== "auto") {
       selectedMode = agentMode;
     } else if (agentMode === "auto") {
-      // 자동 모드: 텍스트 내용을 분석하여 적절한 모드 선택
+      // Auto mode: pick a mode based on the text
       const autoMode = this.detectAgentMode(text);
-      selectedMode = autoMode || "agent"; // 기본 Agent 모드
+      selectedMode = autoMode || "agent"; // default: Agent mode
     }
 
-    // 대화 히스토리 저장 (사용자 메시지 전송 시)
-    // 세션 ID는 나중에 응답에서 받을 수 있으므로, 임시로 저장
-    // 주의: newSession이 true면 기존 세션을 무시하므로 히스토리도 새로 시작
+    // Save the user message to chat history.
+    // The session ID may only arrive with the response, so use a temporary ID for now.
+    // Note: newSession=true ignores the existing session, so history starts fresh too.
     if (clientId) {
       const currentSessionId = newSession
         ? null
         : this.clientSessions.get(clientId) || null;
       const pendingId = `pending-${Date.now()}-${Math.random()
         .toString(36)
-        .substring(7)}`; // 고유한 임시 ID 사용
+        .substring(7)}`; // unique temporary ID
       this.log(
         `💾 Saving user message - sessionId: ${
           currentSessionId || pendingId
@@ -276,7 +274,7 @@ export class CLIHandler {
         timestamp: new Date().toISOString(),
         agentMode: selectedMode,
       });
-      // pending ID를 저장하여 나중에 실제 sessionId로 업데이트할 수 있도록
+      // Remember the pending ID so it can be replaced with the real sessionId later
       if (!currentSessionId) {
         this.pendingHistoryIds.set(clientId, pendingId);
         this.log(
@@ -286,7 +284,7 @@ export class CLIHandler {
     }
 
     try {
-      // CLI 설치 확인
+      // Check the CLI is installed
       const isInstalled = await this.checkCLIInstalled();
       if (!isInstalled) {
         throw new Error(CLI_NOT_INSTALLED);
@@ -295,26 +293,26 @@ export class CLIHandler {
       const cliCommand = await this.findCLICommand();
       this.log(`Using CLI command: ${cliCommand}`);
 
-      // Cursor CLI 실행
-      // 스트리밍을 위해 --output-format stream-json과 --stream-partial-output 사용
+      // Run the Cursor CLI.
+      // Use --output-format stream-json and --stream-partial-output for streaming
       // Keep CLI permission checks enabled.
       const args: string[] = [];
 
-      // 클라이언트에서 새 세션 시작 여부 결정
+      // The client decides whether to start a new session
       if (newSession) {
-        // 클라이언트가 명시적으로 새 세션을 요청한 경우
+        // Client explicitly requested a new session
         this.log(
           `Starting new session (client requested) for client ${
             clientId || "global"
           }`
         );
       } else {
-        // 기존 세션 재개 시도
+        // Try to resume the existing session
         let sessionId: string | null = null;
         if (clientId) {
           sessionId = this.clientSessions.get(clientId) || null;
         } else {
-          // clientId가 없으면 전역 세션 사용 (하위 호환성)
+          // No clientId: use the global session (backward compat)
           sessionId = this.lastChatId;
         }
 
@@ -326,7 +324,7 @@ export class CLIHandler {
             }: ${sessionId}`
           );
         } else {
-          // 세션이 없으면 새로 시작
+          // No session: start a new one
           this.log(
             `Starting new chat session for client ${
               clientId || "global"
@@ -335,7 +333,7 @@ export class CLIHandler {
         }
       }
 
-      // CLI에는 plan/ask만 전달. debug는 CLI가 지원하지 않으므로 agent로 대체해 전달하지 않음
+      // Only plan/ask are passed to the CLI. debug isn't supported by the CLI, so it runs as agent (no flag)
       const cliMode = selectedMode === "debug" ? "agent" : selectedMode;
       const cliAllowedModes = ["plan", "ask"];
       if (cliMode && cliAllowedModes.includes(cliMode)) {
@@ -347,11 +345,11 @@ export class CLIHandler {
         );
       }
 
-      // 선택된 모드를 사용자에게 알림 (로그를 통해, 표시용으로는 selectedMode 유지)
+      // Log the chosen mode (selectedMode is kept for display)
       const modeDisplayName = this.getModeDisplayName(selectedMode);
       this.log(`🤖 Agent Mode: ${modeDisplayName} (${selectedMode})`, true);
 
-      // 자동 모드로 선택된 경우, 실제 선택된 모드를 모바일 앱에 전송
+      // If auto mode chose the mode, send the actual mode to the mobile app
       if (agentMode === "auto" && this.wsServer) {
         this.wsServer.send(
           JSON.stringify({
@@ -366,10 +364,10 @@ export class CLIHandler {
         );
       }
 
-      // 스트리밍 지원: stream-json 형식과 부분 출력 스트리밍 활성화
-      // -p: 비대화형 모드 (--stream-partial-output과 함께 사용)
-      // --output-format stream-json: 스트리밍 JSON 형식
-      // --stream-partial-output: 부분 출력 스트리밍
+      // Streaming: stream-json format with partial output
+      // -p: non-interactive mode (used with --stream-partial-output)
+      // --output-format stream-json: streaming JSON format
+      // --stream-partial-output: stream partial output
       args.push(
         "-p",
         "--output-format",
@@ -381,19 +379,19 @@ export class CLIHandler {
 
       this.log(`Executing CLI command...`, true);
 
-      // 현재 작업 디렉토리 설정
+      // Working directory
       const cwd = this.workspaceRoot || process.cwd();
 
-      // stdout 버퍼링 최소화를 위한 환경 변수 설정
+      // Environment variables to minimise stdout buffering
       const env = {
         ...process.env,
-        PYTHONUNBUFFERED: "1", // Python 스크립트 버퍼링 비활성화 (만약 사용하는 경우)
+        PYTHONUNBUFFERED: "1", // Disable Python buffering (in case it's used)
         NODE_NO_WARNINGS: "1",
       };
 
       this.currentProcess = child_process.spawn(cliCommand, args, {
         cwd: cwd,
-        stdio: ["ignore", "pipe", "pipe"], // stdin은 무시, stdout/stderr는 파이프
+        stdio: ["ignore", "pipe", "pipe"], // ignore stdin, pipe stdout/stderr
         shell: false,
         env: env,
       });
@@ -411,13 +409,13 @@ export class CLIHandler {
       let stdoutEnded = false;
       let stderrEnded = false;
 
-      // 현재 프롬프트의 clientId를 클로저로 저장 (checkAndProcessOutput에서 사용)
+      // Capture this prompt's clientId in the closure (used by checkAndProcessOutput)
       const currentClientId = clientId;
 
-      // IME 중복 판별용: 이번에 실행한 프롬프트 저장
+      // Remember this prompt for IME duplicate detection
       this.lastPromptByClient.set(clientId || "global", text);
 
-      // 디버깅: clientId가 제대로 전달되는지 로그
+      // Debug: log whether clientId is passed through
       if (clientId) {
         this.log(`🔑 Using clientId: ${clientId} for this prompt`);
         const existingSession = this.clientSessions.get(clientId);
@@ -438,12 +436,12 @@ export class CLIHandler {
         );
       }
 
-      // stdout 수집 및 실시간 스트리밍
+      // Collect stdout and stream in real time
       if (this.currentProcess.stdout) {
-        // 버퍼링 최소화: 즉시 플러시되도록 설정
+        // Minimise buffering so data flushes immediately
         this.currentProcess.stdout.setEncoding("utf8");
 
-        // 스트리밍 버퍼 초기화
+        // Reset the streaming buffer
         if (currentClientId) {
           this.streamingBuffers.set(currentClientId, "");
           this.lastStreamedText.set(currentClientId, "");
@@ -453,7 +451,7 @@ export class CLIHandler {
           const chunk = typeof data === "string" ? data : data.toString();
           stdout += chunk;
           this.log(`CLI stdout chunk (${chunk.length} characters)`);
-          // 청크 전송 비활성화: 로컬/릴레이 모두 최종 chat_response만 사용
+          // Chunk sending disabled: both local and relay use only the final chat_response
         });
 
         this.currentProcess.stdout.on("end", () => {
@@ -470,9 +468,9 @@ export class CLIHandler {
         this.logError("⚠️ CLI process stdout is null");
       }
 
-      // stderr 수집
+      // Collect stderr
       if (this.currentProcess.stderr) {
-        // 버퍼링 비활성화 (가능한 경우)
+        // Disable buffering (if possible)
         this.currentProcess.stderr.setEncoding("utf8");
 
         this.currentProcess.stderr.on("data", (data: Buffer | string) => {
@@ -500,7 +498,7 @@ export class CLIHandler {
         this.sendOutputError(currentClientId, "CLI_SPAWN_FAILED", "The CLI could not start.");
       });
 
-      // 프로세스 종료 처리
+      // Handle process exit
       this.currentProcess.on("close", (code, signal) => {
         this.log(
           `CLI process exited with code ${code}, signal: ${signal || "none"}`
@@ -518,8 +516,8 @@ export class CLIHandler {
           );
         }
 
-        // 프로세스가 종료되었으므로 출력 처리 (한 번만)
-        // 스트림이 아직 끝나지 않았어도 프로세스가 종료되었으므로 처리
+        // The process has exited, so process the output (once),
+        // even if the streams haven't ended yet
         if (!processFailed) {
           if (code !== 0) {
             this.sendOutputError(currentClientId, "CLI_EXECUTION_FAILED", "The CLI did not complete successfully.");
@@ -544,8 +542,8 @@ export class CLIHandler {
   }
 
   /**
-   * CLI 출력 처리 및 WebSocket으로 전송
-   * @param clientId 클라이언트 ID (세션 격리용, 선택사항)
+   * Process CLI output and send it over WebSocket
+   * @param clientId Client ID (for session isolation, optional)
    */
   private sendOutputError(clientId: string | undefined, code: string, message: string): void {
     if (!clientId || !this.wsServer) return;
@@ -561,7 +559,7 @@ export class CLIHandler {
     stderr: string,
     clientId?: string
   ) {
-    // 중복 처리 방지
+    // Prevent duplicate processing
     if (this.processingOutput) {
       this.log(
         "⚠️ Output processing already in progress, skipping duplicate call"
@@ -574,16 +572,16 @@ export class CLIHandler {
       `Processing output - stdout length: ${stdout.length}, stderr length: ${stderr.length}`
     );
 
-    // 일반 텍스트 출력 처리 (JSON 형식 사용 안 함, 스트리밍용)
+    // Plain text output (no JSON format; for streaming)
     try {
 
-      // stream-json 형식: 여러 JSON 라인이 있을 수 있음
-      // 각 라인을 파싱하여 result 타입의 최종 결과 추출
+      // stream-json may contain multiple JSON lines;
+      // parse each line to extract the final result-type entry
       let responseText = "";
       let extractedSessionId: string | null = null;
       let structuredOutput = false;
 
-      // 각 라인을 파싱하여 result 타입 찾기
+      // Parse each line looking for the result type
       const lines = stdout.split("\n").filter((line) => line.trim().length > 0);
 
       for (const line of lines) {
@@ -591,7 +589,7 @@ export class CLIHandler {
           const jsonData = JSON.parse(line.trim());
           structuredOutput = true;
 
-          // session_id 추출
+          // Extract session_id
           const sessionId =
             jsonData.session_id ||
             jsonData.sessionId ||
@@ -601,26 +599,26 @@ export class CLIHandler {
             extractedSessionId = sessionId;
           }
 
-          // result 타입: 최종 결과
+          // result type: final result
           if (jsonData.type === "result" && jsonData.result) {
             if (typeof jsonData.result === "string") {
               responseText = jsonData.result;
             }
           }
-          // assistant 타입: 스트리밍이 이미 완료되었으므로 무시
-          // (스트리밍이 작동했다면 이미 전송됨)
+          // assistant type: ignored, streaming already finished
+          // (already sent if streaming worked)
         } catch (e) {
-          // JSON 파싱 실패 시 해당 라인 무시
+          // Ignore lines that fail to parse as JSON
           continue;
         }
       }
 
-      // result 타입을 찾지 못한 경우, 스트리밍된 텍스트 사용
+      // No result type found: use the streamed text
       if (!responseText && clientId) {
         responseText = this.lastStreamedText.get(clientId) || "";
       }
 
-      // 여전히 없으면 전체 stdout 사용 (하위 호환성)
+      // Still nothing: use the whole stdout (backward compat)
       if (!responseText && !structuredOutput) {
         responseText = stdout.trim();
       }
@@ -629,7 +627,7 @@ export class CLIHandler {
         return;
       }
 
-      // session_id 저장 (JSON에서 추출한 경우)
+      // Save session_id (if extracted from JSON)
       if (extractedSessionId) {
         if (clientId) {
           this.clientSessions.set(clientId, extractedSessionId);
@@ -643,12 +641,12 @@ export class CLIHandler {
       }
 
       this.log(`Extracted response text length: ${responseText.length}`);
-      // 대화 히스토리 저장 (응답 수신 시)
+      // Save the response to chat history
       const currentSessionId =
         extractedSessionId ||
         (clientId ? this.clientSessions.get(clientId) : this.lastChatId);
       if (clientId) {
-        // sessionId가 있으면 사용, 없으면 pending ID 사용
+        // Use sessionId if present, otherwise the pending ID
         const sessionIdToUse =
           currentSessionId || this.pendingHistoryIds.get(clientId) || "unknown";
         this.log(
@@ -663,7 +661,7 @@ export class CLIHandler {
           timestamp: new Date().toISOString(),
         });
 
-        // pending ID가 있었고 실제 sessionId를 받았으면 업데이트
+        // Had a pending ID and got the real sessionId: update it
         if (extractedSessionId && this.pendingHistoryIds.has(clientId)) {
           const pendingId = this.pendingHistoryIds.get(clientId)!;
           this.log(
@@ -674,9 +672,9 @@ export class CLIHandler {
         }
       }
 
-      // WebSocket으로 최종 응답 전송
-      // Relay 모드에서는 chat_response_chunk를 보내지 않으므로, 최종 chat_response는 항상 전송해야 함.
-      // 로컬만 쓸 때도 스트리밍 후 최종 메시지를 보내면 앱이 덮어쓰기/완료 처리 가능.
+      // Send the final response over WebSocket.
+      // Relay mode doesn't send chat_response_chunk, so the final chat_response must always be sent.
+      // For local-only use, sending the final message after streaming lets the app overwrite/finalise.
       if (this.wsServer && responseText) {
         const responseMessage = {
           type: "chat_response",
@@ -685,7 +683,7 @@ export class CLIHandler {
           source: "cli",
           sessionId: currentSessionId || undefined,
           clientId: clientId || undefined,
-          targetDeviceId: this.currentSenderDeviceId || undefined, // 유니캐스트 응답용
+          targetDeviceId: this.currentSenderDeviceId || undefined, // for unicast replies
         };
 
         this.log(`Sending chat_response (${responseText.length} characters)`);
@@ -713,23 +711,23 @@ export class CLIHandler {
       this.sendOutputError(clientId, "CLI_OUTPUT_INVALID", "The CLI result could not be processed.");
     } finally {
       this.processingOutput = false;
-      this.currentSenderDeviceId = null; // 응답 완료 후 초기화
+      this.currentSenderDeviceId = null; // Reset after the response completes
     }
   }
 
   /**
-   * 실시간 스트리밍 청크 처리
-   * stream-json 형식: 각 델타가 JSON으로 출력됨
-   * - thinking 타입: 내부 사고 과정 (스트리밍하지 않음)
-   * - assistant 타입: 실제 응답 텍스트 (스트리밍)
-   * - result 타입: 최종 결과 (스트리밍 완료 시 사용)
+   * Handle real-time streaming chunks.
+   * stream-json format: each delta is emitted as JSON
+   * - thinking: internal reasoning (not streamed)
+   * - assistant: actual response text (streamed)
+   * - result: final result (used when streaming completes)
    */
   private processStreamingChunk(buffer: string, clientId: string) {
-    // 청크 전송 비활성화: 로컬/릴레이 모두 최종 chat_response만 사용
+    // Chunk sending disabled: both local and relay use only the final chat_response
     return;
     try {
-      // stream-json 형식: 각 라인이 JSON 델타일 수 있음
-      // 버퍼를 라인 단위로 분리하여 각 JSON 델타 처리
+      // In stream-json each line may be a JSON delta;
+      // split the buffer into lines and process each delta
       const lines = buffer.split("\n").filter((line) => line.trim().length > 0);
 
       let accumulatedText = this.lastStreamedText.get(clientId) || "";
@@ -737,10 +735,10 @@ export class CLIHandler {
 
       for (const line of lines) {
         try {
-          // JSON 델타 파싱 시도
+          // Try to parse the JSON delta
           const jsonData = JSON.parse(line.trim());
 
-          // session_id 추출 (있는 경우)
+          // Extract session_id (if present)
           const extractedSessionId =
             jsonData.session_id ||
             jsonData.sessionId ||
@@ -750,22 +748,22 @@ export class CLIHandler {
             this.clientSessions.set(clientId, extractedSessionId);
           }
 
-          // 타입별 처리
+          // Handle by type
           const messageType = jsonData.type;
 
           if (messageType === "assistant") {
-            // assistant 타입: 실제 응답 텍스트 추출
+            // assistant: extract the response text
             const message = jsonData.message;
             if (message && message.content && Array.isArray(message.content)) {
               for (const content of message.content) {
                 if (content.type === "text" && content.text) {
                   const text = content.text;
-                  // 이전 텍스트와 비교하여 새로운 부분만 추가
+                  // Compare with the previous text and append only the new part
                   if (
                     text.length > accumulatedText.length &&
                     text.startsWith(accumulatedText)
                   ) {
-                    // 새로운 텍스트가 이전 텍스트로 시작하는 경우 (일반적인 경우)
+                    // New text starts with the previous text (the usual case)
                     accumulatedText = text;
                     hasNewData = true;
                   } else if (
@@ -773,11 +771,11 @@ export class CLIHandler {
                     text.startsWith(accumulatedText) &&
                     text.length >= accumulatedText.length
                   ) {
-                    // 이전 텍스트로 시작하지만 길이가 같거나 더 긴 경우
+                    // Starts with the previous text but is the same length or longer
                     accumulatedText = text;
                     hasNewData = true;
                   } else if (text !== accumulatedText && text.length > 0) {
-                    // 텍스트가 완전히 바뀐 경우 또는 처음 시작하는 경우
+                    // Text changed completely, or this is the first chunk
                     accumulatedText = text;
                     hasNewData = true;
                   }
@@ -785,31 +783,31 @@ export class CLIHandler {
               }
             }
           } else if (messageType === "result" && jsonData.result) {
-            // result 타입: 최종 결과 (전체 텍스트로 교체)
+            // result: final result (replace with the full text)
             const resultText = jsonData.result;
             if (typeof resultText === "string" && resultText.length > 0) {
               accumulatedText = resultText;
               hasNewData = true;
             }
           }
-          // thinking 타입은 무시 (내부 사고 과정)
-          // system, user 타입도 무시
+          // Ignore thinking (internal reasoning)
+          // and system/user types
         } catch (parseError) {
-          // JSON이 아닌 경우 무시 (stream-json 형식에서는 모든 라인이 JSON이어야 함)
-          // 일반 텍스트 출력은 하위 호환성을 위해 지원하지 않음
+          // Ignore non-JSON lines (every stream-json line should be JSON);
+          // plain text output isn't supported for backward compat
         }
       }
 
-      // 새로운 데이터가 있으면 전송
+      // Send if there is new data
       if (hasNewData && this.wsServer) {
         const lastText = this.lastStreamedText.get(clientId) || "";
 
-        // accumulatedText가 lastText와 다른 경우 전송
+        // Send when accumulatedText differs from lastText
         if (accumulatedText !== lastText) {
           const newText =
             accumulatedText.length > lastText.length
               ? accumulatedText.substring(lastText.length)
-              : accumulatedText; // 처음 시작하는 경우 전체 텍스트
+              : accumulatedText; // first chunk: send the full text
 
           if (newText.length > 0 || accumulatedText.length > 0) {
             const currentSessionId =
@@ -817,13 +815,13 @@ export class CLIHandler {
 
             const chunkMessage = {
               type: "chat_response_chunk",
-              text: newText.length > 0 ? newText : accumulatedText, // newText가 비어있으면 전체 텍스트 사용
+              text: newText.length > 0 ? newText : accumulatedText, // use the full text if newText is empty
               fullText: accumulatedText,
               timestamp: new Date().toISOString(),
               source: "cli",
               sessionId: currentSessionId || undefined,
               clientId: clientId,
-              isReplace: newText.length === 0, // 처음 시작하거나 전체 교체인 경우
+              isReplace: newText.length === 0, // first chunk or full replacement
             };
 
             this.wsServer?.send(JSON.stringify(chunkMessage));
@@ -837,13 +835,13 @@ export class CLIHandler {
         }
       }
     } catch (error) {
-      // 에러 발생 시 로그만 남기고 계속 진행
+      // On error, log and continue
       this.logError("Error processing streaming chunk", error);
     }
   }
 
   /**
-   * 실행 중인 CLI 프로세스 중지
+   * Stop the running CLI process
    */
   async stopPrompt(): Promise<{ success: boolean }> {
     this.log("stopPrompt called");
@@ -866,7 +864,7 @@ export class CLIHandler {
   }
 
   /**
-   * CLI 핸들러 정리
+   * Dispose the CLI handler
    */
   dispose() {
     if (this.currentProcess) {
@@ -876,7 +874,7 @@ export class CLIHandler {
   }
 
   /**
-   * 대화 히스토리 저장
+   * Save chat history
    */
   private saveChatHistoryEntry(
     entry: Partial<ChatHistoryEntry> & { clientId: string; timestamp: string }
@@ -891,12 +889,12 @@ export class CLIHandler {
         lastUpdated: new Date().toISOString(),
       };
 
-      // 기존 히스토리 로드
+      // Load existing history
       if (fs.existsSync(this.chatHistoryFile)) {
         const content = fs.readFileSync(this.chatHistoryFile, "utf8");
         try {
           const parsed = JSON.parse(content);
-          // 기존 형식(배열)을 새 형식으로 변환
+          // Convert the legacy (array) format to the new format
           if (Array.isArray(parsed)) {
             this.log("🔄 Converting old chat history format to new format");
             history = {
@@ -914,14 +912,14 @@ export class CLIHandler {
               lastUpdated: new Date().toISOString(),
             };
           } else if (parsed.entries && Array.isArray(parsed.entries)) {
-            // 새 형식
+            // New format
             history = parsed;
           } else {
-            // 알 수 없는 형식
+            // Unknown format
             this.log("⚠️ Unknown chat history format, resetting");
             history = { entries: [], lastUpdated: new Date().toISOString() };
           }
-          // entries가 배열인지 확인
+          // Make sure entries is an array
           if (!Array.isArray(history.entries)) {
             this.log("⚠️ history.entries is not an array, resetting");
             history.entries = [];
@@ -932,7 +930,7 @@ export class CLIHandler {
         }
       }
 
-      // 새 엔트리 생성
+      // Create the new entry
       const newEntry: ChatHistoryEntry = {
         id: `${Date.now()}-${Math.random().toString(36).substring(7)}`,
         sessionId: entry.sessionId || "unknown",
@@ -940,30 +938,30 @@ export class CLIHandler {
         userMessage: entry.userMessage || "",
         assistantResponse: entry.assistantResponse || "",
         timestamp: entry.timestamp,
-        agentMode: entry.agentMode, // 에이전트 모드 추가
+        agentMode: entry.agentMode,
       };
-      // 릴레이 모드일 때 릴레이 세션 ID 함께 저장
+      // In relay mode, also store the relay session ID
       if (entry.clientId === "relay-client" && this.getRelaySessionId) {
         const rid = this.getRelaySessionId();
         if (rid) newEntry.relaySessionId = rid;
       }
 
-      // pending sessionId를 실제 sessionId로 업데이트
+      // Replace the pending sessionId with the real sessionId
       if (newEntry.sessionId.startsWith("pending-") && entry.clientId) {
         const actualSessionId = this.clientSessions.get(entry.clientId);
         if (actualSessionId) {
           newEntry.sessionId = actualSessionId;
-          // pending ID 제거
+          // Remove the pending ID
           this.pendingHistoryIds.delete(entry.clientId);
         }
       }
 
-      // 마지막 엔트리 찾기 (같은 clientId, 사용자 메시지가 있고 응답이 없는 경우)
-      // 또는 pending ID가 실제 sessionId로 업데이트되는 경우
+      // Find the latest entry (same clientId with a user message and no response),
+      // or one whose pending ID is being replaced with the real sessionId
       let lastEntry: ChatHistoryEntry | undefined = undefined;
       let lastEntryIndex = -1;
 
-      // 역순으로 검색하여 가장 최근 엔트리 찾기
+      // Search backwards for the most recent entry
       for (let i = history.entries.length - 1; i >= 0; i--) {
         const entry = history.entries[i];
         if (entry.clientId === newEntry.clientId) {
@@ -971,7 +969,7 @@ export class CLIHandler {
             new Date(entry.timestamp).getTime() -
               new Date(newEntry.timestamp).getTime()
           );
-          // 사용자 메시지가 있고 응답이 없는 경우 (응답을 추가해야 함)
+          // Has a user message but no response (the response needs adding)
           if (
             entry.userMessage &&
             !entry.assistantResponse &&
@@ -986,7 +984,7 @@ export class CLIHandler {
             lastEntryIndex = i;
             break;
           }
-          // pending ID가 실제 sessionId로 업데이트되는 경우
+          // Pending ID being replaced with the real sessionId
           if (
             entry.sessionId.startsWith("pending-") &&
             !newEntry.sessionId.startsWith("pending-") &&
@@ -1001,7 +999,7 @@ export class CLIHandler {
             lastEntryIndex = i;
             break;
           }
-          // 같은 sessionId인 경우 (이미 완성된 엔트리 업데이트)
+          // Same sessionId (updating an already complete entry)
           if (entry.sessionId === newEntry.sessionId && timeDiff < 30000) {
             this.log(
               `💾 Found entry with same sessionId - entryId: ${
@@ -1016,7 +1014,7 @@ export class CLIHandler {
       }
 
       if (lastEntry) {
-        // 기존 엔트리 업데이트
+        // Update the existing entry
         this.log(
           `💾 Updating existing entry - id: ${
             lastEntry.id
@@ -1028,8 +1026,8 @@ export class CLIHandler {
         if (newEntry.assistantResponse) {
           lastEntry.assistantResponse = newEntry.assistantResponse;
         }
-        // agentMode 업데이트 (사용자 메시지가 있고 agentMode가 제공된 경우에만)
-        // 응답만 저장하는 경우 agentMode를 덮어쓰지 않도록 주의
+        // Update agentMode only when there is a user message and agentMode was provided,
+        // so saving just the response doesn't overwrite it
         if (newEntry.userMessage && newEntry.agentMode) {
           lastEntry.agentMode = newEntry.agentMode;
           this.log(`💾 Updated agentMode for entry: ${newEntry.agentMode}`);
@@ -1040,25 +1038,25 @@ export class CLIHandler {
             }`
           );
         } else if (newEntry.assistantResponse && !newEntry.userMessage) {
-          // 응답만 저장하는 경우 기존 agentMode 유지
+          // Saving only the response: keep the existing agentMode
           this.log(
             `💾 Saving response only - preserving agentMode: ${
               lastEntry.agentMode || "undefined"
             }`
           );
         }
-        // sessionId도 업데이트 (pending -> actual)
+        // Also update sessionId (pending -> actual)
         if (
           lastEntry.sessionId.startsWith("pending-") &&
           !newEntry.sessionId.startsWith("pending-")
         ) {
           lastEntry.sessionId = newEntry.sessionId;
         }
-        // 릴레이 세션 ID 업데이트 (릴레이 모드 응답 저장 시)
+        // Update the relay session ID (when saving a relay-mode response)
         if (newEntry.relaySessionId) {
           lastEntry.relaySessionId = newEntry.relaySessionId;
         }
-        // 타임스탬프 업데이트
+        // Update the timestamp
         lastEntry.timestamp = newEntry.timestamp;
         this.log(
           `💾 Entry updated - final agentMode: ${
@@ -1066,18 +1064,18 @@ export class CLIHandler {
           }`
         );
       } else {
-        // 새 엔트리 추가
+        // Add a new entry
         history.entries.push(newEntry);
       }
 
-      // 최대 100개만 유지
+      // Keep at most 100 entries
       if (history.entries.length > 100) {
         history.entries = history.entries.slice(-100);
       }
 
       history.lastUpdated = new Date().toISOString();
 
-      // 파일 저장
+      // Write the file
       if (!writePrivateFile(this.chatHistoryFile, JSON.stringify(history, null, 2))) {
         throw new Error(`Could not write ${this.chatHistoryFile}`);
       }
@@ -1088,7 +1086,7 @@ export class CLIHandler {
   }
 
   /**
-   * pending sessionId를 실제 sessionId로 업데이트
+   * Replace a pending sessionId with the real sessionId
    */
   private updatePendingSessionId(
     clientId: string,
@@ -1103,7 +1101,7 @@ export class CLIHandler {
       const content = fs.readFileSync(this.chatHistoryFile, "utf8");
       const parsed = JSON.parse(content);
 
-      // 기존 형식(배열)을 새 형식으로 변환
+      // Convert the legacy (array) format to the new format
       let history: ChatHistory;
       if (Array.isArray(parsed)) {
         history = {
@@ -1127,7 +1125,7 @@ export class CLIHandler {
         return;
       }
 
-      // entries가 배열인지 확인
+      // Make sure entries is an array
       if (!Array.isArray(history.entries)) {
         this.log(
           "⚠️ history.entries is not an array in updatePendingSessionId"
@@ -1135,7 +1133,7 @@ export class CLIHandler {
         return;
       }
 
-      // pending ID를 가진 엔트리를 찾아서 실제 sessionId로 업데이트
+      // Find the entry with the pending ID and replace it with the real sessionId
       history.entries.forEach((entry) => {
         if (entry.clientId === clientId && entry.sessionId === pendingId) {
           entry.sessionId = actualSessionId;
@@ -1156,7 +1154,7 @@ export class CLIHandler {
   }
 
   /**
-   * 대화 히스토리 조회
+   * Get chat history
    */
   getChatHistory(
     clientId?: string,
@@ -1172,7 +1170,7 @@ export class CLIHandler {
       const content = fs.readFileSync(this.chatHistoryFile, "utf8");
       const parsed = JSON.parse(content);
 
-      // 기존 형식(배열)을 새 형식으로 변환
+      // Convert the legacy (array) format to the new format
       let history: ChatHistory;
       if (Array.isArray(parsed)) {
         history = {
@@ -1186,7 +1184,7 @@ export class CLIHandler {
             assistantResponse:
               oldEntry.assistant || oldEntry.assistantResponse || "",
             timestamp: oldEntry.timestamp || new Date().toISOString(),
-            agentMode: oldEntry.agentMode, // 기존 데이터에서도 agentMode 포함
+            agentMode: oldEntry.agentMode, // include agentMode from legacy data too
           })),
           lastUpdated: new Date().toISOString(),
         };
@@ -1197,7 +1195,7 @@ export class CLIHandler {
         return [];
       }
 
-      // entries가 배열인지 확인
+      // Make sure entries is an array
       if (!Array.isArray(history.entries)) {
         this.log("⚠️ history.entries is not an array in getChatHistory");
         return [];
@@ -1205,17 +1203,17 @@ export class CLIHandler {
 
       let filtered = history.entries;
 
-      // 클라이언트 ID로 필터링 (clientId가 제공된 경우만)
+      // Filter by client ID (only if clientId is provided)
       if (clientId) {
         filtered = filtered.filter((entry) => entry.clientId === clientId);
       }
-      // clientId가 없으면 모든 히스토리 반환 (최근 히스토리 조회용)
+      // No clientId: return all history (for recent-history lookups)
 
-      // 세션 ID로 필터링 (Cursor CLI 채팅 스레드 ID)
+      // Filter by session ID (Cursor CLI chat thread ID)
       if (sessionId) {
         filtered = filtered.filter((entry) => entry.sessionId === sessionId);
       }
-      // 릴레이 세션 ID로 필터링 (릴레이 모드에서 현재 세션만)
+      // Filter by relay session ID (only the current session in relay mode)
       if (relaySessionId) {
         filtered = filtered.filter(
           (entry) =>
@@ -1223,7 +1221,7 @@ export class CLIHandler {
         );
       }
 
-      // 최신순으로 정렬하고 제한
+      // Sort newest first and apply the limit
       filtered.sort(
         (a, b) =>
           new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
@@ -1237,14 +1235,14 @@ export class CLIHandler {
   }
 
   /**
-   * 텍스트 내용을 분석하여 적절한 에이전트 모드 자동 선택
+   * Pick an agent mode automatically based on the text
    */
   private detectAgentMode(
     text: string
   ): "agent" | "ask" | "plan" | "debug" | null {
     const lowerText = text.toLowerCase();
 
-    // Debug 모드 키워드
+    // Debug mode keywords
     const debugKeywords = [
       "bug",
       "error",
@@ -1258,14 +1256,14 @@ export class CLIHandler {
       "log",
     ];
     if (debugKeywords.some((keyword) => lowerText.includes(keyword))) {
-      // 버그 관련 키워드가 있지만, 단순 질문인지 확인
+      // Bug-related keyword found; check whether it's just a question
       if (
         lowerText.includes("why") ||
         lowerText.includes("what") ||
         lowerText.includes("how") ||
         lowerText.includes("?")
       ) {
-        // 질문 형태면 Ask 모드
+        // Phrased as a question: Ask mode
         if (
           lowerText.includes("explain") ||
           lowerText.includes("understand") ||
@@ -1277,7 +1275,7 @@ export class CLIHandler {
       return "debug";
     }
 
-    // Plan 모드 키워드
+    // Plan mode keywords
     const planKeywords = [
       "plan",
       "design",
@@ -1295,7 +1293,7 @@ export class CLIHandler {
       "structure",
     ];
     if (planKeywords.some((keyword) => lowerText.includes(keyword))) {
-      // 복잡한 작업 키워드 확인
+      // Complex-task keywords (Korean: "whole", "all", "overall")
       const complexKeywords = [
         "multiple",
         "several",
@@ -1304,24 +1302,24 @@ export class CLIHandler {
         "module",
         "component",
         "project",
-        "전체",
-        "모든",
-        "전반",
+        "\uC804\uCCB4",
+        "\uBAA8\uB4E0",
+        "\uC804\uBC18",
       ];
       if (complexKeywords.some((keyword) => lowerText.includes(keyword))) {
         return "plan";
       }
-      // "프로젝트 분석", "전체 분석" 같은 패턴도 Plan 모드
+      // Patterns like "analyse the project" are also Plan mode (Korean: "analysis")
       if (
         lowerText.includes("analyze") ||
         lowerText.includes("analysis") ||
-        lowerText.includes("분석")
+        lowerText.includes("\uBD84\uC11D")
       ) {
         return "plan";
       }
     }
 
-    // Ask 모드 키워드 (질문, 학습, 탐색)
+    // Ask mode keywords (questions, learning, exploration)
     const askKeywords = [
       "explain",
       "what is",
@@ -1339,12 +1337,12 @@ export class CLIHandler {
       return "ask";
     }
 
-    // 기본값: Agent 모드 (코드 작성/수정 작업)
-    return null; // null이면 기본 Agent 모드 사용
+    // Default: Agent mode (writing/editing code)
+    return null; // null means use the default Agent mode
   }
 
   /**
-   * 모드 이름을 사용자 친화적인 표시 이름으로 변환
+   * Convert a mode name to a user-friendly display name
    */
   private getModeDisplayName(mode: string): string {
     const modeNames: { [key: string]: string } = {

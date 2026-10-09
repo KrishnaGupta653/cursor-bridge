@@ -4,10 +4,10 @@ import { getSessionRecord, updatePcLastSeen } from "../lib/store.js";
 import { ApiResponse } from "../lib/types.js";
 
 /**
- * PC 익스텐션 "살아있음" 신호 (heartbeat)
- * - 주기적으로 호출하면 pcLastSeenAt 갱신
- * - 2분간 heartbeat 없으면 연결 끊김으로 간주, 같은 세션 ID로 다른 PC 접속 허용
- * - "접속 끊을게요" API 없이도 안전하게 세션 해제 판단 가능
+ * PC extension "still alive" signal (heartbeat)
+ * - Calling it periodically refreshes pcLastSeenAt
+ * - With no heartbeat for 2 minutes the PC counts as disconnected, so another PC may join with the same session ID
+ * - Lets the relay safely decide a session is released without an explicit "disconnect" call
  */
 async function handler(
   req: VercelRequest,

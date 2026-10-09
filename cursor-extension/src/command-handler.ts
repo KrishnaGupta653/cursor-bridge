@@ -119,7 +119,7 @@ export class CommandHandler {
     return this.cdpManager.openAgentHistoryItem(historyId);
   }
 
-  /** 릴레이 모드일 때 챗 히스토리에 relaySessionId를 넣기 위한 getter 설정 */
+  /** Set the getter used to add relaySessionId to chat history in relay mode */
   setGetRelaySessionId(getter: () => string | null): void {
     this.cliHandler?.setGetRelaySessionId(getter);
   }
@@ -144,7 +144,7 @@ export class CommandHandler {
     console.error(logMessage);
   }
 
-  // 텍스트가 명령어인지 판단하는 헬퍼 함수
+  // Heuristic: does the text look like a shell command?
   private isLikelyCommand(text: string): boolean {
     if (!text || text.length === 0) {
       return false;
@@ -200,7 +200,6 @@ export class CommandHandler {
     );
 
     try {
-      // 출력 파일 경로 가져오기
       const workspaceFolders = vscode.workspace.workspaceFolders;
       let outputFile: string | null = null;
       if (workspaceFolders && workspaceFolders.length > 0) {
@@ -208,33 +207,31 @@ export class CommandHandler {
         outputFile = path.join(workspaceRoot, CONFIG.TERMINAL_OUTPUT_FILE);
       }
 
-      // 활성 터미널 가져오기
       let terminal = vscode.window.activeTerminal;
       this.log(
         `[Cursor Remote] Active terminal: ${terminal ? terminal.name : "null"}`
       );
 
       if (!terminal) {
-        // 활성 터미널이 없으면 새 터미널 생성
+        // No active terminal; create one
         this.log("[Cursor Remote] No active terminal, creating new terminal");
         terminal = vscode.window.createTerminal("Cursor Remote");
         this.log(`[Cursor Remote] Created terminal: ${terminal.name}`);
-        terminal.show(true); // true: 터미널에 포커스를 강제로 이동
+        terminal.show(true); // true: force focus to the terminal
         this.log(
           "[Cursor Remote] Terminal shown, waiting 800ms for activation..."
         );
         await new Promise((resolve) => setTimeout(resolve, 800));
       } else {
-        // 활성 터미널에 포커스
         this.log(`[Cursor Remote] Using existing terminal: ${terminal.name}`);
-        terminal.show(true); // true: 터미널에 포커스를 강제로 이동
+        terminal.show(true); // true: force focus to the terminal
         this.log(
           "[Cursor Remote] Terminal shown, waiting 500ms for activation..."
         );
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
 
-      // VS Code 명령을 사용하여 터미널에 포커스 강제 이동
+      // Force terminal focus via VS Code command
       this.log(
         "[Cursor Remote] Executing workbench.action.terminal.focus command..."
       );
@@ -243,7 +240,7 @@ export class CommandHandler {
         setTimeout(resolve, CONFIG.TERMINAL_FOCUS_DELAY)
       );
 
-      // 터미널이 실제로 활성화되었는지 확인
+      // Check the terminal actually became active
       const activeTerminalAfterWait = vscode.window.activeTerminal;
       if (activeTerminalAfterWait?.name !== terminal.name) {
         this.log(
@@ -251,21 +248,19 @@ export class CommandHandler {
             terminal.name
           }, Active: ${activeTerminalAfterWait?.name || "null"}`
         );
-        // 터미널이 활성화되지 않았어도 계속 진행 (터미널이 여러 개일 수 있음)
+        // Continue anyway (there may be multiple terminals)
       } else {
         this.log(`[Cursor Remote] ✅ Terminal is active: ${terminal.name}`);
       }
 
-      // 터미널에 텍스트 전송
-      // execute가 false면 newline을 추가하지 않고, true면 Enter 키를 시뮬레이션
+      // execute=false sends no newline; execute=true simulates Enter
       if (execute) {
-        // 터미널이 포커스를 받았는지 확인하기 위해 추가 대기
+        // Extra wait so the terminal has focus
         await new Promise((resolve) => setTimeout(resolve, 100));
 
-        // 출력 자동 캡처: 명령어처럼 보이는 경우에만 자동으로 출력을 파일로 리다이렉트
+        // Auto-capture: redirect output to a file only when the text looks like a command
         let commandToSend = text;
         if (outputFile) {
-          // 명령어인지 판단하는 로직
           const trimmedText = text.trim();
           const isCommand = this.isLikelyCommand(trimmedText);
 
@@ -291,13 +286,13 @@ export class CommandHandler {
           }
         }
 
-        // 방법: 텍스트를 newline 없이 먼저 보내고,
-        // 다음 sendText 호출 시 이전 텍스트가 실행되는 특성을 이용
-        terminal.sendText(commandToSend, false); // false: newline 없이 텍스트만 전송
+        // Send the text without a newline first;
+        // the next sendText call then executes the previous text
+        terminal.sendText(commandToSend, false); // false: no newline
         this.log("[Cursor Remote] Text sent, waiting for execution trigger...");
 
-        // 충분한 대기 후 줄바꿈을 보내서 이전 텍스트 실행 트리거
-        // 터미널이 텍스트를 완전히 처리할 시간을 줌
+        // After a delay, send a newline to execute the previous text
+        // (gives the terminal time to process the text)
         await new Promise((resolve) =>
           setTimeout(resolve, CONFIG.TERMINAL_EXECUTION_DELAY)
         );
@@ -307,7 +302,7 @@ export class CommandHandler {
           "[Cursor Remote] ✅ Text sent to terminal with execution (triggered by newline)"
         );
       } else {
-        // 텍스트만 전송 (newline 없이)
+        // Send text only (no newline)
         this.log(
           `[Cursor Remote] Sending text to terminal without execution (no newline)`
         );
@@ -416,22 +411,22 @@ export class CommandHandler {
   }
 
   async getAIResponse(): Promise<string> {
-    // Cursor AI 응답을 가져오는 로직
-    // 실제 구현은 Cursor API에 따라 달라질 수 있음
-    // TODO: Cursor AI API 연동
-    // 현재는 채팅 히스토리나 최근 AI 응답을 가져오는 방식으로 구현 가능
+    // Fetch the Cursor AI response
+    // Actual implementation depends on the Cursor API
+    // TODO: integrate Cursor AI API
+    // Could be implemented by reading chat history or the latest AI response
     return "AI response placeholder - Cursor AI API integration needed";
   }
 
   /**
-   * 클라이언트의 세션 정보 가져오기
+   * Get a client's session info
    */
   async getSessionInfo(clientId?: string): Promise<any> {
     if (!this.cliHandler) {
       return { currentSessionId: null, clientId: clientId || null };
     }
 
-    // CLIHandler의 clientSessions에 접근하기 위해 타입 캐스팅
+    // Cast to access CLIHandler's clientSessions
     const cliHandlerAny = this.cliHandler as any;
     const clientSessions = cliHandlerAny.clientSessions as
       | Map<string, string>
@@ -455,7 +450,7 @@ export class CommandHandler {
   }
 
   /**
-   * 대화 히스토리 조회
+   * Get chat history
    */
   async getChatHistory(
     clientId?: string,
@@ -500,8 +495,8 @@ export class CommandHandler {
 
   async executeAction(action: string): Promise<{ success: boolean }> {
     try {
-      // Cursor IDE의 액션 실행 명령
-      // action은 'undo', 'keep', 'accept', 'reject' 등
+      // Run a Cursor IDE action command
+      // action is e.g. 'undo', 'keep', 'accept', 'reject'
       const actionCommands = [
         `cursor.chat.${action}`,
         `workbench.action.chat.${action}`,
@@ -517,14 +512,13 @@ export class CommandHandler {
         }
       }
 
-      // 일반적인 액션 명령 시도
+      // Try the generic action command
       try {
         await vscode.commands.executeCommand(action);
         return { success: true };
       } catch (e) {
-        // 액션 버튼 클릭 시뮬레이션
-        // Cursor IDE의 UI에서 액션 버튼을 찾아 클릭하는 것은 제한적
-        // 대신 키보드 단축키나 명령으로 처리
+        // Simulating action button clicks in the Cursor UI is limited,
+        // so use keyboard shortcuts or commands instead
         return { success: false };
       }
     } catch (error) {
@@ -533,7 +527,6 @@ export class CommandHandler {
   }
 
   dispose() {
-    // CLI 핸들러 정리
     if (this.cliHandler) {
       this.cliHandler.dispose();
       this.cliHandler = null;

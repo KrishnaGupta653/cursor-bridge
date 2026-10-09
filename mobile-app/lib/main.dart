@@ -92,16 +92,15 @@ enum LogLevel {
 
 class MessageItem {
   final String text;
-  final String type; // MessageType 상수 사용
+  final String type; // a MessageType constant
   final DateTime timestamp;
-  String? agentMode; // 에이전트 모드 (userPrompt 타입일 때만 사용)
-  LogLevel? logLevel; // 로그 레벨 (log 타입일 때만 사용)
+  String? agentMode; // userPrompt messages only
+  LogLevel? logLevel; // log messages only
 
   MessageItem(this.text,
       {this.type = MessageType.normal, this.agentMode, this.logLevel})
       : timestamp = DateTime.now();
 
-  // 필터 카테고리 결정
   MessageFilter? get filterCategory {
     switch (type) {
       case MessageType.chatResponse:
@@ -126,7 +125,6 @@ class MessageItem {
 }
 
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
-  // 연결 타입
   ConnectionType _connectionType = ConnectionType.relay;
 
   // Transport (Local / Tunnel / Relay) and the Agents window state
@@ -147,33 +145,33 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _isConnected || (_hadConnection && (_isReconnecting || _isConnecting || _restoringLogin));
   bool _isWaitingForResponse = false; // waiting for AI response
 
-  // Cursor CLI 세션 관련
-  String? _currentCursorSessionId; // 현재 Cursor CLI 세션 ID
-  String? _currentClientId; // 현재 클라이언트 ID
+  // Cursor CLI session
+  String? _currentCursorSessionId;
+  String? _currentClientId;
 
-  // 스트리밍 관련
-  int? _streamingMessageIndex; // 현재 스트리밍 중인 메시지의 인덱스
-  String _streamingText = ''; // 스트리밍 중인 텍스트
+  // Streaming
+  int? _streamingMessageIndex; // index of the message being streamed
+  String _streamingText = '';
 
-  // 세션 및 대화 히스토리
-  Map<String, dynamic>? _sessionInfo; // 현재 세션 정보
-  List<Map<String, dynamic>> _chatHistory = []; // 대화 히스토리 목록
-  List<String> _availableSessions = []; // 사용 가능한 세션 목록
-  /// 같은 세션 재연결 시 메인 목록에 히스토리 반영용 (get_chat_history 응답 시 사용)
+  // Session and chat history
+  Map<String, dynamic>? _sessionInfo; // Current session info
+  List<Map<String, dynamic>> _chatHistory = [];
+  List<String> _availableSessions = [];
+  /// On reconnecting to the same session, apply the get_chat_history response to the main list.
   bool _loadingSessionHistoryForDisplay = false;
 
-  /// 과거 메시지 불러오기 버튼으로 요청한 로드 (응답 시 _messages에 반영)
+  /// A load requested by the "load past messages" button (the response is merged into _messages).
   bool _loadingPastMessages = false;
 
-  // 로컬 서버 관련
+  // Local server
   final TextEditingController _localIpController = TextEditingController();
   final TextEditingController _localPortController =
       TextEditingController(text: '8766');
 
-  // 에이전트 모드 관련
+  // Agent mode
   String _selectedAgentMode = 'auto'; // auto, agent, ask, plan, debug
-  String? _actualSelectedMode; // 자동 모드로 선택된 경우 실제 선택된 모드 (null이면 사용자가 직접 선택)
-  MessageItem? _lastUserPrompt; // 마지막 User Prompt 메시지 (모드 업데이트용)
+  String? _actualSelectedMode; // mode actually picked in auto mode (null if the user chose it)
+  MessageItem? _lastUserPrompt; // last user prompt, for updating its mode
 
   // Agent backend: CLI (new agent) vs CDP (existing Cursor IDE session)
   String _selectedAgentBackend = 'cdp'; // cdp (Agents) | cli — Agents first
@@ -182,9 +180,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final TextEditingController _commandController = TextEditingController();
   final TextEditingController _sessionIdController = TextEditingController();
 
-  // 입력창 상태 관리
-  int _textFieldKey = 0; // TextField 재생성용 Key
-  DateTime? _lastPromptSubmitTime; // Enter 중복 전송 방지용 debounce
+  // Input field state
+  int _textFieldKey = 0; // bumped to recreate the TextField
+  DateTime? _lastPromptSubmitTime; // debounces duplicate Enter submits
   final FocusNode _sessionIdFocusNode = FocusNode();
   final FocusNode _localIpFocusNode = FocusNode();
   final FocusNode _commandFocusNode = FocusNode();
@@ -194,14 +192,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       // ignore: deprecated_member_use
       ExpansionTileController();
 
-  /// 스크롤 버튼 표시: 위로/아래로 스크롤 가능할 때만
+  /// Scroll buttons are shown only when scrolling up/down is possible.
   bool _canScrollUp = false;
   bool _canScrollDown = false;
 
-  /// 연결 후 컴팩트 뷰 (메시지 크게 + 한줄 프롬프트만)
+  /// Compact view after connecting (large messages + single-line prompt).
   bool _isCompactView = false;
 
-  // 필터 상태 (기본값: AI 응답 + 사용자 프롬프트만 활성화)
+  // Filters (default: only AI responses and user prompts)
   final Map<MessageFilter, bool> _activeFilters = {
     MessageFilter.aiResponse: true,
     MessageFilter.userPrompt: true,
@@ -209,20 +207,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     MessageFilter.log: false,
   };
 
-  // 로그 레벨별 필터 상태 (기본값: 모두 활성화)
+  // Per-log-level filters (default: all on)
   final Map<LogLevel, bool> _logLevelFilters = {
     LogLevel.error: true,
     LogLevel.warning: true,
     LogLevel.info: true,
   };
 
-  // 필터링된 메시지 목록 (카테고리 필터만)
+  // Messages after category filters only
   List<MessageItem> get _filteredMessages {
     return _messages.where((msg) {
       final category = msg.filterCategory;
       if (category == null) return true;
 
-      // 로그 메시지인 경우 레벨별 필터도 적용
+      // Log messages also go through the level filters
       if (category == MessageFilter.log &&
           (_activeFilters[MessageFilter.log] ?? false)) {
         final level = msg.logLevel ?? LogLevel.info;
@@ -233,13 +231,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }).toList();
   }
 
-  // 검색: 전체(프롬프트+답변) 또는 답변만
+  // Search: everything (prompts + responses) or responses only
   static const String _searchScopeAll = 'all';
   static const String _searchScopeAnswerOnly = 'answer_only';
   String _searchQuery = '';
   String _searchScope = _searchScopeAll;
 
-  // 검색 적용된 표시용 메시지 목록
+  // Displayed messages after search
   List<MessageItem> get _displayMessages {
     final q = _searchQuery.trim().toLowerCase();
     if (q.isEmpty) return _filteredMessages;
@@ -450,7 +448,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (messageData['success'] == true) {
           final commandType = messageData['command_type'] as String? ?? '';
 
-          // 세션 정보 조회 결과 처리
+          // Session info result
           if (commandType == 'get_session_info' &&
               messageData['data'] != null) {
             _sessionInfo = messageData['data'] as Map<String, dynamic>;
@@ -462,7 +460,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               _currentClientId = _sessionInfo!['clientId'] as String;
             }
           }
-          // 대화 히스토리 조회 결과 처리 (Extension은 data에 배열 직접 또는 { entries: [] })
+          // Chat history result (the extension sends either an array or { entries: [] } in data)
           else if (commandType == 'get_chat_history' &&
               messageData['data'] != null) {
             final raw = messageData['data'];
@@ -499,7 +497,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             }
           }
 
-          // 일반 명령 성공 메시지는 세션/히스토리 조회 시에는 표시하지 않음
+          // Don't show the generic success message for session/history queries
           if (commandType != 'get_session_info' &&
               commandType != 'get_chat_history') {
             _messages.add(
@@ -530,7 +528,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _messages.add(MessageItem('📟 Terminal: $text',
             type: MessageType.terminalOutput));
       } else if (type == 'chat_response_chunk') {
-        // 스트리밍 청크 처리
+        // Streaming chunk
         final chunkText = messageData['text'] ?? '';
         final fullText = messageData['fullText'] ?? chunkText;
         final isReplace = messageData['isReplace'] == true;
@@ -545,7 +543,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _loadChatHistory();
         }
 
-        // 첫 번째 청크인 경우 메시지 추가
+        // First chunk: add the message
         if (_streamingMessageIndex == null) {
           _messages
               .add(MessageItem('', type: MessageType.chatResponseDivider));
@@ -556,7 +554,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               type: MessageType.chatResponseChunk));
           _streamingMessageIndex = _messages.length - 1;
         } else {
-          // 기존 스트리밍 메시지 업데이트
+          // Update the existing streaming message
           if (isReplace) {
             _streamingText = fullText;
           } else {
@@ -568,7 +566,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           }
         }
       } else if (type == 'chat_response_complete') {
-        // 스트리밍 완료 처리
+        // Streaming finished
         if (_streamingMessageIndex != null &&
             _streamingMessageIndex! < _messages.length) {
           _messages[_streamingMessageIndex!] =
@@ -588,18 +586,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         }
         _isWaitingForResponse = false;
       } else if (type == 'chat_response') {
-        // 비스트리밍 응답 (CLI)
+        // Non-streaming response (CLI)
         if (messageData['sessionId'] != null) {
           _currentCursorSessionId = messageData['sessionId'] as String;
         }
         final newClientId = messageData['clientId'] as String?;
         if (newClientId != null && _currentClientId != newClientId) {
-          // clientId가 처음 설정되거나 변경되면 세션 정보 및 히스토리 조회
+          // When clientId is first set or changes, fetch session info and history
           _currentClientId = newClientId;
           _loadSessionInfo();
           _loadChatHistory();
         } else if (_currentClientId != null) {
-          // 같은 clientId면 히스토리만 새로고침
+          // Same clientId: just refresh the history
           Future.delayed(const Duration(milliseconds: 500), () {
             _loadChatHistory();
           });
@@ -657,7 +655,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final requestedMode = messageData['requestedMode'] ?? 'auto';
     final actualMode = messageData['actualMode'] ?? 'agent';
     final displayName = messageData['displayName'] ?? actualMode;
-    // 자동 모드로 선택된 경우에만 표시: 가장 최근 모드 없는 User Prompt 업데이트
+    // Auto mode only: tag the most recent user prompt that has no mode yet
     if (requestedMode == 'auto' && _selectedAgentMode == 'auto') {
       _actualSelectedMode = actualMode;
       for (int i = _messages.length - 1; i >= 0; i--) {
@@ -698,7 +696,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     };
     final prefix = switch (logSource) {
       'extension' => '🔌 [Extension]',
-      'pc-server' => '🖥️ [PC Server]',
       _ => '📝 [Log]',
     };
     var logText = '$prefix $logMessage';
@@ -806,7 +803,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  // 히스토리에서 연결
+  // Connect from history
   void _connectFromHistory(ConnectionHistoryItem item) {
     setState(() {
       _connectionType = item.type;
@@ -823,11 +820,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
     });
 
-    // 연결 시도
     _connect();
   }
 
-  // 모드 이름을 사용자 친화적인 표시 이름으로 변환
+  // User-friendly display name for a mode
   String _getModeDisplayName(String mode) {
     switch (mode) {
       case 'agent':
@@ -845,7 +841,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  // 모드에 따른 아이콘 반환
+  // Icon for a mode
   IconData _getModeIcon(String mode) {
     switch (mode) {
       case 'agent':
@@ -863,11 +859,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  // 텍스트 내용을 분석하여 적절한 에이전트 모드 자동 선택 (Extension의 detectAgentMode와 동일한 로직)
+  // Pick an agent mode from the prompt text (same logic as the extension's detectAgentMode)
   String? _detectAgentMode(String text) {
     final lowerText = text.toLowerCase();
 
-    // Debug 모드 키워드
+    // Debug mode keywords
     const debugKeywords = [
       'bug',
       'error',
@@ -881,12 +877,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       'log'
     ];
     if (debugKeywords.any((keyword) => lowerText.contains(keyword))) {
-      // 버그 관련 키워드가 있지만, 단순 질문인지 확인
+      // Bug keywords present, but it may just be a question
       if (lowerText.contains('why') ||
           lowerText.contains('what') ||
           lowerText.contains('how') ||
           lowerText.contains('?')) {
-        // 질문 형태면 Ask 모드
+        // Questions go to Ask mode
         if (lowerText.contains('explain') ||
             lowerText.contains('understand') ||
             lowerText.contains('learn')) {
@@ -896,7 +892,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return 'debug';
     }
 
-    // Plan 모드 키워드
+    // Plan mode keywords
     const planKeywords = [
       'plan',
       'design',
@@ -914,7 +910,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       'structure'
     ];
     if (planKeywords.any((keyword) => lowerText.contains(keyword))) {
-      // 복잡한 작업 키워드 확인
+      // Keywords that suggest a complex task
       const complexKeywords = [
         'multiple',
         'several',
@@ -923,22 +919,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         'module',
         'component',
         'project',
-        '전체',
-        '모든',
-        '전반'
+        '\uC804\uCCB4', // Korean "entire"
+        '\uBAA8\uB4E0', // Korean "all"
+        '\uC804\uBC18' // Korean "overall"
       ];
       if (complexKeywords.any((keyword) => lowerText.contains(keyword))) {
         return 'plan';
       }
-      // "프로젝트 분석", "전체 분석" 같은 패턴도 Plan 모드
+      // "analyze the project"-style prompts are Plan mode too
       if (lowerText.contains('analyze') ||
           lowerText.contains('analysis') ||
-          lowerText.contains('분석')) {
+          lowerText.contains('\uBD84\uC11D')) {
         return 'plan';
       }
     }
 
-    // Ask 모드 키워드 (질문, 학습, 탐색)
+    // Ask mode keywords (questions, learning, exploring)
     const askKeywords = [
       'explain',
       'what is',
@@ -954,8 +950,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return 'ask';
     }
 
-    // 기본값: Agent 모드 (코드 작성/수정 작업)
-    return null; // null이면 기본 Agent 모드 사용
+    // Default: Agent mode (writing/editing code)
+    return null; // null means the default Agent mode
   }
 
   /// Human-readable connection status (also used for screen readers)
@@ -1012,7 +1008,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _stopReconnect() => _conn.stopReconnect();
 
-  // 수동 재연결
+  // Manual reconnect
   void _manualReconnect() {
     _conn.stopReconnect();
     _conn.resetReconnectAttempts();
@@ -1045,15 +1041,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return;
     }
 
-    // agentMode가 제공되지 않으면 선택된 모드 사용 (또는 auto)
+    // Without an explicit agentMode, use the selected mode (or auto)
     final mode = agentMode ?? _selectedAgentMode;
     final backend = agentBackend ?? _selectedAgentBackend;
 
-    // 자동 모드이고 프롬프트인 경우 텍스트를 분석하여 모드 미리 감지
+    // In auto mode, detect the mode from the prompt text up front
     String? finalModeForCommand;
     if (prompt == true && text != null && mode == 'auto') {
       final detectedMode = _detectAgentMode(text);
-      finalModeForCommand = detectedMode ?? 'agent'; // 감지되지 않으면 기본 Agent 모드
+      finalModeForCommand = detectedMode ?? 'agent'; // default to Agent mode if nothing is detected
     } else if (mode != 'auto') {
       finalModeForCommand = mode;
     }
@@ -1074,21 +1070,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (sessionId != null) 'sessionId': sessionId,
       if (relaySessionId != null) 'relaySessionId': relaySessionId,
       if (limit != null) 'limit': limit,
-      // 자동 모드일 때도 감지된 모드를 전달하여 히스토리에 저장되도록 함
+      // Pass the detected mode even in auto mode so it's saved in history
       if (finalModeForCommand != null) 'agentMode': finalModeForCommand,
       if (backend.isNotEmpty) 'agentBackend': backend,
       if (requestId != null) 'requestId': requestId,
       if (historyId != null) 'historyId': historyId,
     };
 
-    // 프롬프트 전송 시 사용자 프롬프트를 별도로 기록하고 응답 대기 상태 설정
+    // Record the user prompt separately and mark that a response is pending
     if (prompt == true && execute == true && text != null) {
       setState(() {
         _isWaitingForResponse = true;
         final promptItem = MessageItem(
           text,
           type: MessageType.userPrompt,
-          agentMode: finalModeForCommand ?? mode, // 감지된 모드 또는 선택된 모드
+          agentMode: finalModeForCommand ?? mode, // detected or selected mode
         );
         _lastUserPrompt = promptItem;
         _messages.add(promptItem);
@@ -1115,7 +1111,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   void _scrollToBottom() {
-    // 다음 프레임에서 스크롤 (위젯이 빌드된 후)
+    // Scroll on the next frame, after the widget is built
     if (!mounted) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && _scrollController.hasClients) {
@@ -1126,14 +1122,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             curve: Curves.easeOut,
           );
         } catch (e) {
-          // 스크롤 에러 무시
+          // Ignore scroll errors
         }
       }
     });
   }
 
   Widget _buildMessageItem(MessageItem message) {
-    // 구분선
+    // Divider
     if (message.type == MessageType.chatResponseDivider) {
       return const Divider(
         height: 1,
@@ -1142,7 +1138,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
     }
 
-    // 헤더
+    // Header
     if (message.type == MessageType.chatResponseHeader) {
       return Container(
         margin: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
@@ -1172,7 +1168,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
     }
 
-    // 채팅 응답 본문 (스트리밍 중)
+    // Chat response body (streaming)
     if (message.type == MessageType.chatResponseChunk) {
       return Container(
         margin: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
@@ -1199,7 +1195,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     ),
                   ),
                 ),
-                // 스트리밍 인디케이터
+                // Streaming indicator
                 const SizedBox(width: 8),
                 TweenAnimationBuilder<double>(
                   tween: Tween(begin: 0.0, end: 1.0),
@@ -1218,7 +1214,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     );
                   },
                   onEnd: () {
-                    // 애니메이션 반복
+                    // Repeat the animation
                     if (mounted) {
                       setState(() {});
                     }
@@ -1231,7 +1227,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
     }
 
-    // 채팅 응답 본문 (완료)
+    // Chat response body (complete)
     if (message.type == MessageType.chatResponse) {
       return Container(
         margin: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
@@ -1279,7 +1275,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
     }
 
-    // 사용자 프롬프트 (입력한 내용) - 구분감 있게 표시
+    // User prompt, visually distinct
     if (message.type == MessageType.userPrompt) {
       return Container(
         margin: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
@@ -1319,7 +1315,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     color: Theme.of(context).colorScheme.onSurface,
                   ),
                 ),
-                // 에이전트 모드 표시 (null이 아니고 auto가 아닌 모든 경우, 자동 모드도 미리 감지되어 표시됨)
+                // Agent mode badge (whenever non-null and not auto; auto mode is pre-detected so it shows too)
                 if (message.agentMode != null &&
                     message.agentMode!.isNotEmpty &&
                     message.agentMode != 'auto') ...[
@@ -1397,9 +1393,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
     }
 
-    // 로그 메시지 스타일
+    // Log message style
     if (message.type == MessageType.log) {
-      // 로그 레벨에 따라 색상 결정
+      // Color by log level
       Color logColor;
       IconData logIcon;
 
@@ -1408,7 +1404,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           logColor = Theme.of(context).colorScheme.error;
           logIcon = Icons.error;
         case LogLevel.warning:
-          logColor = const Color(0xFFFF9800); // 오렌지
+          logColor = const Color(0xFFFF9800); // orange
           logIcon = Icons.warning;
         case LogLevel.info:
           logColor = Theme.of(context).colorScheme.tertiary;
@@ -1448,7 +1444,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
     }
 
-    // 시스템 메시지 스타일
+    // System message style
     if (message.type == MessageType.system) {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 6.0),
@@ -1494,7 +1490,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
     }
 
-    // 일반 메시지
+    // Plain message
     return ListTile(
       title: Text(
         message.text,
@@ -1522,7 +1518,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
-  // 시스템 메시지 아이콘 결정
+  // System message icon
   IconData _getSystemMessageIcon(String text) {
     if (text.startsWith('✅')) return Icons.check_circle;
     if (text.startsWith('❌')) return Icons.error;
@@ -1536,7 +1532,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return Icons.info_outline;
   }
 
-  // 시간 포맷팅
+  // Time formatting
   String _formatTime(DateTime time) {
     return '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}:${time.second.toString().padLeft(2, '0')}';
   }
@@ -1573,9 +1569,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       });
     }
     _loadConnectionSettings();
-    // 설정에서 기본 에이전트 모드 적용
+    // Apply the default agent mode from settings
     _selectedAgentMode = AppSettings().defaultAgentMode;
-    // 설정 변경 리스너 추가
+    // Listen for settings changes
     AppSettings().addListener(_onAppSettingsChanged);
     _scrollController.addListener(_updateScrollButtonVisibility);
     WidgetsBinding.instance
@@ -1599,22 +1595,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void _onAppSettingsChanged() {
     if (mounted) {
       setState(() {
-        // 설정 변경 시 UI 업데이트 (히스토리 표시 등)
+        // Rebuild on settings changes (e.g. history visibility)
       });
     }
   }
 
-  // 입력창 클리어 (한글 IME composing 버퍼 완전 초기화)
+  // Clear the input, fully resetting the IME composing buffer
   void _clearCommandInput() {
-    // Controller 텍스트 클리어
     _commandController.clear();
 
-    // Key를 변경하여 TextField 완전 재생성 (IME 상태 완전 리셋)
+    // Change the key to recreate the TextField (fully resets IME state)
     setState(() {
       _textFieldKey++;
     });
 
-    // 새 TextField에 포커스 요청
+    // Focus the new TextField
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         _commandFocusNode.requestFocus();
@@ -1622,12 +1617,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
   }
 
-  // 연결 설정 로드 (SharedPreferences)
+  // Load connection settings (SharedPreferences)
   Future<void> _loadConnectionSettings() async {
     try {
       final prefs = await SharedPreferences.getInstance();
 
-      // 연결 타입 로드
       final connectionTypeStr = prefs.getString('connection_type');
       if (connectionTypeStr != null && !_restoringLogin) {
         setState(() {
@@ -1639,7 +1633,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         });
       }
 
-      // PC(Extension) IP 주소 로드
+      // PC (extension) IP address
       final savedIp = prefs.getString('pc_server_ip');
       if (savedIp != null && savedIp.isNotEmpty) {
         _localIpController.text = savedIp;
@@ -1649,22 +1643,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _localPortController.text = savedPort;
       }
 
-      // 마지막 세션 ID 로드 (선택사항)
+      // Last session ID (optional)
       final lastSessionId = prefs.getString('last_session_id');
       if (lastSessionId != null && lastSessionId.isNotEmpty && !_restoringLogin) {
         _sessionIdController.text = lastSessionId;
       }
     } catch (e) {
-      // 에러는 조용히 무시 (첫 실행 시 prefs가 없을 수 있음)
+      // Ignore errors (prefs may not exist on first run)
     }
   }
 
-  // 연결 설정 저장 (SharedPreferences)
+  // Save connection settings (SharedPreferences)
   Future<void> _saveConnectionSettings() async {
     try {
       final prefs = await SharedPreferences.getInstance();
 
-      // 연결 타입 저장
       await prefs.setString(
           'connection_type',
           _connectionType == ConnectionType.local
@@ -1673,7 +1666,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   ? 'tunnel'
                   : 'relay');
 
-      // PC(Extension) IP 주소 저장
+      // PC (extension) IP address
       if (_localIpController.text.trim().isNotEmpty) {
         await prefs.setString('pc_server_ip', _localIpController.text.trim());
       }
@@ -1681,12 +1674,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         await prefs.setString('local_ws_port', _localPortController.text.trim());
       }
 
-      // 세션 ID 저장 (연결 성공 시)
+      // Session ID (on successful connection)
       if (_sessionId != null && _sessionId!.isNotEmpty) {
         await prefs.setString('last_session_id', _sessionId!);
       }
     } catch (e) {
-      // 에러는 조용히 무시
+      // Ignore errors
     }
   }
 
@@ -1705,11 +1698,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  // 세션 정보 조회
+  // Fetch session info
   Future<void> _loadSessionInfo() async {
     if (!_isConnected) return;
 
-    // clientId가 아직 없으면 잠시 대기 후 재시도
+    // No clientId yet: retry shortly
     if (_currentClientId == null) {
       Future.delayed(const Duration(milliseconds: 500), () {
         if (_isConnected) _loadSessionInfo();
@@ -1720,12 +1713,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     try {
       await _sendCommand('get_session_info', clientId: _currentClientId);
     } catch (e) {
-      // 에러는 조용히 무시
+      // Ignore errors
     }
   }
 
-  // 대화 히스토리 조회
-  // 릴레이 모드일 때 relaySessionId를 넘기면 현재 릴레이 세션의 히스토리만 반환됨
+  // Fetch chat history
+  // In relay mode, passing relaySessionId returns only the current relay session's history
   Future<void> _loadChatHistory({String? sessionId, int limit = 50}) async {
     if (!_isConnected) return;
 
@@ -1733,14 +1726,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await _sendCommand('get_chat_history',
           clientId: _currentClientId,
           sessionId: sessionId ?? _currentCursorSessionId,
-          relaySessionId: _sessionId, // 릴레이 모드: 현재 세션 히스토리만
+          relaySessionId: _sessionId, // relay mode: current session only
           limit: limit);
     } catch (e) {
-      // 에러는 조용히 무시
+      // Ignore errors
     }
   }
 
-  /// 대화 메시지만 제거 (시스템/로그 메시지는 유지) - 현재 세션만 표시할 때 사용
+  /// Remove chat messages only (keeps system/log messages); used to show just the current session.
   void _clearConversationMessages() {
     _messages.removeWhere((m) {
       switch (m.type) {
@@ -1757,8 +1750,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
   }
 
-  /// get_chat_history 응답 entries를 메인 메시지 목록(_messages)에 반영
-  /// [skipIfExists] true면 이미 같은 userMessage가 있으면 해당 entry 건너뜀 (중복 방지)
+  /// Apply get_chat_history entries to the main message list (_messages).
+  /// With [skipIfExists], entries whose userMessage is already present are skipped.
   void _applyChatHistoryToMessages(List<Map<String, dynamic>> entries,
       {bool skipIfExists = false, bool replaceConversation = false}) {
     if (replaceConversation) _clearConversationMessages();
@@ -1802,7 +1795,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  /// 메시지 리스트 위젯 (필터·검색 적용된 목록, 컴팩트/일반 뷰 공용)
+  /// Message list (filtered and searched), shared by the compact and full views.
   Widget _buildMessageList() {
     if (_displayMessages.isEmpty && !_isWaitingForResponse) {
       final isSearchActive = _searchQuery.trim().isNotEmpty;
@@ -1914,14 +1907,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
-  /// 메시지 리스트 + 맨 위/맨 아래 스크롤 버튼 (스크롤 가능할 때만, 위/아래 각각 배치)
+  /// Message list plus scroll-to-top/bottom buttons, each shown only when that direction can scroll.
   Widget _buildMessageListWithScrollButtons() {
     WidgetsBinding.instance
         .addPostFrameCallback((_) => _updateScrollButtonVisibility());
     return Stack(
       children: [
         _buildMessageList(),
-        // 맨 위로: 상단 오른쪽, 위로 스크롤 가능할 때만
+        // Scroll to top: top right, only when scrollable up
         if (_canScrollUp)
           Positioned(
             top: 8,
@@ -1943,7 +1936,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               ),
             ),
           ),
-        // 맨 아래로: 하단 오른쪽, 아래로 스크롤 가능할 때만
+        // Scroll to bottom: bottom right, only when scrollable down
         if (_canScrollDown)
           Positioned(
             bottom: 8,
@@ -1969,7 +1962,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
-  /// 컴팩트 뷰: 메시지 영역 크게 + 한줄 프롬프트만 (앱바 아이콘으로 전체 화면 복귀)
+  /// Compact view: large message area + single-line prompt (the app bar icon returns to the full view).
   Widget _buildCompactBody() {
     return Column(
       children: [
@@ -2375,7 +2368,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                 ),
                               ),
                               const SizedBox(height: 16),
-                              // 로컬 서버 연결 UI
+                              // Local server connection UI
                               if (_connectionType == ConnectionType.local) ...[
                                 TextField(
                                   controller: _localIpController,
@@ -2540,7 +2533,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                 ),
                               ],
                               const SizedBox(height: 12),
-                              // 최근 연결 목록
+                              // Recent connections
                               if (!_isConnected &&
                                   AppSettings()
                                       .connectionHistory
@@ -2818,7 +2811,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                 ),
                                 const SizedBox(height: 16),
                               ],
-                              // 재연결 중 상태 표시
+                              // Reconnecting status
                               if (_isReconnecting) ...[
                                 Container(
                                   padding: const EdgeInsets.all(12),
@@ -2874,7 +2867,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                 ),
                                 const SizedBox(height: 8),
                               ],
-                              // 연결 에러 표시
+                              // Connection error
                               if (_lastConnectionError != null &&
                                   !_isConnected &&
                                   !_isReconnecting) ...[
@@ -3336,14 +3329,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                         _activeFilters[MessageFilter.log] ??
                                             false,
                                     selectedColor:
-                                        const Color(0xFFFFF3E0), // 오렌지 배경
+                                        const Color(0xFFFFF3E0), // orange background
                                     checkmarkColor:
-                                        const Color(0xFFFF9800), // 오렌지
+                                        const Color(0xFFFF9800), // orange
                                     onSelected: (selected) {
                                       setState(() {
                                         _activeFilters[MessageFilter.log] =
                                             selected;
-                                        // 로그 필터 활성화 시 레벨 필터 모두 체크
+                                        // Enabling the log filter turns on every level filter
                                         if (selected) {
                                           _logLevelFilters[LogLevel.error] =
                                               true;
@@ -3355,7 +3348,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                       });
                                     },
                                   ),
-                                  // 로그 레벨 필터 (로그 필터 활성화 시에만 표시)
+                                  // Log level filters (only shown when the log filter is on)
                                   if (_activeFilters[MessageFilter.log] ??
                                       false) ...[
                                     const SizedBox(width: 4),
@@ -3536,7 +3529,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           ],
                           if (_selectedAgentBackend == 'cli') ...[
                           const SizedBox(height: 10),
-                          // 에이전트 모드 선택
+                          // Agent mode picker
                           Row(
                             children: [
                               Container(
@@ -3663,7 +3656,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                       if (value != null) {
                                         setState(() {
                                           _selectedAgentMode = value;
-                                          // 사용자가 직접 모드를 선택하면 실제 모드 표시 초기화
+                                          // A manual mode choice clears the auto-picked mode label
                                           if (value != 'auto') {
                                             _actualSelectedMode = null;
                                           }
@@ -3675,7 +3668,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               ),
                             ],
                           ),
-                          // 자동 모드로 선택된 경우 실제 모드 표시
+                          // Show the mode auto mode actually picked
                           if (_selectedAgentMode == 'auto' &&
                               _actualSelectedMode != null)
                             Padding(
@@ -3716,8 +3709,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               ),
                             ),
                           const SizedBox(height: 8),
-                          // KeyboardListener: Enter 전송. 컨트롤러에서 읽고 debounce + 전송 후 한 프레임 뒤 재정리로 IME 중복 전송 방지.
-                          // (Focus+동일 FocusNode는 focus_manager assertion 유발로 사용 안 함)
+                          // KeyboardListener: Enter sends. Reads from the controller, debounces, and re-clears a frame after sending to avoid IME double submits.
+                          // (Focus with the same FocusNode is avoided because it trips a focus_manager assertion.)
                           KeyboardListener(
                             focusNode: FocusNode(),
                             onKeyEvent: (event) {
@@ -3743,7 +3736,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               _submitPromptToAgent(text);
                               _clearCommandInput();
                             },
-                            // ValueListenableBuilder로 입력창 감싸기 (전체 UI 리빌드 방지)
+                            // ValueListenableBuilder around the input avoids rebuilding the whole UI
                             child: ValueListenableBuilder<TextEditingValue>(
                               valueListenable: _commandController,
                               builder: (context, textValue, child) {
@@ -3782,7 +3775,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             ),
                           ),
                           const SizedBox(height: 12),
-                          // 버튼 영역도 ValueListenableBuilder로 감싸기
+                          // Same for the button area
                           ValueListenableBuilder<TextEditingValue>(
                             valueListenable: _commandController,
                             builder: (context, textValue, child) {
@@ -3878,9 +3871,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             },
                           ),
                           const SizedBox(height: 8),
-                          // 세션 정보 및 대화 히스토리 표시 (설정에서 활성화한 경우만)
+                          // Session info and chat history (only when enabled in settings)
                           if (_isConnected && AppSettings().showHistory) ...[
-                            // 현재 세션 정보
+                            // Current session info
                             if (_currentCursorSessionId != null)
                               Container(
                                 padding: const EdgeInsets.all(12.0),
@@ -3924,7 +3917,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                 ),
                               ),
 
-                            // 세션 목록 및 대화 히스토리
+                            // Session list and chat history
                             Container(
                               margin: const EdgeInsets.only(top: 8.0),
                               child: Card(
@@ -3956,7 +3949,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                     ),
                                   ),
                                   children: [
-                                    // 세션 목록
+                                    // Session list
                                     if (_availableSessions.isNotEmpty) ...[
                                       Padding(
                                         padding: const EdgeInsets.all(12.0),
@@ -3994,7 +3987,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                       const Divider(),
                                     ],
 
-                                    // 대화 히스토리
+                                    // Chat history
                                     if (_chatHistory.isNotEmpty) ...[
                                       Padding(
                                         padding: const EdgeInsets.all(12.0),
@@ -4029,7 +4022,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                             final agentMode =
                                                 entry['agentMode'] as String?;
 
-                                            // 디버깅: 모든 항목 로그 출력 (문제 확인용)
+                                            // Debug: log every entry
 
                                             return Card(
                                               margin:
@@ -4077,7 +4070,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                                                             .bold),
                                                               ),
                                                             ),
-                                                            // 에이전트 모드 표시 (null이 아니고 비어있지 않은 경우, auto도 표시)
+                                                            // Agent mode badge (when non-null and non-empty, including auto)
                                                             if (agentMode !=
                                                                     null &&
                                                                 agentMode
@@ -4212,7 +4205,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                       ),
                                     ],
 
-                                    // 새로고침 버튼
+                                    // Refresh button
                                     Padding(
                                       padding: const EdgeInsets.all(12.0),
                                       child: OutlinedButton.icon(
@@ -4422,7 +4415,7 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
         const SizedBox(height: 8),
         Text(
-          '© 2026 jaloveeye',
+          '© 2026 Krishna Gupta',
           style: TextStyle(
             fontSize: 12,
             color: Theme.of(context).colorScheme.onSurfaceVariant,

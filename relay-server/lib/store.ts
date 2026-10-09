@@ -1,5 +1,5 @@
 /**
- * 스토어 진입점 (Upstash Redis).
+ * Store entry point (Upstash Redis).
  */
 
 export {

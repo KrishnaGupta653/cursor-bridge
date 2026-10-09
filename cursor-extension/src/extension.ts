@@ -32,9 +32,9 @@ let cloudflareTunnel: CloudflareTunnelManager | null = null;
 let telegramBridge: TelegramBridge | null = null;
 let chatWatcher: ChatWatcher | null = null;
 let outputChannel: vscode.OutputChannel;
-/** 연결 정보 Webview 패널 (열려 있을 때만 갱신용) */
+/** Connections webview panel (only refreshed while open) */
 let connectionsPanel: vscode.WebviewPanel | null = null;
-/** 릴레이 서버 저장소 라벨 (연결 정보 패널에서 표시, /api/store 조회 결과) */
+/** Relay server store label (shown in the connections panel, from /api/store) */
 let lastRelayStoreLabel: string | null = null;
 let relayLockHeld = false;
 
@@ -55,7 +55,7 @@ function relayOwnedElsewhere(): boolean {
   return true;
 }
 
-/** 연결 정보 Webview용 HTML 생성 */
+/** Build HTML for the connections webview */
 function getConnectionsViewHtml(data: {
   serverRunning: boolean;
   serverPort: number | null;
@@ -186,7 +186,7 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
-/** 연결 정보가 바뀌었을 때 열려 있는 패널 내용 갱신 */
+/** Refresh the open connections panel when connection info changes */
 function updateConnectionsView() {
   if (!connectionsPanel) return;
   const lan = lanAddress();
@@ -944,18 +944,18 @@ export async function activate(context: vscode.ExtensionContext) {
     }),
   );
   wsServer.setRelayClient(relayClient);
-  // 릴레이 모드일 때 챗 히스토리 저장 시 relaySessionId 포함하도록 getter 설정
+  // In relay mode, include relaySessionId when saving chat history
   if (commandHandler) {
     commandHandler.setGetRelaySessionId(
       () => relayClient?.getSessionId() ?? null
     );
   }
-  // Status bar: reflect relay connection (클라이언트 접속 시 "Connected" 표시)
+  // Status bar: reflect relay connection (shows "Connected" when a client connects)
   if (statusBarManager && relayClient) {
     statusBarManager.setRelayClient(relayClient);
     relayClient.setOnSessionConnected(() => {
       if (statusBarManager) statusBarManager.refresh();
-      updateConnectionsView(); // 연결 정보 패널이 열려 있으면 즉시 갱신
+      updateConnectionsView(); // Refresh the connections panel immediately if open
       const sessionId = relayClient?.getSessionId();
       if (sessionId) {
         context.globalState.update("cursorRemote.sessionId", sessionId);
@@ -975,7 +975,7 @@ export async function activate(context: vscode.ExtensionContext) {
       outputChannel.appendLine(`[Relay] Session ${expired} can't be used; switched to new session ${next}.`);
     });
   }
-  // 상태바 즉시 표시 (서버/릴레이 시작 전에 한 번 그려서 늦게 뜨는 현상 완화)
+  // Render the status bar once before starting the server/relay so it doesn't appear late
   if (statusBarManager) {
     statusBarManager.refresh();
     statusBarManager.show();

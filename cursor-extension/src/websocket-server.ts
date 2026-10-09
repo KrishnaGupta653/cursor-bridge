@@ -77,7 +77,7 @@ export class WebSocketServer {
     }
     console.log(logMessage);
 
-    // 실시간 로그를 클라이언트에 전송
+    // Forward live logs to clients
     this.sendLogToClients({
       level,
       message,
@@ -98,7 +98,7 @@ export class WebSocketServer {
     }
     console.error(logMessage);
 
-    // 에러 로그를 클라이언트에 전송
+    // Forward error logs to clients
     this.sendLogToClients({
       level: "error",
       message: `${message}${errorMessage ? ` - ${errorMessage}` : ""}`,
@@ -451,7 +451,7 @@ export class WebSocketServer {
     return this.clients.size;
   }
 
-  /** 연결된 로컬 클라이언트 ID 목록 (상태바/연결 정보 뷰용) */
+  /** Connected local client IDs (for the status bar / connections view) */
   getClientIds(): string[] {
     const ids: string[] = [];
     this.clients.forEach((ws) => {

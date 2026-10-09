@@ -1,17 +1,17 @@
 #!/bin/sh
-# Git Flow 가드: Conventional Commits 형식 검사
-# .cursor/rules/git_flow.mdc 규칙 적용
+# Git Flow guard: enforce the Conventional Commits format
+# Enforces .cursor/rules/git_flow.mdc
 
 msg_file="$1"
 first_line=$(head -n1 "$msg_file" 2>/dev/null)
 
-# 머지 커밋 등은 통과
+# Merge commits and the like pass through
 case "$first_line" in
   Merge\ *)
     exit 0
     ;;
   "")
-    echo "⚠️  커밋 메시지가 비어 있습니다."
+    echo "⚠️  The commit message is empty."
     exit 1
     ;;
 esac
@@ -23,12 +23,11 @@ if echo "$first_line" | grep -qE '^(feat|fix|docs|style|refactor|test|chore)(\([
 fi
 
 echo ""
-echo "⚠️  커밋 메시지는 Conventional Commits 형식이어야 합니다."
+echo "⚠️  The commit message must follow the Conventional Commits format."
 echo ""
-echo "  예: feat: 새 기능 추가"
-echo "  예: fix: 로그인 버그 수정"
+echo "  Examples: \"feat: add new feature\", \"fix: correct login bug\""
 echo "  type: feat, fix, docs, style, refactor, test, chore"
 echo ""
-echo "첫 줄: $first_line"
+echo "First line: $first_line"
 echo ""
 exit 1

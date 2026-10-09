@@ -24,7 +24,7 @@ LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/nu
 
 section "Cursor"
 if ps -axo comm= | grep '/Cursor.app/Contents/MacOS/Cursor$' >/dev/null; then pass "Cursor is running"; else fail "Cursor is not running (run ./scripts/start-cursor-remote-stack.sh)"; fi
-EXT="$(ls -d "$HOME"/.cursor/extensions/jaloveeye.cursor-remote-extension-* 2>/dev/null | tail -1)"
+EXT="$(ls -d "$HOME"/.cursor/extensions/krishnagupta653.cursor-remote-extension-* 2>/dev/null | tail -1)"
 if [[ -n "$EXT" ]]; then
   pass "Extension installed: $(basename "$EXT") (built $(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$EXT/out/extension.js" 2>/dev/null || echo '?'))"
 else

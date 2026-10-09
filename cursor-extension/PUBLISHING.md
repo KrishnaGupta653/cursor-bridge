@@ -1,65 +1,61 @@
-# Cursor Remote Extension 배포 가이드
+# Cursor Remote Extension Publishing Guide
 
-VS Code Extension Marketplace에 Cursor Remote Extension을 배포하는 방법입니다.
+How to publish the Cursor Remote extension to the VS Code Extension Marketplace.
 
-**작성 시간**: 2025-01-27  
-**수정 시간**: 2025-01-27
+## 📋 Prerequisites
 
-## 📋 사전 준비사항
+### 1. Create an Azure DevOps account
 
-### 1. Azure DevOps 계정 생성
+- Create an account at [Azure DevOps](https://dev.azure.com)
+- You need a Personal Access Token (PAT)
 
-- [Azure DevOps](https://dev.azure.com)에서 계정 생성
-- Personal Access Token (PAT) 생성 필요
+### 2. Create a VS Code Marketplace publisher
 
-### 2. VS Code Marketplace Publisher 계정 생성
+- Go to [Visual Studio Marketplace](https://marketplace.visualstudio.com/manage)
+- Create the publisher `krishnagupta653`
+- Fill in the publisher profile (display name, description, links)
 
-- [Visual Studio Marketplace](https://marketplace.visualstudio.com/manage) 접속
-- Publisher 계정 생성 (예: `jaloveeye`)
-- Publisher Profile 설정:
-
-  ```
-  Software Engineer based in Seoul, connecting code and user experience. 
-  Passionate about creating tools that balance people, teams, and technology. 
-  Open source contributor to react-grid-layout and airbnb/showkase. 
-  Building developer tools to enhance productivity and remote collaboration.
-  ```
-
-### 3. 필요한 도구 설치
+### 3. Install the tools
 
 ```bash
 npm install -g @vscode/vsce
 ```
 
-## 🔧 package.json 설정
+Or run it without a global install: `npx --yes @vscode/vsce <command>`.
 
-### 필수 필드 추가
+## 🔧 package.json fields
 
-`cursor-extension/package.json`에 다음 필드들을 추가해야 합니다:
+### Required fields
+
+`cursor-extension/package.json` must contain these fields:
 
 ```json
 {
   "name": "cursor-remote-extension",
   "displayName": "Cursor Remote",
-  "description": "Remote control extension for Cursor IDE via WebSocket - Code anywhere, anytime with Cursor CLI",
-  "version": "0.1.0",
-  "publisher": "jaloveeye",
+  "description": "Remote control Cursor AI from your mobile device via WebSocket or Relay Server - Code anywhere, anytime with session-based connection",
+  "version": "0.6.0",
+  "publisher": "krishnagupta653",
+  "author": "Krishna Gupta",
+  "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jaloveeye/cursor-remote.git"
+    "url": "https://github.com/KrishnaGupta653/cursor-bridge.git"
   },
-  "homepage": "https://github.com/jaloveeye/cursor-remote",
+  "homepage": "https://github.com/KrishnaGupta653/cursor-bridge",
   "bugs": {
-    "url": "https://github.com/jaloveeye/cursor-remote/issues"
+    "url": "https://github.com/KrishnaGupta653/cursor-bridge/issues"
   },
-  "license": "MIT",
   "icon": "icon.png",
   "keywords": [
     "cursor",
     "remote",
     "mobile",
     "websocket",
-    "remote-control"
+    "relay",
+    "session",
+    "cli",
+    "agent"
   ],
   "categories": [
     "Other"
@@ -70,170 +66,151 @@ npm install -g @vscode/vsce
 }
 ```
 
-### 주요 필드 설명
+### What the main fields mean
 
-- **publisher**: Marketplace에 등록된 Publisher ID (예: `jaloveeye`)
-- **repository**: GitHub 저장소 URL
-- **icon**: Extension 아이콘 (128x128px PNG 권장)
-- **keywords**: Marketplace 검색 키워드
-- **categories**: Extension 카테고리
+- **publisher**: the publisher ID registered on the Marketplace (`krishnagupta653`)
+- **name**: the extension name; together with the publisher it forms the extension ID
+  `krishnagupta653.cursor-remote-extension`
+- **repository**: the GitHub repository URL
+- **icon**: the extension icon (128x128px PNG, see [images/ICON_REQUIREMENTS.md](images/ICON_REQUIREMENTS.md))
+- **keywords**: Marketplace search keywords
+- **categories**: the extension category
 
-## 📦 VSIX 패키지 생성
+## 📦 Build the VSIX package
 
-### 1. 컴파일 확인
+### 1. Install and test
 
 ```bash
 cd cursor-extension
 npm install
-npm run compile
+npm test                  # compile + unit tests
+npx tsc --noEmit -p .     # type-check
 ```
 
-### 2. VSIX 패키지 생성
+### 2. Create the VSIX package
 
 ```bash
-vsce package
+npx --yes @vscode/vsce package --no-dependencies
 ```
 
-성공하면 `cursor-remote-extension-0.1.0.vsix` 파일이 생성됩니다.
+`vsce` runs the `vscode:prepublish` script first: it compiles with `tsc` and then bundles
+`src/extension.ts` with esbuild into `out/extension.js`, so `ws` is inside the bundle and
+`--no-dependencies` is safe.
 
-### 3. 패키지 검증 (선택사항)
+On success the file `cursor-remote-extension-0.6.0.vsix` is created.
+
+### 3. Check the package contents (optional)
 
 ```bash
-vsce ls
+npx --yes @vscode/vsce ls --no-dependencies
 ```
 
-## 🚀 Marketplace에 배포
+### 4. Test the package locally
 
-### 방법 1: 명령줄로 배포 (권장)
+```bash
+cursor --install-extension cursor-remote-extension-0.6.0.vsix
+```
 
-#### 1. Personal Access Token 생성
+Or in Cursor: `Extensions` → `...` → `Install from VSIX...`.
 
-1. [Azure DevOps](https://dev.azure.com) 접속
+## 🚀 Publish to the Marketplace
+
+### Option 1: From the command line (recommended)
+
+#### 1. Create a Personal Access Token
+
+1. Go to [Azure DevOps](https://dev.azure.com)
 2. User Settings → Personal Access Tokens
-3. "New Token" 클릭
-4. Scope: **Marketplace (Manage)** 선택
-5. Token 생성 후 복사 (한 번만 표시됨!)
+3. Click "New Token"
+4. Organization: **All accessible organizations**; Scope: **Marketplace (Manage)**
+5. Create the token and copy it (it is shown only once). Keep it out of the repository.
 
-#### 2. 로그인
-
-```bash
-vsce login jaloveeye
-```
-
-Personal Access Token 입력
-
-#### 3. 배포
+#### 2. Log in
 
 ```bash
-vsce publish
+vsce login krishnagupta653
 ```
 
-또는 특정 버전으로:
+Paste the Personal Access Token when asked.
+
+#### 3. Publish
 
 ```bash
-vsce publish 0.1.0
+vsce publish --no-dependencies
 ```
 
-### 방법 2: 웹사이트에서 업로드
+Or publish a prebuilt package:
 
-1. [Visual Studio Marketplace](https://marketplace.visualstudio.com/manage) 접속
-2. Publisher 선택
-3. "New Extension" → "Visual Studio Code" 선택
-4. VSIX 파일 업로드
-5. Extension 정보 확인 및 게시
-
-## 📝 버전 업데이트
-
-### 버전 번호 규칙
-
-- **Major**: 큰 기능 변경, 호환성 깨짐 (예: 1.0.0 → 2.0.0)
-- **Minor**: 새 기능 추가, 하위 호환 (예: 0.1.0 → 0.2.0)
-- **Patch**: 버그 수정 (예: 0.1.0 → 0.1.1)
-
-### 버전 업데이트 방법
-
-1. `package.json`의 `version` 필드 수정
-2. CHANGELOG.md 업데이트 (선택사항)
-3. 컴파일 및 패키징:
-
-   ```bash
-   npm run compile
-   vsce package
-   ```
-
-4. 배포:
-
-   ```bash
-   vsce publish
-   ```
-
-## 📄 CHANGELOG.md 작성 (권장)
-
-Extension 루트에 `CHANGELOG.md` 파일 생성:
-
-```markdown
-# Change Log
-
-All notable changes to the "Cursor Remote" extension will be documented in this file.
-
-## [0.1.0] - 2025-01-27
-
-### Added
-- Initial release
-- WebSocket server for mobile app communication
-- Text insertion command
-- Cursor command execution
-- AI response streaming
+```bash
+vsce publish --packagePath cursor-remote-extension-0.6.0.vsix
 ```
 
-`package.json`에 추가:
+### Option 2: Upload on the website
 
-```json
-{
-  "contributes": {
-    // ...
-  },
-  "files": [
-    "out",
-    "icon.png",
-    "README.md",
-    "CHANGELOG.md"
-  ]
-}
-```
+1. Go to [Visual Studio Marketplace](https://marketplace.visualstudio.com/manage)
+2. Select the `krishnagupta653` publisher
+3. "New Extension" → "Visual Studio Code"
+4. Upload the VSIX file
+5. Check the extension details and publish
 
-## 🔍 배포 확인
+## 📝 Version updates
 
-1. [Visual Studio Marketplace](https://marketplace.visualstudio.com/vscode) 접속
-2. "Cursor Remote" 검색
-3. Extension 페이지 확인
-4. 설치 테스트:
+### Version numbers
+
+- **Major**: large changes that break compatibility (e.g. 1.0.0 → 2.0.0)
+- **Minor**: new features, backward compatible (e.g. 0.5.0 → 0.6.0)
+- **Patch**: bug fixes (e.g. 0.6.0 → 0.6.1)
+
+### How to release a new version
+
+1. Update the `version` field in `package.json`
+2. Add an entry to `CHANGELOG.md` (same format as the existing entries)
+3. Update the version badge in `README.md`
+4. Test and package:
 
    ```bash
-   code --install-extension jaloveeye.cursor-remote-extension
+   npm test
+   npx --yes @vscode/vsce package --no-dependencies
    ```
 
-## ⚠️ 주의사항
+5. Publish:
 
-### 1. 아이콘 파일
+   ```bash
+   vsce publish --no-dependencies
+   ```
 
-- `icon.png` 파일이 `cursor-extension/` 루트에 있어야 함
-- 권장 크기: 128x128px
-- PNG 형식
+## 🔍 Verify the release
+
+1. Go to [Visual Studio Marketplace](https://marketplace.visualstudio.com/vscode)
+2. Search for "Cursor Remote"
+3. Check the extension page
+4. Test the install:
+
+   ```bash
+   cursor --install-extension krishnagupta653.cursor-remote-extension
+   ```
+
+## ⚠️ Notes
+
+### 1. Icon file
+
+- `icon.png` must be in the `cursor-extension/` root
+- Size: 128x128px
+- PNG format
 
 ### 2. README.md
 
-- Extension 루트에 `README.md` 필수
-- Marketplace에서 자동으로 표시됨
-- 마크다운 형식 지원
+- `README.md` in the extension root is required
+- The Marketplace shows it automatically
+- Markdown is supported
 
-### 3. 라이선스
+### 3. License
 
-- `LICENSE` 파일 또는 `package.json`의 `license` 필드 필수
+- The `LICENSE` file and the `license` field in `package.json` are both present (MIT)
 
-### 4. 파일 제외
+### 4. Excluded files
 
-`.vscodeignore` 파일로 배포에서 제외할 파일 지정:
+`.vscodeignore` lists files that are left out of the package:
 
 ```
 .vscode/**
@@ -242,51 +219,51 @@ src/**
 .gitignore
 tsconfig.json
 .vscodeignore
+**/*.map
+.DS_Store
+*.vsix
+../**
+out/**/*.test.js
+python/__pycache__/**
 ```
 
-## 🐛 문제 해결
+## 🐛 Troubleshooting
 
-### 오류: "Missing publisher name"
+### Error: "Missing publisher name"
 
-- `package.json`에 `publisher` 필드 추가
+- Add the `publisher` field to `package.json`
 
-### 오류: "Missing repository field"
+### Error: "Missing repository field"
 
-- `package.json`에 `repository` 필드 추가
+- Add the `repository` field to `package.json`
 
-### 오류: "Extension name not found"
+### Error: "Extension name not found"
 
-- `package.json`의 `name` 필드 확인
-- 형식: `publisher-name.extension-name` (예: `jaloveeye.cursor-remote-extension`)
+- Check the `name` field in `package.json`
+- The extension ID has the form `publisher.extension-name` (here `krishnagupta653.cursor-remote-extension`)
 
-### 오류: "Personal Access Token expired"
+### Error: "Personal Access Token expired"
 
-- Azure DevOps에서 새 토큰 생성
-- `vsce login` 다시 실행
+- Create a new token in Azure DevOps
+- Run `vsce login krishnagupta653` again
 
-## 📚 참고 자료
+## 📚 References
 
 - [VS Code Extension Publishing Guide](https://code.visualstudio.com/api/working-with-extensions/publishing-extension)
 - [vsce CLI Documentation](https://github.com/microsoft/vscode-vsce)
 - [Marketplace Publisher Guide](https://docs.microsoft.com/en-us/azure/devops/extend/publish/overview)
 
-## ✅ 배포 체크리스트
+## ✅ Release checklist
 
-- [ ] `package.json`에 `publisher` 필드 추가
-- [ ] `package.json`에 `repository` 필드 추가
-- [ ] `package.json`에 `icon` 필드 추가
-- [ ] `icon.png` 파일 존재 확인
-- [ ] `README.md` 파일 작성
-- [ ] `CHANGELOG.md` 파일 작성 (선택사항)
-- [ ] `.vscodeignore` 파일 설정
-- [ ] Extension 컴파일 성공 확인
-- [ ] VSIX 패키지 생성 성공 확인
-- [ ] 로컬에서 Extension 테스트 완료
-- [ ] Personal Access Token 생성
-- [ ] Marketplace에 배포 완료
-- [ ] Marketplace에서 Extension 확인
-- [ ] 설치 및 동작 테스트 완료
-
----
-
-**다음 단계**: 배포 후 사용자 피드백 수집 및 버전 업데이트 계획 수립
+- [ ] `publisher` in `package.json` is `krishnagupta653`
+- [ ] `repository`, `homepage` and `bugs` point to `KrishnaGupta653/cursor-bridge`
+- [ ] `version` updated in `package.json`, `CHANGELOG.md` and the `README.md` badge
+- [ ] `icon.png` exists and `icon` is set in `package.json`
+- [ ] `.vscodeignore` is up to date
+- [ ] `npm test` and `npx tsc --noEmit -p .` pass
+- [ ] VSIX package builds
+- [ ] Extension tested locally from the VSIX
+- [ ] Personal Access Token created
+- [ ] Published to the Marketplace
+- [ ] Extension visible on the Marketplace
+- [ ] Install and basic use tested

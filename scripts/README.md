@@ -1,6 +1,6 @@
 # scripts
 
-프로젝트 보조 스크립트 모음.
+Helper scripts for the project.
 
 ## Everyday stack (Chrome UI + CDP + Telegram)
 
@@ -26,15 +26,15 @@ Drive Cursor Remote from Telegram (same command path as the phone app).
 
 Message your bot with `/help`, `/ask`, `/status`, `/whoami`, etc.
 
-## Git Flow 가드 훅
+## Git Flow guard hooks
 
-Git Flow 규칙([.cursor/rules/git_flow.mdc](../.cursor/rules/git_flow.mdc))을 **로컬에서 자동 적용**하려면:
+To **enforce the Git Flow rules locally** ([.cursor/rules/git_flow.mdc](../.cursor/rules/git_flow.mdc)):
 
 ```bash
 ./scripts/install-git-flow-hooks.sh
 ```
 
-- **pre-commit**: `main` / `develop` 에서의 커밋 차단
-- **commit-msg**: Conventional Commits 형식 검사 (`feat:`, `fix:` 등)
+- **pre-commit**: blocks commits on `main` / `develop`
+- **commit-msg**: checks the Conventional Commits format (`feat:`, `fix:`, etc.)
 
-새로 클론한 뒤에는 위 설치를 한 번 더 실행해야 합니다.
+Run the installer again after every fresh clone.

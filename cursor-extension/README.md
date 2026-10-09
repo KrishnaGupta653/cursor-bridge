@@ -1,13 +1,11 @@
 # Cursor Remote 📱
 
-[![Version](https://img.shields.io/badge/version-0.5.0-blue.svg)](https://github.com/jaloveeye/cursor-remote)
+[![Version](https://img.shields.io/badge/version-0.6.0-blue.svg)](https://github.com/KrishnaGupta653/cursor-bridge)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **Watch and control Cursor's Agents window from your phone or Telegram**
 
 ---
-
-## 🇺🇸 English
 
 Cursor Remote shows the chats in Cursor's **Agents window** on your phone, with a UI modelled on
 the Agents window. From the phone you can read chats, send prompts, switch model or mode, stop the
@@ -26,10 +24,18 @@ agent and approve or reject its requests. A Telegram bot offers the same control
 
 1. Open the Extensions view in Cursor (`Cmd+Shift+X` / `Ctrl+Shift+X`), search for "Cursor Remote"
    and click **Install**. Or download the `.vsix` from
-   [Releases](https://github.com/jaloveeye/cursor-remote/releases) and use
+   [Releases](https://github.com/KrishnaGupta653/cursor-bridge/releases) and use
    `Extensions` → `...` → `Install from VSIX...`.
 2. Optional, for CLI prompts: install and sign in to the Cursor CLI
    (`curl https://cursor.com/install -fsS | bash`, then `agent login`).
+
+### Upgrading to 0.6.0
+
+The extension ID changed from `jaloveeye.cursor-remote-extension` to
+`krishnagupta653.cursor-remote-extension`. Uninstall the old extension first (Extensions view, or
+`cursor --uninstall-extension jaloveeye.cursor-remote-extension`), then install the new one. Pair
+the phone again and re-enter the Telegram settings, because stored credentials are tied to the
+extension ID.
 
 ### Setup
 
@@ -94,6 +100,13 @@ Run **Cursor Remote: Edit Telegram Settings**. The file lives at
 `~/.config/cursor-remote/telegram.json` (see `telegram.secrets.example.json`). Set `botToken`,
 `allowedUserIds` and `allowedChatIds`; both lists are required. Only one Cursor window runs the bot.
 
+### Remote actions and audit log
+
+When `cursorRemote.remoteActions` is `enabled`, the phone and Telegram can open chats or start a
+new chat, switch model or mode, stop the agent, and approve or reject its requests. Approve and
+reject always need a confirm tap and only act on the exact request shown on screen. Every action is
+written to the **Cursor Remote** output as an `[Audit]` line.
+
 ### Commands
 
 | Command | What it does |
@@ -125,7 +138,7 @@ Run **Cursor Remote: Edit Telegram Settings**. The file lives at
 ### Protocol
 
 The app and the extension speak protocol v2: paired device tokens, typed commands with a deadline,
-and no generic command execution. See [PROTOCOL.md](https://github.com/jaloveeye/cursor-remote/blob/main/PROTOCOL.md).
+and no generic command execution. See [PROTOCOL.md](https://github.com/KrishnaGupta653/cursor-bridge/blob/main/PROTOCOL.md).
 
 ### Development
 
@@ -147,90 +160,10 @@ MIT License. See [LICENSE](LICENSE).
 
 ### Contact & Support
 
-- **Author**: 김형진 (<jaloveeye@gmail.com>)
-- **Website**: <https://jaloveeye.com>
-- **GitHub**: <https://github.com/jaloveeye/cursor-remote>
-- **Issues**: [GitHub Issues](https://github.com/jaloveeye/cursor-remote/issues)
+- **Author**: Krishna Gupta (<https://github.com/KrishnaGupta653>)
+- **GitHub**: <https://github.com/KrishnaGupta653/cursor-bridge>
+- **Issues**: [GitHub Issues](https://github.com/KrishnaGupta653/cursor-bridge/issues)
 
 ---
 
-## 🇰🇷 한국어
-
-Cursor Remote는 Cursor **Agents 창**의 채팅을 휴대폰에서 Agents 창과 비슷한 화면으로 보여줍니다.
-휴대폰에서 채팅을 읽고, 프롬프트를 보내고, 모델·모드를 바꾸고, 에이전트를 멈추고, 요청을 승인·거절할
-수 있습니다. 텔레그램 봇으로도 같은 기능을 쓸 수 있습니다.
-
-### 설치
-
-1. Cursor 확장 탭(`Cmd+Shift+X`)에서 "Cursor Remote"를 검색해 설치합니다. 또는
-   [Releases](https://github.com/jaloveeye/cursor-remote/releases)의 `.vsix`를
-   `확장` → `...` → `VSIX에서 설치...`로 설치합니다.
-2. CLI 프롬프트를 쓰려면 Cursor CLI를 설치하고 로그인합니다 (`agent login`).
-
-### 설정
-
-#### 1. 세션 제어 켜기
-
-Cursor Remote는 `127.0.0.1:9222`의 Chrome DevTools Protocol로 Cursor 창을 제어합니다. 이 포트는
-네트워크에 노출되지 않습니다.
-
-1. 설정 → **Cursor Remote: Enable Cdp** 켜기 (`"cursorRemote.enableCdp": true`)
-2. 명령 팔레트 → **Cursor Remote: Restart Cursor with Session Control**. 저장하지 않은 파일을 확인한
-   뒤 Cursor가 종료되고 세션 제어가 켜진 상태로 다시 열립니다.
-
-세션 제어가 꺼져 있으면 휴대폰에서 채팅은 읽을 수 있지만 전송·중지·승인은 할 수 없습니다.
-
-#### 2a. 같은 Wi-Fi에서 연결
-
-1. 서버는 자동으로 시작되고 상태줄에 `Remote :8766`이 표시됩니다.
-2. 상태줄 클릭 → **Pair a device**. 일회용 코드가 복사되며 5분 후 만료됩니다.
-3. 앱에서 **Local** → Mac 주소와 포트 입력 → 연결 → 코드 붙여넣기.
-
-`https://` 웹 앱에서는 로컬 `ws://` 연결이 막히므로 릴레이를 사용하세요.
-
-#### 2b. 다른 네트워크에서 연결 (릴레이)
-
-1. 상태줄 클릭 → **Connect to relay…** (또는 **Cursor Remote: Connect to Relay by Session ID**) →
-   6자리 세션 ID 입력 (Enter를 누르면 마지막 ID 재사용).
-2. **Cursor Remote: Pair Relay Client** 실행. 코드가 복사되고 세션 ID와 함께 표시됩니다.
-3. 앱에서 **Relay** → 세션 ID 입력 → 코드 붙여넣기.
-
-- 세션은 **24시간** 유지됩니다. 만료되거나 이미 사용된 ID이면 새 ID로 바뀌고 휴대폰을 다시
-  페어링합니다. 한 번 쓴 ID는 다시 쓸 수 없습니다.
-- 페어링 코드는 한 번만 쓸 수 있고 **5분** 후 만료됩니다.
-- 선택 설정 `cursorRemote.reusablePairingCode`: 세션 전체에 코드 하나(최대 3대), Pair Relay Client를 다시
-  실행하면 같은 코드를 보여 줍니다. 코드를 본 사람은 세션이 끝나거나 새 세션을 시작할 때까지 접속할 수
-  있으니 공유하지 마세요. 기기가 참여할 때마다 알림이 뜹니다.
-- 앱은 세션이 끝나거나 앱에서 **Log out**할 때까지 새로 고침·재시작 후에도 로그인을 유지합니다.
-- Cursor를 다시 시작하면 한 창이 마지막 세션에 자동으로 다시 연결됩니다.
-- **Start New Relay Session**은 현재 세션을 폐기하고 새 코드를 보여주고, **Revoke Relay Session**은
-  폐기만 합니다.
-
-#### 3. Mac 깨어 있게 하기
-
-자리를 비울 때는 터미널에서 다음을 실행하세요 (Ctrl+C로 종료):
-
-```bash
-caffeinate -dimsu
-```
-
-Mac이 약 2분 이상 잠들면 릴레이는 Mac을 오프라인으로 보고 휴대폰이 접속할 수 없습니다.
-
-#### 4. 텔레그램 (선택)
-
-**Cursor Remote: Edit Telegram Settings**로 `~/.config/cursor-remote/telegram.json`을 엽니다.
-`botToken`, `allowedUserIds`, `allowedChatIds`를 설정하세요 (두 목록 모두 필수).
-
-### 원격 작업과 감사 로그
-
-`cursorRemote.remoteActions`가 `enabled`이면 휴대폰·텔레그램에서 채팅 열기/새 채팅, 모델·모드 변경,
-중지, 승인·거절을 할 수 있습니다. 승인·거절은 항상 확인 탭이 필요하고 화면에 표시된 바로 그 요청에만
-적용됩니다. 모든 작업은 **Cursor Remote** 출력에 `[Audit]` 줄로 기록됩니다.
-
-### 라이선스
-
-MIT License. [LICENSE](LICENSE) 참고.
-
----
-
-**Cursor Remote**로 어디서든 코딩하세요! 🚀
+Code from anywhere with **Cursor Remote**! 🚀

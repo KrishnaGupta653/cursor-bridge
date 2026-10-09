@@ -1,39 +1,41 @@
-# 아이콘 요구사항 (Icon Requirements)
+# Icon Requirements
 
-마켓플레이스 등록을 위해 다음 아이콘 파일이 필요합니다.
+The Marketplace listing for `krishnagupta653.cursor-remote-extension` needs the following icon files.
 
-## 필수 파일
+## Required files
 
-### 1. icon.png (필수)
-- **크기**: 128x128px (최소), 256x256px (권장)
-- **형식**: PNG (투명 배경 권장)
-- **용도**: 마켓플레이스 및 확장 목록에 표시
+### 1. icon.png (required)
+- **Location**: `cursor-extension/icon.png`, referenced by `"icon": "icon.png"` in `package.json`
+- **Size**: 128x128px (minimum), 256x256px (recommended)
+- **Format**: PNG (transparent background recommended; SVG is not accepted as the extension icon)
+- **Used for**: the Marketplace and the extension list
 
-### 2. banner.png (선택)
-- **크기**: 1280x640px (권장)
-- **형식**: PNG 또는 JPG
-- **용도**: README에서 배너로 사용
+The source artwork is `images/icon.svg`; export it to `icon.png` when the design changes.
 
-## 아이콘 디자인 가이드라인
+### 2. banner.png (optional)
+- **Size**: 1280x640px (recommended)
+- **Format**: PNG or JPG
+- **Used for**: a banner in the README
 
-1. **단순하고 명확한 디자인**: 작은 크기에서도 인식 가능해야 함
-2. **브랜드 색상 사용**: 일관된 색상 테마 유지
-3. **고해상도**: Retina 디스플레이를 고려하여 2x 크기로 제작 권장
-4. **투명 배경**: PNG 형식으로 투명 배경 사용 권장
+## Icon design guidelines
 
-## 아이콘 생성 도구
+1. **Simple, clear design**: must be recognizable at small sizes
+2. **Brand colors**: keep a consistent color theme
+3. **High resolution**: consider Retina displays and design at 2x size
+4. **Transparent background**: use PNG with a transparent background
+
+## Icon tools
 
 - [Figma](https://figma.com)
 - [Canva](https://canva.com)
 - [GIMP](https://gimp.org)
 - [Adobe Illustrator](https://adobe.com/illustrator)
 
-## 참고
+## Notes
 
-아이콘 파일이 없으면 `vsce package` 명령 실행 시 경고가 발생합니다.
-패키지 생성은 가능하지만, 마켓플레이스에 게시할 때 아이콘이 없으면 
-기본 아이콘이 표시됩니다.
+Without an icon file, `vsce package` prints a warning. The package still builds, but the
+Marketplace shows a default icon when the extension is published.
 
 ---
 
-**마지막 수정**: 2026-01-21
+**Last updated**: 2026-10-09

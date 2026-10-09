@@ -3,7 +3,7 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { ApiResponse } from "../lib/types.js";
 
 /**
- * 릴레이 서버가 사용 중인 저장소 정보 (Upstash Redis)
+ * Storage backend in use by the relay server (Upstash Redis)
  * GET /api/store → { store: "redis", storeLabel: "Upstash Redis" }
  */
 async function handler(

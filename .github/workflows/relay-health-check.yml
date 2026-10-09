@@ -1,5 +1,5 @@
-# 릴레이 서버 정기 점검: /api/health 호출 후 실패 시 열린 이슈 하나를 갱신 (없으면 생성)
-# 작성: 2026-02-02
+# Scheduled relay server check: calls /api/health and, on failure, updates the single open issue (creating it if none exists)
+# Written: 2026-02-02
 
 name: Relay server health check
 
@@ -9,7 +9,7 @@ permissions:
 
 on:
   schedule:
-    # 매일 09:00, 15:00, 21:00 KST (00:00, 06:00, 12:00 UTC)
+    # Daily at 09:00, 15:00, 21:00 KST (00:00, 06:00, 12:00 UTC)
     - cron: '0 0,6,12 * * *'
   workflow_dispatch:
     inputs:

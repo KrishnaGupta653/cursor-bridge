@@ -8,7 +8,7 @@
   },
   "command": {
     "raw": "git status",
-    "cwd": "/Users/herace/Workspace/cursor-remote"
+    "cwd": "/Users/you/Workspace/cursor-remote"
   },
   "risk": {
     "level": "low",

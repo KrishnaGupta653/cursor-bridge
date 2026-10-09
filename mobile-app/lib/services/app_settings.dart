@@ -10,16 +10,16 @@ class AppSettings extends ChangeNotifier {
   factory AppSettings() => _instance;
   AppSettings._internal();
 
-  // 설정 키 (an old 'theme_mode' value may still be saved; the app is dark-only and ignores it)
+  // Preference keys (an old 'theme_mode' value may still be saved; the app is dark-only and ignores it)
   static const String _keyShowHistory = 'show_history';
   static const String _keyDefaultAgentMode = 'default_agent_mode';
   static const String _keyConnectionHistory = 'connection_history';
 
-  // 최대 히스토리 개수
+  // Maximum number of history entries
   static const int _maxHistoryCount = 5;
 
-  // 현재 설정값
-  bool _showHistory = false; // 기본값: 숨김
+  // Current values
+  bool _showHistory = false; // hidden by default
   String _defaultAgentMode = 'auto';
   List<ConnectionHistoryItem> _connectionHistory = [];
 
@@ -29,17 +29,14 @@ class AppSettings extends ChangeNotifier {
   List<ConnectionHistoryItem> get connectionHistory =>
       List.unmodifiable(_connectionHistory);
 
-  // 설정 로드
+  // Load settings
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
 
-    // 히스토리 표시
     _showHistory = prefs.getBool(_keyShowHistory) ?? false;
 
-    // 기본 에이전트 모드
     _defaultAgentMode = prefs.getString(_keyDefaultAgentMode) ?? 'auto';
 
-    // 연결 히스토리
     final historyJson = prefs.getString(_keyConnectionHistory);
     if (historyJson != null && historyJson.isNotEmpty) {
       _connectionHistory = parseConnectionHistory(historyJson);
@@ -48,7 +45,6 @@ class AppSettings extends ChangeNotifier {
     notifyListeners();
   }
 
-  // 히스토리 표시 설정
   Future<void> setShowHistory(bool value) async {
     _showHistory = value;
     final prefs = await SharedPreferences.getInstance();
@@ -56,7 +52,6 @@ class AppSettings extends ChangeNotifier {
     notifyListeners();
   }
 
-  // 기본 에이전트 모드 설정
   Future<void> setDefaultAgentMode(String mode) async {
     _defaultAgentMode = mode;
     final prefs = await SharedPreferences.getInstance();
@@ -64,25 +59,22 @@ class AppSettings extends ChangeNotifier {
     notifyListeners();
   }
 
-  // 연결 히스토리에 추가
+  // Add to connection history
   Future<void> addConnectionHistory(ConnectionHistoryItem item) async {
-    // 동일한 연결이 있으면 제거 (최신으로 갱신하기 위해)
+    // Drop an existing entry for the same connection so it moves to the front
     _connectionHistory.removeWhere((h) => h.isSameConnection(item));
 
-    // 맨 앞에 추가
     _connectionHistory.insert(0, item);
 
-    // 최대 개수 유지
+    // Cap the list length
     if (_connectionHistory.length > _maxHistoryCount) {
       _connectionHistory = _connectionHistory.sublist(0, _maxHistoryCount);
     }
 
-    // 저장
     await _saveConnectionHistory();
     notifyListeners();
   }
 
-  // 연결 히스토리 저장
   Future<void> _saveConnectionHistory() async {
     final prefs = await SharedPreferences.getInstance();
     final historyJson =
@@ -90,14 +82,14 @@ class AppSettings extends ChangeNotifier {
     await prefs.setString(_keyConnectionHistory, historyJson);
   }
 
-  // 연결 히스토리 삭제
+  // Remove one connection history entry
   Future<void> removeConnectionHistory(ConnectionHistoryItem item) async {
     _connectionHistory.removeWhere((h) => h.isSameConnection(item));
     await _saveConnectionHistory();
     notifyListeners();
   }
 
-  // 연결 히스토리 전체 삭제
+  // Clear all connection history
   Future<void> clearConnectionHistory() async {
     _connectionHistory.clear();
     await _saveConnectionHistory();

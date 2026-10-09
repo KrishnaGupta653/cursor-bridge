@@ -103,11 +103,11 @@ export class RelayClient {
   private onTargetGoneCallback: ((clientId: string) => void) | null = null;
   private onDevicePairedCallback: ((event: DevicePaired) => void) | null = null;
   private connectInFlight: Promise<void> | null = null;
-  /** 익스텐션 시작 시 사용자가 입력한 세션 ID (이 세션만 연결 시도) */
+  /** Session ID entered by the user at extension start (only this session is tried) */
   private targetSessionId: string | null = null;
-  /** PC가 설정한 PIN (모바일은 이 PIN을 알아야 접속 가능, 메모리에만 보관) */
+  /** PIN set on the PC (mobile must know it to connect; kept in memory only) */
   private targetPin: string | null = null;
-  /** 409 PC_IN_USE 시 재시도 안 함 */
+  /** Don't retry after 409 PC_IN_USE */
   private pcInUse: boolean = false;
   private capabilityToken: string | null = null;
   private connecting = false;
@@ -117,12 +117,12 @@ export class RelayClient {
   private pollGeneration = 0;
   private lastActivityAt = 0;
   private lastPollHeartbeatTime: number = 0;
-  private lastNoSessionHeartbeatTime: number = 0; // 세션 없을 때 폴링 동작 확인용
-  private readonly POLL_INTERVAL = 2000; // 2초마다 폴링 (while the phone is active)
+  private lastNoSessionHeartbeatTime: number = 0; // To confirm polling is alive when there is no session
+  private readonly POLL_INTERVAL = 2000; // Poll every 2s while the phone is active
   /** Each relay poll costs several Redis commands, so poll slowly once the phone goes quiet. */
   private readonly IDLE_POLL_INTERVAL = 25_000;
   private readonly ACTIVE_WINDOW_MS = 3 * 60 * 1000;
-  private readonly POLL_HEARTBEAT_INTERVAL = 30000; // 30초마다 폴링 동작 로그
+  private readonly POLL_HEARTBEAT_INTERVAL = 30000; // Log a polling heartbeat every 30s
 
   constructor(relayServerUrl: string, outputChannel: vscode.OutputChannel, private secrets?: vscode.SecretStorage) {
     this.relayServerUrl = relayServerUrl;
@@ -184,7 +184,7 @@ export class RelayClient {
   /**
    * Connect to a specific relay session by ID (e.g. when user entered 3ZUESK).
    * If already connected, disconnects from current session then connects to sid.
-   * pin: PC가 설정한 PIN (설정 시 서버에 저장되어 모바일은 이 PIN으로 접속)
+   * pin: PIN set on the PC (if set, stored on the server and mobile connects with it)
    */
   async connectToSessionById(sid: string, pin?: string): Promise<void> {
     const trimmed = sid.trim().toUpperCase();
@@ -218,8 +218,8 @@ export class RelayClient {
   }
 
   /**
-   * Start relay client with session ID (익스텐션 시작 시 입력·저장한 세션 ID만 연결)
-   * pin: PC가 설정한 PIN (설정 시 모바일은 이 PIN을 입력해야만 접속 가능)
+   * Start relay client with session ID (only the session ID entered and saved at extension start)
+   * pin: PIN set on the PC (if set, mobile must enter it to connect)
    */
   async start(sessionId: string, pin?: string): Promise<void> {
     const sid = sessionId.trim().toUpperCase();
@@ -298,7 +298,7 @@ export class RelayClient {
    * Poll messages from relay server; when no session, try connect to targetSessionId
    */
   private async pollMessages(): Promise<void> {
-    // If no session, try to connect to targetSessionId (입력한 세션 ID만 연결)
+    // If no session, try to connect to targetSessionId (only the entered session ID)
     if (!this.sessionId) {
       if (this.pcInUse || !this.targetSessionId) return;
 
@@ -339,7 +339,7 @@ export class RelayClient {
         return;
       }
 
-      // 응답 형식 허용: data.data.messages 또는 data.messages
+      // Accept either data.data.messages or data.messages
       const messages: any[] = Array.isArray(data.data?.messages)
         ? data.data.messages
         : Array.isArray((data as any).messages)
@@ -374,7 +374,7 @@ export class RelayClient {
         // Forward message to callback (Extension WebSocket server)
         if (this.onMessageCallback) {
           try {
-            // 페이로드: msg.data가 있으면 그대로, 없으면 전체 msg (하위 호환)
+            // Payload is msg.data if present, otherwise the whole msg (backward compat)
             const rawPayload = msg.data !== undefined && msg.data !== null ? msg.data : msg;
             const payload = typeof rawPayload === "string" ? JSON.parse(rawPayload) : rawPayload;
             if (!payload || typeof payload !== "object" || Array.isArray(payload)) continue;
@@ -413,8 +413,8 @@ export class RelayClient {
   }
 
   /**
-   * Connect to a relay session (404/409 구분을 위해 statusCode 사용)
-   * pin: PC가 설정하면 모바일은 이 PIN을 알아야만 접속 가능 (세션 ID만으로 타인 접속 방지)
+   * Connect to a relay session (uses statusCode to distinguish 404 from 409)
+   * pin: if set on the PC, mobile must know it to connect (session ID alone isn't enough)
    */
   private credentialKey(sid: string): string {
     return `cursorRemote.relay.v2:${this.relayServerUrl}:${sid}`;
@@ -664,7 +664,7 @@ export class RelayClient {
   }
 
   /**
-   * HTTP request that returns statusCode + body (connect API 404/409 구분용)
+   * HTTP request that returns statusCode + body (to distinguish connect API 404 from 409)
    */
   private async httpRequestWithStatus(
     url: string,
@@ -703,7 +703,7 @@ export class RelayClient {
           } catch {
             parsed = null;
           }
-          // 5xx인데 JSON이 아니면 원문 일부를 남겨 로그로 확인 가능하게
+          // Non-JSON 5xx: keep part of the raw body for logging
           if (statusCode >= 500 && !parsed && data) {
             parsed = {
               error: data.length > 800 ? data.substring(0, 800) + "…" : data,

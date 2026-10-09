@@ -8,7 +8,7 @@ import {
   CommandEvent,
 } from "./types.js";
 
-// Upstash Redis 클라이언트 (lazy initialization)
+// Upstash Redis client (lazy initialization)
 let _redis: Redis | null = null;
 
 function getRedis(): Redis {
@@ -51,7 +51,7 @@ function parse<T>(data: unknown): T | null {
   return (typeof data === "string" ? JSON.parse(data) : data) as T;
 }
 
-// 세션 생성 (expiresAt: the credential's absolute expiry; the record never outlives it)
+// Create a session (expiresAt: the credential's absolute expiry; the record never outlives it)
 export async function createSession(sessionId: string, expiresAt: number): Promise<Session> {
   const session: Session = { sessionId, createdAt: Date.now(), expiresAt };
   await getRedis().set(REDIS_KEYS.session(sessionId), JSON.stringify(session), { pxat: expiresAt });
@@ -63,7 +63,7 @@ export async function getSessionRecord(sessionId: string): Promise<StoredSession
   return parse<StoredSession>(await getRedis().get(REDIS_KEYS.session(sessionId)));
 }
 
-// 세션 조회: record + phones that polled recently + the Mac's last-seen time
+// Session lookup: record + phones that polled recently + the Mac's last-seen time
 export async function getSession(sessionId: string): Promise<Session | null> {
   const redis = getRedis();
   const [raw, live, pcSeen] = await Promise.all([
@@ -109,7 +109,7 @@ export async function updatePcLastSeen(sessionId: string, expiresAt: number): Pr
   await markSeen(sessionId, "", "pc", expiresAt);
 }
 
-// 세션에 디바이스 연결
+// Attach a device to a session
 export async function joinSession(
   sessionId: string,
   deviceId: string,
@@ -126,7 +126,7 @@ export async function joinSession(
   return getSession(sessionId);
 }
 
-// 세션에서 모바일 디바이스 연결 해제
+// Detach a mobile device from a session
 export async function leaveSession(sessionId: string, deviceId: string): Promise<void> {
   const redis = getRedis();
   const [stored] = await Promise.all([
@@ -141,7 +141,7 @@ export async function leaveSession(sessionId: string, deviceId: string): Promise
 }
 
 /**
- * 메시지 전송 (큐에 추가). PC → Mobile goes only to [recipients] (the target phone, or every
+ * Send a message (enqueue). PC → Mobile goes only to [recipients] (the target phone, or every
  * live phone for a broadcast); phones that stopped polling are pruned from the session.
  */
 export async function sendMessage(
@@ -167,7 +167,7 @@ export async function sendMessage(
   ]);
 }
 
-// 메시지 수신 (큐에서 가져오기): phones read their own queue, the Mac reads the session queue
+// Receive messages (dequeue): phones read their own queue, the Mac reads the session queue
 export async function receiveMessages(
   sessionId: string,
   deviceType: DeviceType,
@@ -179,13 +179,12 @@ export async function receiveMessages(
     ? REDIS_KEYS.messagesForDevice(sessionId, deviceId!)
     : REDIS_KEYS.messagesMobile2PC(sessionId);
 
-  // RPOP으로 오래된 메시지부터 가져오기 (one command for the whole batch)
+  // RPOP returns oldest messages first (one command for the whole batch)
   const batch = await getRedis().rpop<unknown[]>(queueKey, Math.max(1, limit));
   if (!Array.isArray(batch)) return [];
   return batch.map((data) => (typeof data === "string" ? JSON.parse(data) : data)) as RelayMessage[];
 }
 
-// 세션 삭제
 export async function deleteSession(sessionId: string): Promise<void> {
   const redis = getRedis();
   const [stored, members] = await Promise.all([

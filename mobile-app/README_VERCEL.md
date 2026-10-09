@@ -1,37 +1,36 @@
-# Flutter Web · Vercel 배포
+# Flutter Web on Vercel
 
-Flutter Web은 **Vercel**을 통해 배포하며, **이미 빌드한 상태**(로컬에서 생성한 `build/web`)의 결과물만 업로드합니다.  
-Vercel 서버에서는 Flutter 빌드를 수행하지 않습니다.
+The Flutter Web app is deployed to **Vercel** at https://cursor-remote-app.vercel.app. Only the **prebuilt** output (`build/web`, generated locally) is uploaded.
+Vercel does not run the Flutter build.
 
-## 배포 절차 (권장)
+## Deployment steps
 
 ```bash
-# 1. 로컬에서 Flutter web 빌드
+# 1. Build Flutter Web locally
 cd mobile-app
 flutter pub get
 flutter build web --release --base-href /
 
-# 2. 빌드 결과물에 Vercel 설정 복사
+# 2. Copy the Vercel config into the build output
 cp vercel-build-output.json build/web/vercel.json
 
-# 3. 빌드된 디렉터리에서 Vercel 배포
+# 3. Deploy from the build directory
 cd build/web
 vercel --prod
 ```
 
-처음 한 번은 `vercel link`로 Vercel 프로젝트를 연결할 수 있습니다.  
-이미 `mobile-app/.vercel/`에 연결돼 있으면 `build/web`에서 실행해도 같은 프로젝트로 배포됩니다.
+The first time, link the directory to the Vercel project with `vercel link`.
+Once `build/web/.vercel/` exists, later deploys from `build/web` go to the same project.
 
-## 설정 파일
+## Config files
 
-| 파일 | 용도 |
-|------|------|
-| `vercel.json` | 라우팅/헤더 설정 (원본, 참고용) |
-| `vercel-build-output.json` | 배포 시 `build/web/vercel.json`으로 복사해 사용 |
+| File | Purpose |
+|------|---------|
+| `vercel.json` | Routing/header settings (source, reference only) |
+| `vercel-build-output.json` | Copied to `build/web/vercel.json` before deploying |
 
-## Git 푸시 자동 배포
+## Git-push deploys
 
-Vercel 대시보드에서 Git 연동 시 **Build Command / Output Directory는 사용하지 않습니다.**  
-Flutter가 Vercel 빌드 환경에 없으므로, 자동 빌드 대신 위 CLI 절차(로컬 빌드 → `vercel --prod`) 또는 GitHub Actions로 빌드 후 `vercel --prebuilt --prod` 방식으로 배포하는 것을 권장합니다.
+Do not use Git-push builds: Flutter is not available in the Vercel build environment, so leave **Build Command / Output Directory** empty in the dashboard and deploy with the CLI steps above (local build, then `vercel --prod`).
 
-자세한 내용은 [DEPLOY_INSTRUCTIONS.md](DEPLOY_INSTRUCTIONS.md)를 참고하세요.
+See [DEPLOY_INSTRUCTIONS.md](DEPLOY_INSTRUCTIONS.md) for details.

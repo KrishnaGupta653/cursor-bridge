@@ -1,45 +1,43 @@
 # Assets Directory
 
-이 디렉토리는 Cursor 2.4의 Image Generation 기능으로 생성된 이미지들을 저장합니다.
+This directory stores images generated with Cursor 2.4's Image Generation feature.
 
-## 사용 목적
+## Purpose
 
-- **UI 목업**: 모바일 앱 UI 디자인 목업
-- **아키텍처 다이어그램**: 시스템 아키텍처 시각화
-- **제품 에셋**: 프로젝트 관련 이미지 에셋
+- **UI mockups**: mobile app UI design mockups
+- **Architecture diagrams**: visualizations of the system architecture
+- **Product assets**: project-related image assets
 
-## 생성 방법
+## How to generate
 
-Cursor의 에이전트에서 이미지 생성 요청:
+Ask the Cursor agent to generate an image:
 ```
 "Generate an architecture diagram showing the Cursor Remote system components:
 - Mobile App (Flutter)
-- PC Server (Node.js)
 - Extension (TypeScript)
-- Relay Server (Vercel)
-- Cursor CLI"
+- Relay Server (Vercel)"
 ```
 
-또는 슬래시 명령 사용:
+Or use the slash command:
 ```
 /image "Create a UI mockup for the mobile app's session management screen"
 ```
 
-## 파일 명명 규칙
+## File naming
 
-- `architecture-*.png`: 아키텍처 다이어그램
-- `ui-mockup-*.png`: UI 목업
-- `diagram-*.png`: 일반 다이어그램
-- `asset-*.png`: 제품 에셋
+- `architecture-*.png`: architecture diagrams
+- `ui-mockup-*.png`: UI mockups
+- `diagram-*.png`: general diagrams
+- `asset-*.png`: product assets
 
-## Git 관리
+## Git
 
-이미지 파일은 Git에 커밋하지 않습니다 (`.gitignore`에 추가 권장).
+Image files are not committed to Git (adding them to `.gitignore` is recommended).
 
-대신:
-- 중요한 다이어그램은 문서에 참조
-- README.md에 이미지 설명 추가
+Instead:
+- Reference important diagrams from the docs
+- Add image descriptions to README.md
 
 ---
 
-**마지막 업데이트**: 2026-01-26
+**Last updated**: 2026-01-26

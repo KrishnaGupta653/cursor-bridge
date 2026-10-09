@@ -1,9 +1,9 @@
 #!/bin/sh
-# Git Flow 가드: main/develop 에서의 커밋 차단
-# .cursor/rules/git_flow.mdc 규칙 적용
-# 단, merge 커밋(git flow feature finish 등)은 허용
+# Git Flow guard: block commits on main/develop/dev
+# Enforces .cursor/rules/git_flow.mdc
+# Merge commits (e.g. from git flow feature finish) are allowed
 
-# merge 중이면 허용 (git flow feature finish → develop에 merge 커밋)
+# Allow while a merge is in progress (git flow feature finish creates a merge commit on develop)
 if [ -f "$(git rev-parse --git-dir)/MERGE_HEAD" ]; then
   exit 0
 fi
@@ -12,11 +12,11 @@ branch=$(git branch --show-current 2>/dev/null)
 case "$branch" in
   main|develop|dev)
     echo ""
-    echo "⚠️  Git Flow 규칙 위반: main, develop 또는 dev 브랜치에서 직접 커밋할 수 없습니다."
+    echo "⚠️  Git Flow violation: you cannot commit directly to the main, develop or dev branch."
     echo ""
-    echo "먼저 feature/bugfix 브랜치를 생성하세요:"
-    echo "  git flow feature start <feature-name>   # 새 기능"
-    echo "  git flow bugfix start <bugfix-name>    # 버그 수정"
+    echo "Create a feature/bugfix branch first:"
+    echo "  git flow feature start <feature-name>   # new feature"
+    echo "  git flow bugfix start <bugfix-name>    # bug fix"
     echo ""
     exit 1
     ;;
