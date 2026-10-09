@@ -58,6 +58,15 @@ export function appLink(sessionId: string | null | undefined): string {
   return sessionId && /^[A-Z0-9]{6}$/.test(sessionId) ? `${APP_URL}?session=${sessionId}` : APP_URL;
 }
 
+/**
+ * One-tap pairing link. The code rides in the fragment, which browsers never send to a server, so it
+ * stays out of Vercel's request logs and Telegram's preview fetch; the app strips it before starting.
+ */
+export function pairLink(sessionId: string, code: string): string {
+  if (!/^[A-Z0-9]{6}$/.test(sessionId) || !/^[A-Za-z0-9_-]{43}$/.test(code)) return appLink(sessionId);
+  return `${appLink(sessionId)}#code=${code}`;
+}
+
 const NO_RELAY_SESSION =
   "No relay session. On the Mac run Cursor Remote: Start New Relay Session or Connect to Relay Session.";
 const PAIR_LIMIT = 3;
@@ -899,7 +908,7 @@ export class TelegramBridge {
       const ref = crypto.randomBytes(8).toString("hex");
       const sent = this.mtprotoSends.track(ref);
       try {
-        child.stdin.write(mtprotoSendLine(chatId, html, { ref, html: true }));
+        child.stdin.write(mtprotoSendLine(chatId, html, { ref, html: true, noPreview: true }));
       } catch {
         return null;
       }
@@ -1517,9 +1526,9 @@ export class TelegramBridge {
     const minutes = Math.max(1, Math.round(seconds / 60));
     const messageId = await this.sendTracked(chatId, [
       `Relay session ${escapeHtml(sessionId)}`,
-      `Pairing code: <code>${escapeHtml(pairing.code)}</code>`,
-      `Works once, expires in ${minutes} minute${minutes === 1 ? "" : "s"}. In the app: Relay → enter the session ID and this code.`,
-      `App: ${escapeHtml(appLink(sessionId))}`,
+      `👉 <a href="${escapeHtml(pairLink(sessionId, pairing.code))}">Tap to open the app and connect</a>`,
+      `Works once, expires in ${minutes} minute${minutes === 1 ? "" : "s"}. Don't forward this message.`,
+      `Or enter it by hand: <code>${escapeHtml(pairing.code)}</code>`,
     ].join("\n"));
     if (messageId == null) {
       audit(false, "send-failed");

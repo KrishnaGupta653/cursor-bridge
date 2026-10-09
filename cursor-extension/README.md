@@ -106,7 +106,7 @@ Send `/help` to the bot for every command. The relay-related ones:
 |------------------|--------------|
 | `/app` | Link to the web app (pre-fills the relay session ID when there is one) |
 | `/relay` | Relay session ID and whether the Mac is connected to it |
-| `/pair` | One-time pairing code for the phone, so you can pair from Telegram when away from the Mac |
+| `/pair` | One-tap link that pairs the phone (the one-time code is also shown), so you can pair from Telegram when away from the Mac |
 
 `/pair` only works for the authorized user in the authorized private chat, needs
 `cursorRemote.remoteActions` on and the Mac connected to a relay session, and allows 3 codes per

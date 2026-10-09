@@ -105,11 +105,12 @@ async function findSystemPython(): Promise<string | null> {
 }
 
 /** A stdin line for the bridge. With a ref, the bridge answers {"type":"sent","ref","message_id"}. */
-export function mtprotoSendLine(chatId: number, text: string, opts: { ref?: string; html?: boolean } = {}): string {
+export function mtprotoSendLine(chatId: number, text: string, opts: { ref?: string; html?: boolean; noPreview?: boolean } = {}): string {
   return JSON.stringify({
     type: "send", chat_id: chatId, text,
     ...(opts.ref ? { ref: opts.ref } : {}),
     ...(opts.html ? { html: true } : {}),
+    ...(opts.noPreview ? { no_preview: true } : {}),
   }) + "\n";
 }
 

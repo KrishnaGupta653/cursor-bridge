@@ -12,7 +12,7 @@ Protocol (stdin/stdout, one JSON object per line):
   out: {"type":"log","message":"..."}
   out: {"type":"sent","ref":"<id>","message_id":5}   (only for a send with "ref"; message_id is
        null when the send failed, and is the first part's id if the text was split)
-  in:  {"type":"send","chat_id":1,"text":"...","ref":"<id>","html":true}   (ref and html optional;
+  in:  {"type":"send","chat_id":1,"text":"...","ref":"<id>","html":true,"no_preview":true}   (ref, html, no_preview optional;
        html sends with parse_mode="html", otherwise Telethon's default formatting as before)
   in:  {"type":"delete","chat_id":1,"message_id":5}   (only failures are logged)
   in:  {"type":"set_commands","commands":[{"command":"...","description":"..."}]}
@@ -89,6 +89,8 @@ async def handle_command(client, msg: dict) -> bool:
         if chat_id is None or not text:
             return True
         kwargs = {"parse_mode": "html"} if msg.get("html") is True else {}
+        if msg.get("no_preview") is True:
+            kwargs["link_preview"] = False
         message_id = None
         # Telegram hard limit ~4096. A failed send must not take the whole bot down.
         chunk = text

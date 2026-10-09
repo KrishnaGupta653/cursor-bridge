@@ -5,6 +5,17 @@ All notable changes to the "Cursor Remote" extension will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-10-09
+
+### Added
+- **Telegram `/pair`**: a "Tap to open the app and connect" link pairs the phone in one tap, no typing. The code rides in the link's `#` part, which browsers never send to a server; the app removes it from the address bar before it starts. Link previews are off for this message. The code is still shown for entering by hand
+
+### Fixed
+- **App**: pasting a pairing code with a stray space or newline (or the whole Telegram line) no longer cuts it short
+- **App**: a new pairing code is no longer ignored when the browser still has an old saved login, and a wrong code no longer logs you out of a session that still works
+- **App**: a wrong, expired or used code now says so and points to `/pair`
+- The Mac's "Telegram created a pairing code" notice explains that Start New Relay Session also cancels the code
+
 ## [0.6.1] - 2026-10-09
 
 ### Added

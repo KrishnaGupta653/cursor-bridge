@@ -8,6 +8,7 @@ import { MtprotoSendTracker, mtprotoDeleteLine, mtprotoSendLine } from "../teleg
 const Module = require("node:module");
 const originalLoad = Module._load;
 let TelegramBridge: any;
+let pairLink: any;
 let CommandRouter: any;
 let showPairingCodeBox: any;
 try {
@@ -20,7 +21,7 @@ try {
     }
     return originalLoad.call(this, name, ...args);
   };
-  TelegramBridge = require("../telegram-bridge").TelegramBridge;
+  ({ TelegramBridge, pairLink } = require("../telegram-bridge"));
   CommandRouter = require("../command-router").CommandRouter;
   showPairingCodeBox = require("../pairing-box").showPairingCodeBox;
 } finally { Module._load = originalLoad; }
@@ -38,7 +39,7 @@ function fixture(relayState: { sessionId: string | null; connected: boolean } = 
   const relay = {
     status: () => ({ ...relayState }),
     createSingleUseCode: async () => {
-      const code = `PAIRCODE${codes.length + 1}${"x".repeat(30)}`;
+      const code = `PAIRCODE${codes.length + 1}`.padEnd(43, "x");
       codes.push(code);
       return { code, expiresInSeconds: 300 };
     },
@@ -137,13 +138,14 @@ test("Telegram /pair sends one single-use code message, tells the Mac, and delet
   const { method, body } = f.api[0];
   assert.equal(method, "sendMessage");
   assert.equal(body.parse_mode, "HTML");
+  assert.equal(body.disable_web_page_preview, true);
   assert.equal(body.text, [
     "Relay session ABC123",
-    `Pairing code: <code>${f.codes[0]}</code>`,
-    "Works once, expires in 5 minutes. In the app: Relay → enter the session ID and this code.",
-    `App: ${APP}?session=ABC123`,
+    `👉 <a href="${APP}?session=ABC123#code=${f.codes[0]}">Tap to open the app and connect</a>`,
+    "Works once, expires in 5 minutes. Don't forward this message.",
+    `Or enter it by hand: <code>${f.codes[0]}</code>`,
   ].join("\n"));
-  assert.ok(!body.text.includes(`${f.codes[0]}&`) && !/\?[^\n]*PAIRCODE/.test(body.text), "the code is never in a URL");
+  assert.ok(!/\?[^#\n]*PAIRCODE/.test(body.text), "the code is never in a query string, only the fragment");
   assert.deepEqual(f.notified, ["ABC123"]);
   assert.deepEqual(f.scheduled.map((s) => s.ms), [300_000]);
 
@@ -190,7 +192,8 @@ test("over MTProto, /pair waits for the bridge's sent reply and deletes through 
   assert.equal(lines.length, 1);
   assert.equal(lines[0].type, "send");
   assert.equal(lines[0].html, true);
-  assert.ok(lines[0].text.includes(f.codes[0]));
+  assert.equal(lines[0].no_preview, true);
+  assert.ok(lines[0].text.includes(`#code=${f.codes[0]}"`));
   f.bridge.mtprotoSends.handle({ type: "sent", ref: lines[0].ref, message_id: 77 });
   await pairing;
   f.scheduled[0].fn();
@@ -270,4 +273,12 @@ test("the MTProto bridge's send-with-ref and delete commands (Python, fake clien
     env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
   });
   assert.equal(result.status, 0, result.stderr);
+});
+
+test("pairLink puts only a valid code in the fragment and falls back to the plain app link", () => {
+  const code = "A".repeat(42) + "_";
+  assert.equal(pairLink("ABC123", code), `${APP}?session=ABC123#code=${code}`);
+  assert.equal(pairLink("ABC123", "short"), `${APP}?session=ABC123`);
+  assert.equal(pairLink("abc123", code), APP);
+  assert.equal(pairLink("ABC123", `${"A".repeat(42)}"`), `${APP}?session=ABC123`);
 });

@@ -181,7 +181,10 @@ function relayServerUrl(): string {
 
 const telegramRelay = relayForTelegram(() => relayClient, (sessionId) => {
   void vscode.window
-    .showInformationMessage(`Telegram created a pairing code for relay session ${sessionId}.`, "Start New Relay Session")
+    .showInformationMessage(
+      `Telegram created a pairing code for relay session ${sessionId}. If that wasn't you, start a new relay session (this also cancels the code).`,
+      "Start New Relay Session"
+    )
     .then((pick) => pick && vscode.commands.executeCommand("cursorRemote.newRelaySession"));
 });
 
