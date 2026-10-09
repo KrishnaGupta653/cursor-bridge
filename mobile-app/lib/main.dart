@@ -22,7 +22,7 @@ const String kRelayServerUrl = String.fromEnvironment(
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await AppSettings().load();
-  runApp(const MyApp());
+  runApp(MyApp(savedLogin: await RelayLogin.load()));
 }
 
 final ThemeData darkTheme = buildCrDarkTheme();
@@ -31,7 +31,9 @@ final ThemeData darkTheme = buildCrDarkTheme();
 // App Root
 // ============================================================
 class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+  const MyApp({super.key, this.savedLogin});
+
+  final RelayLogin? savedLogin;
 
   // Dark-only, like Cursor's Agents window: the screens use fixed Cr colors.
   @override
@@ -41,13 +43,16 @@ class MyApp extends StatelessWidget {
       theme: darkTheme,
       darkTheme: darkTheme,
       themeMode: ThemeMode.dark,
-      home: const HomePage(),
+      home: HomePage(savedLogin: savedLogin),
     );
   }
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  const HomePage({super.key, this.savedLogin});
+
+  /// Read before the first frame, so a refresh goes straight to "Connecting…" instead of the landing page.
+  final RelayLogin? savedLogin;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -135,8 +140,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int get _reconnectAttempts => _conn.reconnectAttempts;
   String? get _lastConnectionError => _conn.lastError;
   bool _hadConnection = false;
+  /// Reconnecting with the saved relay login after a refresh or restart.
+  bool _restoringLogin = false;
   /// A dropped connection that is being retried keeps the chat on screen.
-  bool get _showSession => _isConnected || (_hadConnection && (_isReconnecting || _isConnecting));
+  bool get _showSession =>
+      _isConnected || (_hadConnection && (_isReconnecting || _isConnecting || _restoringLogin));
   bool _isWaitingForResponse = false; // waiting for AI response
 
   // Cursor CLI 세션 관련
@@ -960,6 +968,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _disconnect() async {
+    if (_conn.relaySession != null) {
+      await _confirmLogOut();
+      return;
+    }
     _hadConnection = false;
     _chats.reset();
     if (mounted) {
@@ -969,6 +981,33 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     final warning = await _conn.disconnect();
     if (warning != null && mounted) setState(() => _conn.lastError = warning);
+  }
+
+  /// Asks first, then signs this phone out of the relay session. True if it logged out.
+  Future<bool> _confirmLogOut() async {
+    final session = _conn.relaySession;
+    if (session == null) return false;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Log out'),
+        content: Text(_conn.pairedWithReusableCode
+            ? "Log out of session $session? You can reconnect with the session's pairing code while it has uses left."
+            : "Log out of session $session? You'll need a new pairing code to connect again."),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Log out')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return false;
+    _hadConnection = false;
+    _restoringLogin = false;
+    _chats.reset();
+    setState(() => _isWaitingForResponse = false);
+    final warning = await _conn.logOut();
+    if (mounted) setState(() => _conn.lastError = warning);
+    return true;
   }
 
   void _stopReconnect() => _conn.stopReconnect();
@@ -1510,11 +1549,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       ..onInbound = _handleInbound
       ..onSystem = _onSystem
       ..onConnected = _onConnected
-      ..onGaveUp = (() => _hadConnection = false)
+      ..onGaveUp = (() {
+        _hadConnection = false;
+        _restoringLogin = false;
+      })
       ..askPairingCode = (({required bool relay}) =>
           relay ? _showPinDialog() : _showLocalPairDialog())
       ..isBusy = (() => _chats.running || _chats.awaitingReply || _isWaitingForResponse)
       ..addListener(_onConnectionChanged);
+    final saved = widget.savedLogin;
+    if (saved != null) {
+      if (!saved.expired) {
+        _hadConnection = true;
+        _restoringLogin = true;
+        _connectionType = ConnectionType.relay;
+        _sessionIdController.text = saved.sessionId;
+      }
+      // After the first frame: the connection notifies listeners as soon as it starts.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _conn.restoreRelayLogin(saved).whenComplete(() {
+          if (mounted) setState(() => _restoringLogin = false);
+        });
+      });
+    }
     _loadConnectionSettings();
     // 설정에서 기본 에이전트 모드 적용
     _selectedAgentMode = AppSettings().defaultAgentMode;
@@ -1572,7 +1629,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
       // 연결 타입 로드
       final connectionTypeStr = prefs.getString('connection_type');
-      if (connectionTypeStr != null) {
+      if (connectionTypeStr != null && !_restoringLogin) {
         setState(() {
           _connectionType = connectionTypeStr == 'local'
               ? ConnectionType.local
@@ -1594,7 +1651,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
       // 마지막 세션 ID 로드 (선택사항)
       final lastSessionId = prefs.getString('last_session_id');
-      if (lastSessionId != null && lastSessionId.isNotEmpty) {
+      if (lastSessionId != null && lastSessionId.isNotEmpty && !_restoringLogin) {
         _sessionIdController.text = lastSessionId;
       }
     } catch (e) {
@@ -2061,8 +2118,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
             if (_selectedAgentBackend == 'cdp')
               IconButton(
-                icon: const Icon(Icons.link_off_rounded, size: 20),
-                tooltip: 'Disconnect',
+                icon: Icon(_conn.relaySession != null ? Icons.logout_rounded : Icons.link_off_rounded, size: 20),
+                tooltip: _conn.relaySession != null ? 'Log out' : 'Disconnect',
                 onPressed: _disconnect,
               )
             else
@@ -2089,7 +2146,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             onPressed: () {
               Navigator.of(context).push(
                 MaterialPageRoute(
-                  builder: (context) => const SettingsPage(),
+                  builder: (context) => SettingsPage(
+                    relaySession: _conn.relaySession,
+                    onLogOut: _conn.relaySession != null ? _confirmLogOut : null,
+                  ),
                 ),
               );
             },
@@ -2103,10 +2163,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   height: 29,
                   color: Cr.surfaceHigh,
                   padding: const EdgeInsets.symmetric(horizontal: 12),
-                  child: const Row(children: [
-                    SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: Cr.warning)),
-                    SizedBox(width: 8),
-                    Text('Reconnecting…', style: TextStyle(color: Cr.warning, fontSize: 13)),
+                  child: Row(children: [
+                    const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: Cr.warning)),
+                    const SizedBox(width: 8),
+                    Text(_restoringLogin ? 'Connecting…' : 'Reconnecting…',
+                        style: const TextStyle(color: Cr.warning, fontSize: 13)),
                   ]),
                 ),
               )
@@ -2121,7 +2182,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           : _selectedAgentBackend == 'cdp'
           ? Listener(
               onPointerDown: (_) => _conn.markActive(),
-              child: AgentsShell(store: _chats),
+              child: AgentsShell(store: _chats, onLogOut: _conn.relaySession != null ? _confirmLogOut : null),
             )
           : _isCompactView
           ? _buildCompactBody()
@@ -3098,7 +3159,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                 borderRadius:
                                     BorderRadius.circular(Cr.radiusLg),
                               ),
-                              child: AgentsShell(store: _chats),
+                              child: AgentsShell(store: _chats, onLogOut: _conn.relaySession != null ? _confirmLogOut : null),
                             ),
                           ),
                         )
@@ -4192,7 +4253,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 // Settings Page
 // ============================================================
 class SettingsPage extends StatefulWidget {
-  const SettingsPage({super.key});
+  const SettingsPage({super.key, this.relaySession, this.onLogOut});
+
+  final String? relaySession;
+  /// Asks, then logs out of [relaySession]; true if it did. Null when not on the relay.
+  final Future<bool> Function()? onLogOut;
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -4251,6 +4316,28 @@ class _SettingsPageState extends State<SettingsPage> {
               ],
             ),
           ),
+          if (widget.onLogOut != null)
+            CrPanel(
+              margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(16, 14, 16, 4),
+                    child: CrSectionLabel('Relay'),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.logout_rounded, color: Cr.danger),
+                    title: const Text('Log out', style: TextStyle(color: Cr.danger)),
+                    subtitle: Text('Session ${widget.relaySession ?? ''}'),
+                    onTap: () async {
+                      final navigator = Navigator.of(context);
+                      if (await widget.onLogOut!() && mounted) navigator.pop();
+                    },
+                  ),
+                ],
+              ),
+            ),
           CrPanel(
             margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
             child: Column(

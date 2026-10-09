@@ -10,7 +10,9 @@ import 'agent_session_screen.dart';
 /// is a drawer and the top bar shows the chat title and status.
 class AgentsShell extends StatefulWidget {
   final ChatStore store;
-  const AgentsShell({super.key, required this.store});
+  /// Shown as "Log out" at the bottom of the sidebar while on the relay.
+  final VoidCallback? onLogOut;
+  const AgentsShell({super.key, required this.store, this.onLogOut});
 
   @override
   State<AgentsShell> createState() => _AgentsShellState();
@@ -71,6 +73,12 @@ class _AgentsShellState extends State<AgentsShell> {
           store.startNewChat();
           closeDrawer();
         },
+        onLogOut: widget.onLogOut == null
+            ? null
+            : () {
+                closeDrawer();
+                widget.onLogOut!();
+              },
       );
       if (wide) {
         return Row(children: [
@@ -100,7 +108,9 @@ class AgentsSidebar extends StatefulWidget {
   final ChatStore store;
   final ValueChanged<ChatRow> onSelect;
   final VoidCallback onNewChat;
-  const AgentsSidebar({super.key, required this.store, required this.onSelect, required this.onNewChat});
+  final VoidCallback? onLogOut;
+  const AgentsSidebar(
+      {super.key, required this.store, required this.onSelect, required this.onNewChat, this.onLogOut});
 
   @override
   State<AgentsSidebar> createState() => _AgentsSidebarState();
@@ -294,6 +304,23 @@ class _AgentsSidebarState extends State<AgentsSidebar> {
             ),
           ),
         ),
+        if (widget.onLogOut != null) ...[
+          Container(height: 1, color: Cr.borderSubtle),
+          InkWell(
+            onTap: widget.onLogOut,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 44),
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                child: Row(children: [
+                  Icon(Icons.logout_rounded, size: 16, color: Cr.textSecondary),
+                  SizedBox(width: 10),
+                  Text('Log out', style: TextStyle(color: Cr.textSecondary, fontSize: 13)),
+                ]),
+              ),
+            ),
+          ),
+        ],
       ],
     );
   }

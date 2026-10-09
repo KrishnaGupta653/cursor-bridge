@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../models/connection_models.dart';
@@ -43,6 +44,62 @@ bool isPrivateHost(String host) {
 
 /// Asks the user for a pairing code; null cancels.
 typedef PairingPrompt = Future<String?> Function({required bool relay});
+
+/// The relay login kept across page refreshes and app restarts (localStorage on web). Only the
+/// latest session is kept. It is a bearer credential: never log it, show it or put it in a URL.
+class RelayLogin {
+  static const storageKey = 'relay_login_v1';
+
+  final String sessionId;
+  final String deviceId;
+  final String token;
+  final int expiresAt;
+  /// The session's pairing code can be used again (a reusable code was used to pair).
+  final bool reusableCode;
+
+  const RelayLogin({required this.sessionId, required this.deviceId, required this.token,
+      required this.expiresAt, this.reusableCode = false});
+
+  bool get expired => DateTime.now().millisecondsSinceEpoch >= expiresAt;
+
+  Map<String, dynamic> toJson() => {
+        'sessionId': sessionId,
+        'deviceId': deviceId,
+        'token': token,
+        'credentialExpiresAt': expiresAt,
+        if (reusableCode) 'reusableCode': true,
+      };
+
+  static RelayLogin? fromJson(Object? json) {
+    if (json is! Map) return null;
+    final sessionId = json['sessionId'], deviceId = json['deviceId'], token = json['token'];
+    final expiresAt = json['credentialExpiresAt'];
+    if (sessionId is! String || sessionId.isEmpty || deviceId is! String || deviceId.isEmpty ||
+        token is! String || token.length != 43 || expiresAt is! int) {
+      return null;
+    }
+    return RelayLogin(sessionId: sessionId, deviceId: deviceId, token: token, expiresAt: expiresAt,
+        reusableCode: json['reusableCode'] == true);
+  }
+
+  /// The saved login, or null if there is none or it can't be read (an unreadable one is removed).
+  static Future<RelayLogin?> load() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(storageKey);
+      if (raw == null) return null;
+      final login = fromJson(jsonDecode(raw));
+      if (login == null) await prefs.remove(storageKey);
+      return login;
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+const relaySessionEndedMessage =
+    'This relay session ended. Get a new pairing code in Cursor (Cursor Remote: Pair Relay Client).';
+const pairingCodeUsedUpMessage = 'This pairing code was used on 3 devices. Get a new one in Cursor.';
 
 /// Transport to the Cursor extension over Local WebSocket, Cloudflare Tunnel or the Relay.
 /// Every inbound message, whatever the transport, reaches [onInbound] as one decoded map.
@@ -89,6 +146,14 @@ class CursorConnection extends ChangeNotifier {
   final Map<String, String> _localCredentials = {};
   final Map<String, String> _relayCredentials = {};
   final Map<String, String> _relayDeviceIds = {};
+  final Map<String, int> _relayExpiresAt = {};
+  final Set<String> _reusableCodeSessions = {};
+
+  /// This device paired with the session's reusable code, which may still let it pair again.
+  bool get pairedWithReusableCode => _reusableCodeSessions.contains(sessionId ?? _relayTarget);
+
+  /// The relay session this connection is for, connected or not.
+  String? get relaySession => type == ConnectionType.relay ? (sessionId ?? _relayTarget) : null;
 
   Timer? _pollTimer;
   bool _polling = false;
@@ -364,13 +429,69 @@ class CursorConnection extends ChangeNotifier {
 
   // ---- Relay ------------------------------------------------------------------
 
+  /// Reconnects with the saved relay login, without a pairing code. False if there was none to use.
+  Future<bool> restoreRelayLogin([RelayLogin? saved]) async {
+    final login = saved ?? await RelayLogin.load();
+    if (login == null) return false;
+    if (login.expired) {
+      await _forgetRelayLogin(login.sessionId);
+      _set(() => lastError = relaySessionEndedMessage);
+      return false;
+    }
+    _relayCredentials[login.sessionId] = login.token;
+    _relayDeviceIds[login.sessionId] = login.deviceId;
+    _relayExpiresAt[login.sessionId] = login.expiresAt;
+    if (login.reusableCode) _reusableCodeSessions.add(login.sessionId);
+    await connectRelay(login.sessionId);
+    return true;
+  }
+
+  Future<void> _saveRelayLogin(String session) async {
+    final token = _relayCredentials[session], device = _relayDeviceIds[session], expiresAt = _relayExpiresAt[session];
+    if (token == null || device == null || expiresAt == null) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(RelayLogin.storageKey, jsonEncode(RelayLogin(sessionId: session, deviceId: device,
+          token: token, expiresAt: expiresAt, reusableCode: _reusableCodeSessions.contains(session)).toJson()));
+    } catch (_) {}
+  }
+
+  /// Drops [session]'s credential from memory at once, and the saved login if it is that session's.
+  Future<void> _forgetRelayLogin(String session) async {
+    _relayCredentials.remove(session);
+    _relayExpiresAt.remove(session);
+    _reusableCodeSessions.remove(session);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = await RelayLogin.load();
+      if (saved == null || saved.sessionId == session) await prefs.remove(RelayLogin.storageKey);
+    } catch (_) {}
+  }
+
+  void _relaySessionEnded(String session) {
+    onGaveUp?.call();
+    _set(() {
+      connected = false;
+      connecting = false;
+      lastError = relaySessionEndedMessage;
+    });
+    _system('❌ $relaySessionEndedMessage');
+  }
+
   Future<void> connectRelay(String rawSessionId, [String? pairingCode]) async {
     final session = rawSessionId.trim().toUpperCase();
     if (session.isEmpty) return;
     type = ConnectionType.relay;
     _relayTarget = session;
+    final expiresAt = _relayExpiresAt[session];
+    if (pairingCode == null && expiresAt != null && DateTime.now().millisecondsSinceEpoch >= expiresAt) {
+      await _forgetRelayLogin(session);
+      _relaySessionEnded(session);
+      return;
+    }
     deviceId = _relayDeviceIds[session] ?? deviceId;
     if (deviceId.isEmpty) deviceId = 'mobile-${DateTime.now().millisecondsSinceEpoch}';
+    final hadCredential = _relayCredentials[session] != null;
     _set(() {
       connecting = true;
       lastError = null;
@@ -392,20 +513,34 @@ class CursorConnection extends ChangeNotifier {
             }),
           )
           .timeout(const Duration(seconds: 15));
+      // Logged out (or switched away) while the request was in flight.
+      if (_relayTarget != session || type != ConnectionType.relay) return;
       final body = response.body.isNotEmpty ? jsonDecode(response.body) as Map<String, dynamic>? : null;
       final data = body ?? <String, dynamic>{};
       final errorCode = data['errorCode']?.toString();
       final errorMessage = data['error']?.toString() ?? '';
 
       if (response.statusCode == 200 && data['success'] == true && data['protocolVersion'] == 2) {
-        final assigned = data['data']?['deviceId'];
+        final reply = data['data'] is Map ? data['data'] as Map : const {};
+        final assigned = reply['deviceId'];
         if (assigned is String) {
           deviceId = assigned;
           _relayDeviceIds[session] = assigned;
         }
-        final issued = data['data']?['token'];
-        if (issued is String && issued.length == 43) _relayCredentials[session] = issued;
+        final issued = reply['token'];
+        if (issued is String && issued.length == 43) {
+          _relayCredentials[session] = issued;
+          final pairing = reply['pairing'];
+          if (pairing is Map && pairing['reusable'] == true) {
+            _reusableCodeSessions.add(session);
+          } else {
+            _reusableCodeSessions.remove(session);
+          }
+        }
         if (_relayCredentials[session] == null) throw StateError('Missing relay credential');
+        final credentialExpiresAt = reply['credentialExpiresAt'];
+        if (credentialExpiresAt is int) _relayExpiresAt[session] = credentialExpiresAt;
+        await _saveRelayLogin(session);
         _set(() {
           sessionId = session;
           connected = true;
@@ -427,13 +562,21 @@ class CursorConnection extends ChangeNotifier {
           _set(() => connecting = false);
         }
       } else if ([401, 403].contains(response.statusCode)) {
-        _relayCredentials.remove(session);
+        await _forgetRelayLogin(session);
+        if (hadCredential) {
+          _relaySessionEnded(session);
+          return;
+        }
         onGaveUp?.call();
+        final error = errorCode == 'PAIRING_CODE_USED_UP'
+            ? pairingCodeUsedUpMessage
+            : 'Relay authentication failed ($errorCode). Check the session and obtain a new pairing code in Cursor.';
         _set(() {
           connected = false;
           connecting = false;
-          lastError = 'Relay authentication failed ($errorCode). Check the session and obtain a new pairing code in Cursor.';
+          lastError = error;
         });
+        _system('❌ $error');
       } else if (response.statusCode == 409 || response.statusCode == 429) {
         final error = response.statusCode == 409
             ? 'Your Mac is not connected to session $session yet. Keep Cursor open and awake; retrying…'
@@ -508,14 +651,15 @@ class CursorConnection extends ChangeNotifier {
       }
       _stopPolling();
       if ([401, 403].contains(response.statusCode)) {
-        _relayCredentials.remove(session);
-        onGaveUp?.call();
+        await _forgetRelayLogin(session);
+        _relaySessionEnded(session);
+        return;
       }
       _set(() {
         connected = false;
         lastError = 'Relay polling failed (HTTP ${response.statusCode}). Reconnect to continue.';
       });
-      if (![401, 403].contains(response.statusCode)) scheduleReconnect();
+      scheduleReconnect();
     } catch (_) {
       _stopPolling();
       _set(() {
@@ -664,9 +808,10 @@ class CursorConnection extends ChangeNotifier {
   void resetReconnectAttempts() => reconnectAttempts = 0;
 
   /// Closes the transport and, on the relay, revokes this device's credential.
-  Future<String?> disconnect() async {
-    final relaySession = type == ConnectionType.relay ? sessionId : null;
-    final headers = relayHeaders();
+  Future<String?> disconnect() => _disconnect(relaySession);
+
+  Future<String?> _disconnect(String? relaySession) async {
+    final headers = relayHeaders(relaySession);
     _stopPolling();
     _stopHeartbeat();
     stopReconnect();
@@ -688,11 +833,30 @@ class CursorConnection extends ChangeNotifier {
               headers: headers, body: jsonEncode({'sessionId': relaySession}))
           .timeout(const Duration(seconds: 15));
       if (response.statusCode != 200) throw StateError('Disconnect failed');
-      _relayCredentials.remove(relaySession);
+      await _forgetRelayLogin(relaySession);
       return null;
     } catch (_) {
       return 'Disconnected locally; server revocation was not confirmed. Revoke the relay session in Cursor if needed.';
     }
+  }
+
+  /// Signs this device out of the relay session: revokes its credential when the relay can be
+  /// reached, and always forgets it here (memory and the saved login).
+  Future<String?> logOut() async {
+    final session = relaySession;
+    _relayTarget = null;
+    String? warning;
+    try {
+      warning = await _disconnect(session);
+    } finally {
+      if (session != null) {
+        await _forgetRelayLogin(session);
+        _relayDeviceIds.remove(session);
+      }
+    }
+    return warning == null
+        ? null
+        : 'Logged out on this phone. The relay could not be reached, so it keeps the login until the session ends.';
   }
 
   @override
