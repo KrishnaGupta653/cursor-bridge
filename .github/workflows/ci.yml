@@ -32,9 +32,6 @@ jobs:
       - name: Test extension security and CDP
         run: npm --workspace cursor-extension test
 
-      - name: Build pc-server
-        run: npm --workspace pc-server run build
-
   extension-vsix:
     name: Extension VSIX
     runs-on: ubuntu-latest

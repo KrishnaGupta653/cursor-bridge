@@ -3,20 +3,16 @@
   "version": "0.1.0",
   "description": "Control Cursor IDE from Your Mobile Device",
   "author": {
-    "name": "김형진",
-    "email": "jaloveeye@gmail.com",
-    "url": "https://jaloveeye.com"
+    "name": "Krishna Gupta",
+    "url": "https://github.com/KrishnaGupta653"
   },
   "workspaces": [
-    "cursor-extension",
-    "pc-server"
+    "cursor-extension"
   ],
   "scripts": {
-    "install:all": "npm install && cd cursor-extension && npm install && cd ../pc-server && npm install",
+    "install:all": "npm install && cd cursor-extension && npm install",
     "build:extension": "cd cursor-extension && npm run compile",
-    "start:server": "cd pc-server && npm start",
-    "dev:extension": "cd cursor-extension && npm run watch",
-    "dev:server": "cd pc-server && npm run dev"
+    "dev:extension": "cd cursor-extension && npm run watch"
   },
   "keywords": [
     "cursor",
