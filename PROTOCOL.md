@@ -122,7 +122,7 @@ Authenticated calls send `Authorization: Bearer <capability token>`.
 |----------|-----|---------|
 | `POST /api/session` | Mac, no token | Create session `{ sessionId, deviceId, deviceType: "pc" }`. Returns the Mac's token. `409` if the ID was ever used. |
 | `POST /api/connect` | Mac with token, or phone with pairing code | Reconnect, or join with `{ sessionId, deviceId, deviceType: "mobile", pairingCode }`. A phone can join only while the Mac is polling. |
-| `POST /api/pair` | Mac | Create a pairing code (single use, 5 minutes). |
+| `POST /api/pair` | Mac | Create a pairing code: single use for 5 minutes, or with `{ "reusable": true }` the session's reusable code (see below). |
 | `POST /api/send` | both | Queue `{ sessionId, deviceId, deviceType, type, data }`. Bodies over 256 KB from a phone (4 MB from the Mac) get `413`. |
 | `GET /api/poll` | both | Fetch queued messages. Each poll also marks the device as seen. |
 | `POST /api/disconnect` | both | Revoke this device's token. From the Mac it ends the session for everyone. |
@@ -134,12 +134,70 @@ Rules the relay enforces:
 
 - Sessions last 24 hours. A session ID can never be claimed again; recovery always uses a new ID.
 - Capability tokens are 256-bit random values; the relay stores only their hashes.
-- Pairing codes are single use and expire after 5 minutes. A failed join does not use up the code.
+- Pairing codes are single use and expire after 5 minutes, unless the Mac asked for a reusable code.
+  A failed join (e.g. `409 PC_MUST_CONNECT_FIRST`) does not use up the code.
 - Queued messages expire after 5 minutes. A reply with `targetDeviceId` goes only to that phone.
 - A phone that has not polled for about 2 minutes stops receiving messages and is pruned.
 - The Mac counts as connected while it keeps polling (the extension polls every 2 s while a phone
   is active and every 25 s when idle; the relay allows 2 minutes).
 - Failed authentication is rate-limited per client IP.
+
+### Pairing codes
+
+`POST /api/pair` (Mac token) with `{ "sessionId": "ABC123" }` returns a single-use code:
+
+```json
+{ "success": true, "data": { "pairingCode": "<43 characters>", "expiresInSeconds": 300 } }
+```
+
+With `{ "sessionId": "ABC123", "reusable": true }` (opt-in, `cursorRemote.reusablePairingCode`):
+
+```json
+{ "success": true, "data": { "pairingCode": "<43 characters>", "expiresInSeconds": 86012, "reusable": true, "usesLeft": 3 } }
+```
+
+- A reusable code enrolls at most **3** devices (`PAIRING_CODE_USED_UP` after that) and expires with
+  the session's credentials. Uses are counted atomically; a refused join does not count.
+- A session has at most one reusable code: minting a new one invalidates the previous one.
+- Revoking the session (`/api/disconnect` from the Mac, **Start New Relay Session**) or a new session
+  epoch invalidates it.
+- Every redeem enrolls a new server-generated device ID, so a phone that pairs again uses another slot.
+  Reconnecting with a saved token never uses one.
+- Relays without reusable-code support ignore `reusable` and answer with a single-use code; the extension then
+  treats it as single use.
+
+A phone joins with `POST /api/connect` `{ sessionId, deviceId, deviceType: "mobile", pairingCode }`.
+The reply carries `token`, `deviceId` and `credentialExpiresAt`, plus `"pairing": { "reusable": true, "usesLeft": n }`
+when a reusable code was used. Join errors:
+
+| Status | `errorCode` | Meaning |
+|--------|-------------|---------|
+| 403 | `PAIRING_CODE_REQUIRED` | No code (and no token) was sent |
+| 403 | `PAIRING_CODE_INVALID_OR_EXPIRED` | Wrong session, expired, replaced, revoked or already used (single use) |
+| 403 | `PAIRING_CODE_USED_UP` | The reusable code already enrolled 3 devices |
+| 409 | `PC_MUST_CONNECT_FIRST` | The Mac is not polling; the code is kept |
+| 401 | `CREDENTIAL_INVALID_OR_EXPIRED` / `CREDENTIAL_REVOKED` | A saved token no longer works; pair again |
+
+### `device_paired` (relay → Mac)
+
+After every successful pairing (single use or reusable) the relay queues a notice in the Mac's poll queue:
+
+```json
+{ "id": "…", "type": "device_paired", "from": "relay", "to": "pc", "senderDeviceId": "mobile-…",
+  "data": { "type": "device_paired", "deviceId": "mobile-…", "at": 1760000000000, "reusable": true, "usesLeft": 2 } }
+```
+
+`from: "relay"` cannot be produced through `/api/send` (the relay stamps the sender's role there), so the
+extension only trusts notices with that marker. It never contains a code or token. Extensions older
+than 0.5.1 drop it as an unversioned command (no `deadline`), with one log line.
+
+### App login
+
+The app saves `{ sessionId, deviceId, token, credentialExpiresAt }` for the latest relay session in local
+storage (localStorage on the web) and reconnects with the token after a refresh or restart. It deletes it
+on `401`/`403`, when `credentialExpiresAt` has passed, and on **Log out** (`POST /api/disconnect`,
+which revokes the token; if that fails the token still lapses when the session ends). Network errors,
+`409` and `429` keep it.
 
 `/api/heartbeat`, `/api/sessions-with-mobile` and `/api/debug-sessions` remain only for extensions
 older than 0.5.0: heartbeat is no longer needed, and discovery/debug always answer `403`.

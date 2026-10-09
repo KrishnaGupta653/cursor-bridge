@@ -308,6 +308,11 @@ Allow the port in the Mac's firewall. Find the IP with `ipconfig getifaddr en0` 
 2. Run **Cursor Remote: Pair Relay Client**. The code is copied and shown with the session ID.
 3. In the app choose **Relay**, enter the session ID, then paste the code.
 
+The app stays logged in for the rest of the session: refreshing the page or restarting the app
+reconnects without a new code. **Log out** (bottom of the Agents sidebar, the top-bar button or
+Settings) signs this phone out and revokes its login on the relay. When the session ends (24 hours,
+Start New Relay Session or Revoke) the app says so and asks for a new pairing code.
+
 ```
 Mobile App ⇄ Relay Server (Vercel + Upstash Redis) ⇄ Extension (RelayClient) ⇄ Cursor
 ```
@@ -315,8 +320,8 @@ Mobile App ⇄ Relay Server (Vercel + Upstash Redis) ⇄ Extension (RelayClient)
 | Rule | Behaviour |
 |------|-----------|
 | **Session lifetime** | 24 hours. Afterwards, or if the ID is taken, the extension switches to a new random ID and you pair again. An ID is never reused. |
-| **Pairing codes** | Single use, expire after 5 minutes |
-| **Credentials** | 256-bit capability tokens, stored hashed on the relay |
+| **Pairing codes** | Single use, expire after 5 minutes. Opt-in `cursorRemote.reusablePairingCode`: one code for the whole session, up to 3 devices; anyone who sees it can join until the session ends or you start a new one. The Mac is notified of every device that joins. |
+| **Credentials** | 256-bit capability tokens, stored hashed on the relay. The app keeps its login in local storage (the browser's localStorage on the web) until the session ends or you log out |
 | **Messages** | Expire after 5 minutes; replies go only to the phone that asked |
 | **Liveness** | The extension's polls keep the Mac "connected"; phones that stop polling for about 2 minutes are pruned |
 | **Restart** | After Cursor restarts, one window reconnects to the last session on its own |
@@ -324,7 +329,7 @@ Mobile App ⇄ Relay Server (Vercel + Upstash Redis) ⇄ Extension (RelayClient)
 | Command | Description |
 |---------|-------------|
 | `Cursor Remote: Connect to Relay by Session ID` | Connect this Mac to a relay session |
-| `Cursor Remote: Pair Relay Client` | One-time code for the phone |
+| `Cursor Remote: Pair Relay Client` | Pairing code for the phone (single use, or the session's reusable code) |
 | `Cursor Remote: Start New Relay Session` | Revoke the current session and start a new one |
 | `Cursor Remote: Revoke Relay Session` | Revoke the current session |
 | `Cursor Remote: Set Relay Session ID` | Change the saved session ID |
@@ -896,11 +901,15 @@ Extension은 `127.0.0.1:9222`의 Chrome DevTools Protocol로 Cursor Agents 창�
 2. **Cursor Remote: Pair Relay Client** 실행. 코드가 복사되고 세션 ID와 함께 표시됩니다.
 3. 앱에서 **Relay** → 세션 ID 입력 → 코드 붙여넣기.
 
+앱은 세션이 끝날 때까지 로그인을 유지합니다. 페이지를 새로 고치거나 앱을 다시 시작해도 코드 없이 다시
+연결됩니다. **Log out**(Agents 사이드바 맨 아래, 상단 버튼, 설정)은 이 휴대폰을 로그아웃하고 릴레이의 로그인을
+폐기합니다. 세션이 끝나면(24시간, Start New Relay Session, Revoke) 앱이 알려 주고 새 페어링 코드를 요청합니다.
+
 | 항목 | 동작 |
 |------|------|
 | **세션 유효기간** | 24시간. 만료되거나 이미 사용된 ID이면 새 ID로 바뀌고 다시 페어링합니다. 한 번 쓴 ID는 재사용할 수 없습니다. |
-| **페어링 코드** | 일회용, 5분 후 만료 |
-| **자격 증명** | 256비트 capability 토큰, 릴레이에는 해시만 저장 |
+| **페어링 코드** | 일회용, 5분 후 만료. 선택 설정 `cursorRemote.reusablePairingCode`: 세션 전체에 코드 하나, 최대 3대. 코드를 본 사람은 세션이 끝나거나 새 세션을 시작할 때까지 접속할 수 있습니다. 기기가 참여할 때마다 Mac에 알림이 뜹니다. |
+| **자격 증명** | 256비트 capability 토큰, 릴레이에는 해시만 저장. 앱은 세션이 끝나거나 로그아웃할 때까지 로그인을 로컬 저장소(웹은 localStorage)에 보관 |
 | **메시지** | 5분 후 만료, 응답은 요청한 휴대폰에만 전달 |
 | **연결 상태** | Extension의 폴링으로 Mac이 "연결됨"으로 유지되고, 약 2분간 폴링하지 않은 휴대폰은 세션에서 제외 |
 | **재시작** | Cursor를 다시 시작하면 한 창이 마지막 세션에 자동으로 다시 연결 |
@@ -908,7 +917,7 @@ Extension은 `127.0.0.1:9222`의 Chrome DevTools Protocol로 Cursor Agents 창�
 | 명령어 | 설명 |
 |--------|------|
 | `Cursor Remote: Connect to Relay by Session ID` | 이 Mac을 릴레이 세션에 연결 |
-| `Cursor Remote: Pair Relay Client` | 휴대폰용 일회용 코드 |
+| `Cursor Remote: Pair Relay Client` | 휴대폰용 페어링 코드 (일회용 또는 세션의 재사용 코드) |
 | `Cursor Remote: Start New Relay Session` | 현재 세션을 폐기하고 새 세션 시작 |
 | `Cursor Remote: Revoke Relay Session` | 현재 세션 폐기 |
 | `Cursor Remote: Set Relay Session ID` | 저장된 세션 ID 변경 |

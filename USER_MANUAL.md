@@ -331,12 +331,37 @@ Extension은 `127.0.0.1:9222`의 Chrome DevTools Protocol로 Cursor Agents 창�
 2. 페어링 코드가 복사되고 세션 ID와 함께 표시됩니다. 코드는 **한 번만** 쓸 수 있고 **5분** 후 만료됩니다
 3. 앱에서 **Relay** 선택 → 세션 ID 입력 → 페어링 코드 붙여넣기
 
+### 로그인 유지와 로그아웃
+
+- 앱은 세션이 끝날 때까지 로그인을 기기에 저장합니다(웹은 브라우저 localStorage). 페이지를 새로 고치거나
+  앱을 다시 시작해도 "Connecting…" 후 코드 없이 다시 연결됩니다
+- **Log out**: Agents 사이드바 맨 아래, 상단 로그아웃 버튼 또는 설정. 확인 후 릴레이에서 이 휴대폰의 로그인을
+  폐기하고 저장된 로그인을 지웁니다. 릴레이에 연결할 수 없어도 휴대폰에서는 지워지며, 릴레이의 로그인은
+  세션이 끝날 때 만료됩니다
+- 세션이 끝나면(24시간, **Start New Relay Session**, **Revoke Relay Session**) 앱이 "This relay session ended…"
+  라고 알려 주고 새 페어링 코드를 요청합니다. 네트워크 오류나 Mac 미연결(409)일 때는 로그인을 유지하고 다시 시도합니다
+- 공용 기기에서는 사용 후 반드시 로그아웃하세요. 저장된 로그인은 이 앱(웹은 같은 사이트)과 기기에 접근할 수
+  있는 사람이 읽을 수 있습니다
+
+### 재사용 페어링 코드 (선택)
+
+설정 `cursorRemote.reusablePairingCode`를 켜면 세션 전체에 페어링 코드 하나를 씁니다.
+
+- 최대 **3대**까지 페어링할 수 있고, 세션이 끝나면 만료됩니다. Pair Relay Client를 다시 실행하면 같은 코드와
+  남은 횟수·유효 시간을 보여 줍니다
+- **위험**: 코드를 본 사람은 세션이 끝나거나 새 세션을 시작할 때까지 접속할 수 있습니다. 코드를 공유하지 마세요
+- 기기가 참여할 때마다 "A new device joined relay session …" 알림이 뜹니다. 모르는 기기라면 알림의
+  **Start New Relay Session**을 눌러 모든 기기와 코드를 폐기하세요
+- 3번 다 쓰면 앱에 "This pairing code was used on 3 devices…"가 표시되고, Pair Relay Client가 새 코드를 만듭니다
+- 설정을 꺼도 이미 보여 준 코드는 취소되지 않습니다. 취소하려면 **Start New Relay Session**을 실행하세요
+- 릴레이가 재사용 코드를 지원하지 않으면 일회용 코드가 나옵니다
+
 ### 세션 규칙
 
 | 항목 | 동작 |
 |------|------|
 | 세션 유효기간 | **24시간**. 이후 또는 이미 사용된 ID이면 Extension이 새 무작위 ID로 바꾸고, 휴대폰을 다시 페어링합니다. 한 번 쓴 ID는 다시 쓸 수 없습니다. |
-| 페어링 코드 | 일회용, 5분 후 만료. 접속에 실패해도 코드는 소모되지 않습니다 |
+| 페어링 코드 | 일회용, 5분 후 만료 (재사용 코드를 켜면 세션 동안 최대 3대). 접속에 실패해도 코드는 소모되지 않습니다 |
 | 자격 증명 | 256비트 capability 토큰, 릴레이에는 해시만 저장 |
 | 메시지 | 5분 후 만료, 응답은 요청한 휴대폰에만 전달 |
 | Mac 연결 상태 | Extension이 폴링할 때마다 갱신 (휴대폰 사용 중 2초, 유휴 시 25초 간격). 2분 넘게 폴링이 없으면 휴대폰이 새로 참여할 수 없습니다 |
@@ -348,7 +373,7 @@ Extension은 `127.0.0.1:9222`의 Chrome DevTools Protocol로 Cursor Agents 창�
 | 명령어 | 설명 |
 |--------|------|
 | `Cursor Remote: Connect to Relay by Session ID` | 이 Mac을 릴레이 세션에 연결 |
-| `Cursor Remote: Pair Relay Client` | 휴대폰용 일회용 코드 생성 |
+| `Cursor Remote: Pair Relay Client` | 휴대폰용 페어링 코드 (일회용, 또는 설정 시 세션의 재사용 코드) |
 | `Cursor Remote: Start New Relay Session` | 현재 세션을 폐기하고 새 세션 시작 (휴대폰 다시 페어링) |
 | `Cursor Remote: Revoke Relay Session` | 현재 세션 폐기 |
 | `Cursor Remote: Set Relay Session ID` | 저장된 세션 ID 변경 |
