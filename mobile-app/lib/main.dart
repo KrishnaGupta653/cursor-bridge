@@ -22,7 +22,8 @@ const String kRelayServerUrl = String.fromEnvironment(
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await AppSettings().load();
-  runApp(MyApp(savedLogin: await RelayLogin.load()));
+  final savedLogin = await RelayLogin.load();
+  runApp(MyApp(savedLogin: savedLogin, launchSessionId: launchSessionId(Uri.base, savedLogin)));
 }
 
 final ThemeData darkTheme = buildCrDarkTheme();
@@ -31,9 +32,10 @@ final ThemeData darkTheme = buildCrDarkTheme();
 // App Root
 // ============================================================
 class MyApp extends StatelessWidget {
-  const MyApp({super.key, this.savedLogin});
+  const MyApp({super.key, this.savedLogin, this.launchSessionId});
 
   final RelayLogin? savedLogin;
+  final String? launchSessionId;
 
   // Dark-only, like Cursor's Agents window: the screens use fixed Cr colors.
   @override
@@ -43,16 +45,19 @@ class MyApp extends StatelessWidget {
       theme: darkTheme,
       darkTheme: darkTheme,
       themeMode: ThemeMode.dark,
-      home: HomePage(savedLogin: savedLogin),
+      home: HomePage(savedLogin: savedLogin, launchSessionId: launchSessionId),
     );
   }
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key, this.savedLogin});
+  const HomePage({super.key, this.savedLogin, this.launchSessionId});
 
   /// Read before the first frame, so a refresh goes straight to "Connecting…" instead of the landing page.
   final RelayLogin? savedLogin;
+
+  /// Pre-fills the Relay session field (from `?session=`); a saved login wins.
+  final String? launchSessionId;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -1537,6 +1542,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}:${time.second.toString().padLeft(2, '0')}';
   }
 
+  String? get _launchSessionId => widget.savedLogin == null ? widget.launchSessionId : null;
+
   @override
   void initState() {
     super.initState();
@@ -1567,6 +1574,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           if (mounted) setState(() => _restoringLogin = false);
         });
       });
+    } else if (_launchSessionId != null) {
+      _connectionType = ConnectionType.relay;
+      _sessionIdController.text = _launchSessionId!;
     }
     _loadConnectionSettings();
     // Apply the default agent mode from settings
@@ -1623,7 +1633,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final prefs = await SharedPreferences.getInstance();
 
       final connectionTypeStr = prefs.getString('connection_type');
-      if (connectionTypeStr != null && !_restoringLogin) {
+      if (connectionTypeStr != null && !_restoringLogin && _launchSessionId == null) {
         setState(() {
           _connectionType = connectionTypeStr == 'local'
               ? ConnectionType.local
@@ -1645,7 +1655,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
       // Last session ID (optional)
       final lastSessionId = prefs.getString('last_session_id');
-      if (lastSessionId != null && lastSessionId.isNotEmpty && !_restoringLogin) {
+      if (lastSessionId != null && lastSessionId.isNotEmpty && !_restoringLogin && _launchSessionId == null) {
         _sessionIdController.text = lastSessionId;
       }
     } catch (e) {

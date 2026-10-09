@@ -45,6 +45,14 @@ bool isPrivateHost(String host) {
 /// Asks the user for a pairing code; null cancels.
 typedef PairingPrompt = Future<String?> Function({required bool relay});
 
+/// The relay session ID from a link like `/?session=ABC123` (Telegram /relay and /pair), to pre-fill
+/// the Relay field. Ignored when a saved login exists. A pairing code is never taken from a URL.
+String? launchSessionId(Uri uri, RelayLogin? savedLogin) {
+  if (savedLogin != null) return null;
+  final session = uri.queryParameters['session'];
+  return session != null && RegExp(r'^[A-Z0-9]{6}$').hasMatch(session) ? session : null;
+}
+
 /// The relay login kept across page refreshes and app restarts (localStorage on web). Only the
 /// latest session is kept. It is a bearer credential: never log it, show it or put it in a URL.
 class RelayLogin {

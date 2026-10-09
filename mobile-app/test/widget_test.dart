@@ -108,6 +108,52 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  test('a ?session= link gives a valid session ID only, never a code, and a saved login wins', () {
+    Uri link(String query) => Uri.parse('https://cursor-remote-app.vercel.app/?$query');
+    expect(launchSessionId(link('session=ABC123'), null), 'ABC123');
+    for (final bad in ['session=abc123', 'session=ABC12', 'session=ABC1234', 'session=ABC-12', 'session=', 'other=ABC123']) {
+      expect(launchSessionId(link(bad), null), isNull, reason: bad);
+    }
+    expect(launchSessionId(link('code=ABC123'), null), isNull);
+    expect(launchSessionId(link('pairingCode=ABC123'), null), isNull);
+    final login = RelayLogin(sessionId: 'XYZ789', deviceId: 'mobile-1', token: 'a' * 43,
+        expiresAt: DateTime.now().add(const Duration(hours: 2)).millisecondsSinceEpoch);
+    expect(launchSessionId(link('session=ABC123'), login), isNull);
+  });
+
+  testWidgets('a session from the link pre-fills the Relay field over the last session ID, and no code',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues({'last_session_id': 'OLD999', 'connection_type': 'local'});
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(MyApp(launchSessionId: launchSessionId(
+        Uri.parse('https://cursor-remote-app.vercel.app/?session=K7Q2ZP&code=SECRET1&pairingCode=SECRET2'), null)));
+    await tester.pumpAndSettle(const Duration(milliseconds: 100));
+
+    expect(find.text('Connect with Session ID'), findsOneWidget);
+    expect(find.text('K7Q2ZP'), findsOneWidget);
+    expect(find.text('OLD999'), findsNothing);
+    expect(find.textContaining('SECRET'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a saved login ignores the link\'s session', (WidgetTester tester) async {
+    final login = RelayLogin(sessionId: 'XYZ789', deviceId: 'mobile-1', token: 'a' * 43,
+        expiresAt: DateTime.now().add(const Duration(hours: 2)).millisecondsSinceEpoch);
+    SharedPreferences.setMockInitialValues({RelayLogin.storageKey: jsonEncode(login.toJson())});
+    final relay = MockClient((req) async => http.Response(jsonEncode({'success': true, 'protocolVersion': 2,
+        'data': {'deviceId': 'mobile-1', 'credentialExpiresAt': login.expiresAt, 'messages': []}}), 200));
+    await tester.binding.setSurfaceSize(const Size(1100, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await http.runWithClient(() async {
+      await tester.pumpWidget(MyApp(savedLogin: login, launchSessionId: 'K7Q2ZP'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+      expect(find.text('K7Q2ZP'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    }, () => relay);
+  });
+
   for (final width in [360.0, 390.0, 480.0]) {
     testWidgets('Connected app bar fits a ${width.toInt()} px phone', (WidgetTester tester) async {
       final login = RelayLogin(sessionId: 'ABC123', deviceId: 'mobile-1', token: 'a' * 43,
