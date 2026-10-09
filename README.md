@@ -351,6 +351,20 @@ Mobile App ⇄ Relay Server (Vercel + Upstash Redis) ⇄ Extension (RelayClient)
 | `Cursor Remote: Revoke Relay Session` | Revoke the current session |
 | `Cursor Remote: Set Relay Session ID` | Change the saved session ID |
 
+From the Telegram bot (if you set it up):
+
+| Telegram command | Description |
+|------------------|-------------|
+| `/app` | Link to the web app (pre-fills the relay session ID when there is one) |
+| `/relay` | Relay session ID and whether the Mac is connected to it |
+| `/pair` | One-time pairing code for the phone, for pairing when you are away from the Mac |
+
+`/pair` codes are always single use and expire after 5 minutes (even with
+`cursorRemote.reusablePairingCode` on); the message is deleted when the code expires. `/pair` needs
+remote actions on and the Mac connected to a relay session, allows 3 codes per 15 minutes, shows a
+notification on the Mac and is written to the audit log without the code. Telegram bot chats are not
+end-to-end encrypted, so keep the bot token private.
+
 ### Keep the Mac awake
 
 The phone can only reach Cursor while the Mac is awake and online. While you are away, run

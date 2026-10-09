@@ -389,6 +389,26 @@ Turn on `cursorRemote.reusablePairingCode` to use one pairing code for the whole
 | `Cursor Remote: Revoke Relay Session` | Revoke the current session |
 | `Cursor Remote: Set Relay Session ID` | Change the saved session ID |
 
+### Pairing from Telegram
+
+If the Telegram bot is set up, you can pair a phone while away from the Mac:
+
+| Telegram command | Description |
+|------------------|-------------|
+| `/app` | Link to the web app (pre-fills the relay session ID when there is one) |
+| `/relay` | Relay session ID and whether the Mac is connected to it |
+| `/pair` | One-time pairing code for the phone |
+
+- `/pair` works only for the authorized user in the authorized private chat, with
+  `cursorRemote.remoteActions` on and the Mac already connected to a relay session. It never
+  connects the Mac by itself.
+- The code is always single use and expires after 5 minutes, even when
+  `cursorRemote.reusablePairingCode` is on. The message is deleted when the code expires, or right
+  away when the bot stops.
+- At most 3 codes per 15 minutes. The Mac shows a notification for every code, the bot tells you
+  when a device joins, and every attempt is written to the `[Audit]` log without the code.
+- Telegram bot chats are not end-to-end encrypted. Keep the bot token private.
+
 ### Keep the Mac awake
 
 The phone can only reach Cursor while the Mac is awake and online. While you are away, run this in a

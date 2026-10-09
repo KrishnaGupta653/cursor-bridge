@@ -100,6 +100,22 @@ Run **Cursor Remote: Edit Telegram Settings**. The file lives at
 `~/.config/cursor-remote/telegram.json` (see `telegram.secrets.example.json`). Set `botToken`,
 `allowedUserIds` and `allowedChatIds`; both lists are required. Only one Cursor window runs the bot.
 
+Send `/help` to the bot for every command. The relay-related ones:
+
+| Telegram command | What it does |
+|------------------|--------------|
+| `/app` | Link to the web app (pre-fills the relay session ID when there is one) |
+| `/relay` | Relay session ID and whether the Mac is connected to it |
+| `/pair` | One-time pairing code for the phone, so you can pair from Telegram when away from the Mac |
+
+`/pair` only works for the authorized user in the authorized private chat, needs
+`cursorRemote.remoteActions` on and the Mac connected to a relay session, and allows 3 codes per
+15 minutes. The code is always single use and expires after 5 minutes, even when
+`cursorRemote.reusablePairingCode` is on, and the message is deleted when the code expires (or when
+the bot stops). The Mac shows a notification for every code, the bot tells you when a device joins,
+and every attempt is written to the `[Audit]` log without the code. Telegram bot chats are not
+end-to-end encrypted, so keep the bot token private.
+
 ### Remote actions and audit log
 
 When `cursorRemote.remoteActions` is `enabled`, the phone and Telegram can open chats or start a
