@@ -3,9 +3,9 @@
     "short_name": "Cursor Remote",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "Control Cursor IDE from your mobile device. Remote control extension for Cursor IDE via WebSocket - Code anywhere, anytime with Cursor CLI.",
+    "background_color": "#0A0C10",
+    "theme_color": "#0A0C10",
+    "description": "Watch and control the chats in Cursor's Agents window from your phone, through a secure relay to your Mac.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

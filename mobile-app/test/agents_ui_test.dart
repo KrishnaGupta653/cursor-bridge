@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:cursor_remote/models/chat_models.dart';
@@ -291,5 +292,158 @@ void main() {
     expect(store.pendingPrompt, 'build it', reason: 'the prompt stays visible until the chat shows it');
     expect(store.awaitingReply, isTrue);
     store.dispose();
+  });
+
+  testWidgets('sidebar rows tell screen readers the chat status', (tester) async {
+    final semantics = tester.ensureSemantics();
+    final (store, _) = fakeStore();
+    store.applyInbound({
+      'type': 'chats', 'sidebar': true, 'offset': 0,
+      'chats': [
+        row(chatA, 'Fix login', 'cursor-remote', status: 'waiting'),
+        row(chatB, 'Add search', 'cursor-remote', status: 'running'),
+        row(chatC, 'Docs pass', 'website', status: 'error'),
+        row('dddddddd-1111-2222-3333-444444444444', 'Old idea', 'website'),
+      ],
+    });
+    await pumpShell(tester, store);
+    expect(find.bySemanticsLabel(RegExp(r'waiting for approval[\s\S]*Fix login')), findsOneWidget);
+    expect(find.bySemanticsLabel(RegExp(r'running[\s\S]*Add search')), findsOneWidget);
+    expect(find.bySemanticsLabel(RegExp(r'error[\s\S]*Docs pass')), findsOneWidget);
+    expect(find.bySemanticsLabel(RegExp(r'idle[\s\S]*Old idea')), findsOneWidget);
+    await finish(tester, store);
+    semantics.dispose();
+  });
+
+  testWidgets('a streaming reply does not rebuild the sidebar rows', (tester) async {
+    final (store, _) = fakeStore();
+    await pumpShell(tester, store, size: const Size(1200, 800));
+    await tester.tap(find.text('Add search'));
+    store.applyInbound({'type': 'chat', 'chatId': chatB, 'total': 1, 'hasOlder': false, 'items': [item(0, 'user', 'go')]});
+    await tester.pump();
+    final before = tester.widget(find.byKey(const ValueKey(chatC)));
+
+    store.applyInbound({
+      'type': 'chat_delta', 'chatId': chatB, 'fromSeq': 1, 'total': 2, 'items': [item(1, 'assistant', 'streaming…')],
+    });
+    await tester.pump();
+    expect(find.textContaining('streaming…', findRichText: true), findsOneWidget);
+    expect(identical(tester.widget(find.byKey(const ValueKey(chatC))), before), isTrue);
+
+    await tester.tap(find.text('Docs pass'));
+    await tester.pump();
+    expect(identical(tester.widget(find.byKey(const ValueKey(chatC))), before), isFalse,
+        reason: 'a selection change still updates the sidebar');
+    await finish(tester, store);
+  });
+
+  testWidgets('long-pressing a message offers Copy text with the whole message', (tester) async {
+    String? copied;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.setData') copied = (call.arguments as Map)['text'] as String?;
+      return null;
+    });
+    addTearDown(() => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, null));
+    final (store, _) = fakeStore();
+    await pumpShell(tester, store, size: const Size(1200, 800));
+    await tester.tap(find.text('Add search'));
+    store.applyInbound({
+      'type': 'chat', 'chatId': chatB, 'total': 2, 'hasOlder': false,
+      'items': [item(0, 'user', 'please add search to the list'), item(1, 'assistant', 'Done. **Search** works now.')],
+    });
+    await tester.pump();
+
+    await tester.longPress(find.text('please add search to the list'));
+    await settle(tester);
+    await tester.tap(find.text('Copy text'));
+    await tester.pump();
+    expect(copied, 'please add search to the list');
+
+    await tester.longPress(find.textContaining('works now', findRichText: true));
+    await settle(tester);
+    await tester.tap(find.text('Copy text'));
+    await tester.pump();
+    expect(copied, 'Done. **Search** works now.');
+    await finish(tester, store);
+  });
+
+  test('only the newest list_chats reply is applied', () async {
+    final (store, sent) = fakeStore();
+    addTearDown(store.dispose);
+    await store.refreshChats();
+    final older = sent.last['id'];
+    await store.refreshChats();
+    final newer = sent.last['id'];
+
+    store.applyInbound({'type': 'chats', 'correlationId': newer, 'sidebar': true, 'offset': 0, 'chats': [row(chatC, 'New', 'w')]});
+    store.applyInbound({'type': 'chats', 'correlationId': older, 'sidebar': true, 'offset': 0, 'chats': [row(chatA, 'Old', 'w')]});
+    expect(store.chats.map((c) => c.id), [chatC]);
+    expect(store.loadingChats, isFalse);
+
+    await store.refreshChats();
+    store.applyInbound({'type': 'command_result', 'correlationId': older, 'success': false, 'error': 'late failure'});
+    expect(store.loadingChats, isTrue, reason: 'a stale failure must not end the newest load');
+    expect(store.error, isNull);
+  });
+
+  test('a diff reply that arrives before send returns is not dropped', () async {
+    late ChatStore store;
+    store = ChatStore(send: (c) async {
+      if (c['type'] == 'get_file_diff') {
+        store.applyInbound({'type': 'file_diff', 'correlationId': c['id'], 'path': c['path'], 'diff': '+x\n'});
+      }
+      return null;
+    });
+    addTearDown(store.dispose);
+    store.applyInbound({'type': 'chats', 'sidebar': true, 'offset': 0, 'chats': [row(chatB, 'Add search', 'r')]});
+    await store.selectChat(chatB);
+    final diff = await store.fileDiff('lib/a.dart');
+    expect(diff.path, 'lib/a.dart');
+    expect(diff.diff, '+x\n');
+  });
+
+  test('a draft never follows the previous chat when the reply names no chat', () async {
+    final (store, sent) = fakeStore();
+    addTearDown(store.dispose);
+    await store.selectChat(chatA);
+    store.applyInbound({'type': 'composer_state', 'chatId': chatA, 'state': {'chatId': chatA, 'running': false}});
+    store.startNewChat();
+    await store.sendPrompt('start something');
+    final promptId = sent.last['id'];
+    store.applyInbound({'type': 'chat_response', 'correlationId': promptId, 'text': 'ok'});
+    await Future<void>.delayed(Duration.zero);
+    expect(store.draft, isTrue);
+    expect(store.selectedChatId, isNull);
+    expect(sent.where((c) => c['type'] == 'get_chat' && c['chatId'] == chatA).length, 1,
+        reason: 'only the original open, no re-open of the previous chat');
+  });
+
+  testWidgets('Stop stays disabled in a draft until the new chat has an ID', (tester) async {
+    final (store, sent) = fakeStore();
+    await pumpShell(tester, store, size: const Size(1200, 800));
+    await tester.tap(find.text('New Chat'));
+    await tester.pump();
+    await tester.enterText(find.byType(TextField).last, 'build it');
+    await tester.pump();
+    await tester.tap(find.byTooltip('Send'));
+    await tester.pump();
+
+    expect(store.running, isTrue);
+    expect(store.canStop, isFalse);
+    final stop = find.widgetWithIcon(IconButton, Icons.stop_rounded);
+    expect(tester.widget<IconButton>(stop).onPressed, isNull);
+    await store.stop();
+    expect(sent.where((c) => c['type'] == 'agent_stop'), isEmpty);
+
+    final promptId = sent.lastWhere((c) => c['type'] == 'agent_prompt')['id'];
+    store.applyInbound({'type': 'command_result', 'correlationId': promptId, 'success': true, 'data': {'chatId': chatC}});
+    await tester.pump();
+    expect(store.selectedChatId, chatC);
+    expect(store.canStop, isTrue);
+    expect(tester.widget<IconButton>(find.widgetWithIcon(IconButton, Icons.stop_rounded)).onPressed, isNotNull);
+    await store.stop();
+    expect(sent.last['type'], 'agent_stop');
+    expect(sent.last['chatId'], chatC);
+    await finish(tester, store);
   });
 }

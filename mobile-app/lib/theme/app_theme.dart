@@ -21,7 +21,7 @@ class Cr {
   // Text
   static const text = Color(0xFFE8EAED);
   static const textSecondary = Color(0xFF9AA3B2);
-  static const textFaint = Color(0xFF6B7385);
+  static const textFaint = Color(0xFF798193);
 
   // Accent (blue — not purple)
   static const accent = Color(0xFF5B8DEF);
@@ -42,6 +42,9 @@ class Cr {
   static const radiusMd = 12.0;
   static const radiusLg = 16.0;
   static const radiusXl = 20.0;
+
+  /// Minimum tap area for icon buttons. Pair with `VisualDensity.standard`, since desktop density shrinks it.
+  static const tapTarget = BoxConstraints(minWidth: 44, minHeight: 44);
 
   static const sidebarWidth = 300.0;
   static const wideBreakpoint = 900.0;
@@ -206,57 +209,6 @@ ThemeData buildCrDarkTheme() {
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(Cr.radiusLg),
       ),
-    ),
-  );
-}
-
-/// Light theme kept for Settings toggle — still Cr-aligned neutrals.
-ThemeData buildCrLightTheme() {
-  const scheme = ColorScheme.light(
-    primary: Color(0xFF2F5FBF),
-    onPrimary: Colors.white,
-    primaryContainer: Color(0xFFE8EEF9),
-    onPrimaryContainer: Color(0xFF0F1A2E),
-    secondary: Color(0xFF5A6578),
-    onSecondary: Colors.white,
-    surface: Color(0xFFF7F8FA),
-    onSurface: Color(0xFF12151A),
-    surfaceContainerHighest: Color(0xFFEBEEF3),
-    onSurfaceVariant: Color(0xFF5A6578),
-    outline: Color(0xFFD0D5DE),
-    outlineVariant: Color(0xFFE4E7EC),
-    error: Cr.danger,
-    onError: Colors.white,
-  );
-
-  return ThemeData(
-    useMaterial3: true,
-    brightness: Brightness.light,
-    colorScheme: scheme,
-    scaffoldBackgroundColor: const Color(0xFFF2F4F7),
-    appBarTheme: const AppBarTheme(
-      backgroundColor: Colors.white,
-      foregroundColor: Color(0xFF12151A),
-      elevation: 0,
-      scrolledUnderElevation: 0.5,
-      centerTitle: false,
-    ),
-    cardTheme: CardThemeData(
-      color: Colors.white,
-      elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(Cr.radiusMd),
-        side: const BorderSide(color: Color(0xFFE4E7EC)),
-      ),
-    ),
-    inputDecorationTheme: InputDecorationTheme(
-      filled: true,
-      fillColor: const Color(0xFFF7F8FA),
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(Cr.radiusMd),
-        borderSide: BorderSide.none,
-      ),
-      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
     ),
   );
 }

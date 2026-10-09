@@ -5,19 +5,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/connection_models.dart';
 
-enum ThemeModeSetting {
-  light,
-  dark,
-  system,
-}
-
 class AppSettings extends ChangeNotifier {
   static final AppSettings _instance = AppSettings._internal();
   factory AppSettings() => _instance;
   AppSettings._internal();
 
-  // 설정 키
-  static const String _keyThemeMode = 'theme_mode';
+  // 설정 키 (an old 'theme_mode' value may still be saved; the app is dark-only and ignores it)
   static const String _keyShowHistory = 'show_history';
   static const String _keyDefaultAgentMode = 'default_agent_mode';
   static const String _keyConnectionHistory = 'connection_history';
@@ -26,36 +19,19 @@ class AppSettings extends ChangeNotifier {
   static const int _maxHistoryCount = 5;
 
   // 현재 설정값
-  ThemeModeSetting _themeMode = ThemeModeSetting.system;
   bool _showHistory = false; // 기본값: 숨김
   String _defaultAgentMode = 'auto';
   List<ConnectionHistoryItem> _connectionHistory = [];
 
   // getters
-  ThemeModeSetting get themeMode => _themeMode;
   bool get showHistory => _showHistory;
   String get defaultAgentMode => _defaultAgentMode;
   List<ConnectionHistoryItem> get connectionHistory =>
       List.unmodifiable(_connectionHistory);
 
-  ThemeMode get themeModeValue {
-    switch (_themeMode) {
-      case ThemeModeSetting.light:
-        return ThemeMode.light;
-      case ThemeModeSetting.dark:
-        return ThemeMode.dark;
-      case ThemeModeSetting.system:
-        return ThemeMode.system;
-    }
-  }
-
   // 설정 로드
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
-
-    // 테마
-    final themeModeIndex = prefs.getInt(_keyThemeMode) ?? 2; // system default
-    _themeMode = ThemeModeSetting.values[themeModeIndex.clamp(0, 2)];
 
     // 히스토리 표시
     _showHistory = prefs.getBool(_keyShowHistory) ?? false;
@@ -69,14 +45,6 @@ class AppSettings extends ChangeNotifier {
       _connectionHistory = parseConnectionHistory(historyJson);
     }
 
-    notifyListeners();
-  }
-
-  // 테마 모드 설정
-  Future<void> setThemeMode(ThemeModeSetting mode) async {
-    _themeMode = mode;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt(_keyThemeMode, mode.index);
     notifyListeners();
   }
 

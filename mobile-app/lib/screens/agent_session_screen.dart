@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -82,7 +83,7 @@ class _AgentChatPaneState extends State<AgentChatPane> {
         (identical(cached.$1, item) || (cached.$1.text == item.text && cached.$1.work == null && item.work == null))) {
       return cached.$2;
     }
-    final view = _ItemView(item: item, onOpenFile: _openDiff);
+    final view = _ItemView(key: ValueKey(item.id), item: item, onOpenFile: _openDiff);
     if (_itemViews.length > 400) _itemViews.clear();
     _itemViews[item.id] = (item, view);
     return view;
@@ -279,6 +280,11 @@ class _AgentChatPaneState extends State<AgentChatPane> {
             }
             return const _Working();
           },
+          findChildIndexCallback: (key) {
+            if (key is! ValueKey<String>) return null;
+            final index = items.indexWhere((it) => it.id == key.value);
+            return index < 0 ? null : head + index;
+          },
         ),
         if (_pendingNew > 0)
           Positioned(
@@ -342,6 +348,8 @@ class _Header extends StatelessWidget {
           if (onOpenSidebar != null)
             IconButton(
               tooltip: 'Chats',
+              constraints: Cr.tapTarget,
+              visualDensity: VisualDensity.standard,
               icon: const Icon(Icons.menu_rounded, size: 20),
               onPressed: onOpenSidebar,
             )
@@ -419,7 +427,8 @@ class _ErrorBanner extends StatelessWidget {
         IconButton(
           tooltip: 'Dismiss',
           iconSize: 16,
-          visualDensity: VisualDensity.compact,
+          constraints: Cr.tapTarget,
+          visualDensity: VisualDensity.standard,
           icon: const Icon(Icons.close_rounded),
           onPressed: onClose,
         ),
@@ -453,10 +462,56 @@ class _Placeholder extends StatelessWidget {
   }
 }
 
+/// The selection menu (long-press, or right-click) plus "Copy text" for the whole message.
+EditableTextContextMenuBuilder messageMenu(String text) => (context, state) => AdaptiveTextSelectionToolbar.buttonItems(
+      anchors: state.contextMenuAnchors,
+      buttonItems: [
+        ...state.contextMenuButtonItems,
+        ContextMenuButtonItem(
+          label: 'Copy text',
+          onPressed: () {
+            Clipboard.setData(ClipboardData(text: text));
+            state.hideToolbar();
+          },
+        ),
+      ],
+    );
+
+/// On web the browser's own right-click menu replaces [messageMenu], so it is off while the pointer is over a message.
+class _MessageMenuRegion extends StatefulWidget {
+  final Widget child;
+  const _MessageMenuRegion({required this.child});
+
+  @override
+  State<_MessageMenuRegion> createState() => _MessageMenuRegionState();
+}
+
+class _MessageMenuRegionState extends State<_MessageMenuRegion> {
+  bool _inside = false;
+
+  void _set(bool inside) {
+    if (inside == _inside) return;
+    _inside = inside;
+    inside ? BrowserContextMenu.disableContextMenu() : BrowserContextMenu.enableContextMenu();
+  }
+
+  @override
+  void dispose() {
+    _set(false);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!kIsWeb) return widget.child;
+    return MouseRegion(onEnter: (_) => _set(true), onExit: (_) => _set(false), child: widget.child);
+  }
+}
+
 class _ItemView extends StatelessWidget {
   final ChatItem item;
   final ValueChanged<FileEdit> onOpenFile;
-  const _ItemView({required this.item, required this.onOpenFile});
+  const _ItemView({super.key, required this.item, required this.onOpenFile});
 
   @override
   Widget build(BuildContext context) {
@@ -468,7 +523,7 @@ class _ItemView extends StatelessWidget {
       default:
         return Padding(
           padding: const EdgeInsets.only(bottom: 16),
-          child: ChatMarkdown(item.text),
+          child: _MessageMenuRegion(child: ChatMarkdown(item.text, contextMenuBuilder: messageMenu(item.text))),
         );
     }
   }
@@ -492,7 +547,11 @@ class _UserBubble extends StatelessWidget {
             borderRadius: BorderRadius.circular(12),
             border: Border.all(color: Cr.borderSubtle),
           ),
-          child: SelectableText(text, style: const TextStyle(color: Cr.text, fontSize: 14.5, height: 1.45)),
+          child: _MessageMenuRegion(
+            child: SelectableText(text,
+                contextMenuBuilder: messageMenu(text),
+                style: const TextStyle(color: Cr.text, fontSize: 14.5, height: 1.45)),
+          ),
         ),
       ),
     );
@@ -637,7 +696,8 @@ class _FilesChangedState extends State<_FilesChanged> {
           InkWell(
             borderRadius: BorderRadius.circular(Cr.radiusMd),
             onTap: () => setState(() => _open = !_open),
-            child: Padding(
+            child: Container(
+              constraints: const BoxConstraints(minHeight: 44),
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
               child: Row(children: [
                 Icon(_open ? Icons.expand_more_rounded : Icons.chevron_right_rounded, size: 18, color: Cr.textFaint),
@@ -659,7 +719,8 @@ class _FilesChangedState extends State<_FilesChanged> {
                   for (final f in files)
                     InkWell(
                       onTap: f.kind == 'deleted' ? null : () => widget.onOpen(f),
-                      child: Padding(
+                      child: Container(
+                        constraints: const BoxConstraints(minHeight: 44),
                         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                         child: Row(children: [
                           Icon(_kindIcon(f.kind), size: 15, color: Cr.textFaint),
@@ -727,13 +788,15 @@ class _PermissionCard extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
               OutlinedButton(
-                style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10)),
+                style: OutlinedButton.styleFrom(
+                    minimumSize: const Size(64, 44), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10)),
                 onPressed: onReject,
                 child: Text(request.rejectLabel),
               ),
               const SizedBox(width: 8),
               FilledButton(
-                style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10)),
+                style: FilledButton.styleFrom(
+                    minimumSize: const Size(64, 44), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10)),
                 onPressed: onApprove,
                 child: Text(request.approveLabel),
               ),
@@ -874,15 +937,19 @@ class _Composer extends StatelessWidget {
                         if (running)
                           IconButton.filled(
                             tooltip: 'Stop',
+                            constraints: Cr.tapTarget,
+                            visualDensity: VisualDensity.standard,
                             style: IconButton.styleFrom(backgroundColor: Cr.surfaceHover),
                             icon: const Icon(Icons.stop_rounded, size: 18),
-                            onPressed: composer == null || composer.canStop ? store.stop : null,
+                            onPressed: store.canStop ? store.stop : null,
                           )
                         else
                           ValueListenableBuilder<TextEditingValue>(
                             valueListenable: controller,
                             builder: (context, value, _) => IconButton.filled(
                               tooltip: 'Send',
+                              constraints: Cr.tapTarget,
+                              visualDensity: VisualDensity.standard,
                               icon: const Icon(Icons.arrow_upward_rounded, size: 18),
                               onPressed: canAct && value.text.trim().isNotEmpty ? onSend : null,
                             ),
@@ -918,6 +985,19 @@ class _Chip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // The pill stays small; the transparent band around it makes the tap area 44 px tall.
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      excludeFromSemantics: true,
+      onTap: onTap,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 44),
+        child: Center(widthFactor: 1, heightFactor: 1, child: _pill()),
+      ),
+    );
+  }
+
+  Widget _pill() {
     return Material(
       color: Cr.surface,
       borderRadius: BorderRadius.circular(999),

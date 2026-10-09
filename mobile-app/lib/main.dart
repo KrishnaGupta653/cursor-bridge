@@ -25,43 +25,22 @@ void main() async {
   runApp(const MyApp());
 }
 
-final ThemeData lightTheme = buildCrLightTheme();
 final ThemeData darkTheme = buildCrDarkTheme();
 
 // ============================================================
 // App Root
 // ============================================================
-class MyApp extends StatefulWidget {
+class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
-  @override
-  State<MyApp> createState() => _MyAppState();
-}
-
-class _MyAppState extends State<MyApp> {
-  @override
-  void initState() {
-    super.initState();
-    AppSettings().addListener(_onSettingsChanged);
-  }
-
-  @override
-  void dispose() {
-    AppSettings().removeListener(_onSettingsChanged);
-    super.dispose();
-  }
-
-  void _onSettingsChanged() {
-    setState(() {});
-  }
-
+  // Dark-only, like Cursor's Agents window: the screens use fixed Cr colors.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Cursor Remote',
-      theme: lightTheme,
+      theme: darkTheme,
       darkTheme: darkTheme,
-      themeMode: AppSettings().themeModeValue,
+      themeMode: ThemeMode.dark,
       home: const HomePage(),
     );
   }
@@ -4266,19 +4245,6 @@ class _SettingsPageState extends State<SettingsPage> {
               children: [
                 const Padding(
                   padding: EdgeInsets.fromLTRB(16, 14, 16, 4),
-                  child: CrSectionLabel('Appearance'),
-                ),
-                _buildThemeModeTile(),
-              ],
-            ),
-          ),
-          CrPanel(
-            margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(16, 14, 16, 4),
                   child: CrSectionLabel('Features'),
                 ),
                 _buildShowHistoryTile(),
@@ -4299,82 +4265,6 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildThemeModeTile() {
-    return ListTile(
-      leading: Container(
-        padding: const EdgeInsets.all(8),
-        decoration: BoxDecoration(
-          color: Cr.accentSoft,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Icon(
-          _getThemeIcon(_settings.themeMode),
-          color: Cr.accent,
-          size: 20,
-        ),
-      ),
-      title: const Text('Theme'),
-      subtitle: Text(_getThemeModeLabel(_settings.themeMode)),
-      trailing: const Icon(Icons.chevron_right, color: Cr.textFaint),
-      onTap: () => _showThemeModeDialog(),
-    );
-  }
-
-  IconData _getThemeIcon(ThemeModeSetting mode) {
-    switch (mode) {
-      case ThemeModeSetting.light:
-        return Icons.light_mode;
-      case ThemeModeSetting.dark:
-        return Icons.dark_mode;
-      case ThemeModeSetting.system:
-        return Icons.brightness_auto;
-    }
-  }
-
-  String _getThemeModeLabel(ThemeModeSetting mode) {
-    switch (mode) {
-      case ThemeModeSetting.light:
-        return 'Light';
-      case ThemeModeSetting.dark:
-        return 'Dark';
-      case ThemeModeSetting.system:
-        return 'System default';
-    }
-  }
-
-  void _showThemeModeDialog() {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Select Theme'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: ThemeModeSetting.values.map((mode) {
-            return RadioListTile<ThemeModeSetting>(
-              title: Row(
-                children: [
-                  Icon(_getThemeIcon(mode), size: 20),
-                  const SizedBox(width: 12),
-                  Text(_getThemeModeLabel(mode)),
-                ],
-              ),
-              value: mode,
-              // ignore: deprecated_member_use
-              groupValue: _settings.themeMode,
-              // ignore: deprecated_member_use
-              onChanged: (value) {
-                if (value != null) {
-                  _settings.setThemeMode(value);
-                  Navigator.of(context).pop();
-                }
-              },
-            );
-          }).toList(),
-        ),
       ),
     );
   }

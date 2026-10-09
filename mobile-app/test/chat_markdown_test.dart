@@ -46,4 +46,46 @@ void main() {
       await tester.pumpAndSettle();
     }
   });
+
+  test('registered languages and their aliases are highlighted; others stay plain text', () {
+    bool styled(List<TextSpan> spans) =>
+        spans.any((s) => s.style != null || (s.children ?? const []).whereType<TextSpan>().any((c) => c.style != null));
+    expect(styled(CodeBlock.highlightSpans('final x = 1;\nvoid main() {}', 'dart')), isTrue);
+    expect(styled(CodeBlock.highlightSpans('const a: number = 1;', 'ts')), isTrue);
+    expect(styled(CodeBlock.highlightSpans('<div class="a"></div>', 'html')), isTrue);
+    expect(styled(CodeBlock.highlightSpans('echo hi', 'sh')), isTrue);
+
+    for (final lang in ['cobol', 'ruby', '', null]) {
+      final spans = CodeBlock.highlightSpans('MOVE 1 TO X.', lang);
+      expect(spans.single.text, 'MOVE 1 TO X.', reason: '$lang');
+      expect(spans.single.style, isNull, reason: '$lang');
+    }
+  });
+
+  testWidgets('a fenced block in an unknown language renders as plain monospace', (tester) async {
+    await tester.pumpWidget(host('```cobol\nDISPLAY "HI".\n```'));
+    expect(tester.takeException(), isNull);
+    expect(find.byType(CodeBlock), findsOneWidget);
+    expect(find.textContaining('DISPLAY "HI".', findRichText: true), findsOneWidget);
+  });
+
+  testWidgets('the code block copy button copies the exact code and shows a check for a moment', (tester) async {
+    String? copied;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.setData') copied = (call.arguments as Map)['text'] as String?;
+      return null;
+    });
+    addTearDown(() => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, null));
+    const code = 'void main() {\n  print("hi");\n}';
+    await tester.pumpWidget(host('Run this:\n\n```dart\n$code\n```\n'));
+
+    await tester.tap(find.byTooltip('Copy code'));
+    await tester.pump();
+    expect(copied, code);
+    expect(find.byIcon(Icons.check_rounded), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 1600));
+    expect(find.byIcon(Icons.copy_rounded), findsOneWidget);
+    expect(find.byTooltip('Copy code'), findsOneWidget);
+  });
 }

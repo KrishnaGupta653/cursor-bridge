@@ -21,6 +21,38 @@ class _AgentsShellState extends State<AgentsShell> {
 
   ChatStore get store => widget.store;
 
+  bool get _picked => store.draft || store.selectedChatId != null;
+  late bool _lastPicked;
+
+  @override
+  void initState() {
+    super.initState();
+    _lastPicked = _picked;
+    store.addListener(_onStore);
+  }
+
+  @override
+  void didUpdateWidget(covariant AgentsShell oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.store != widget.store) {
+      oldWidget.store.removeListener(_onStore);
+      widget.store.addListener(_onStore);
+      _lastPicked = _picked;
+    }
+  }
+
+  @override
+  void dispose() {
+    store.removeListener(_onStore);
+    super.dispose();
+  }
+
+  /// The chat pane listens for itself; the shell only swaps between sidebar and chat.
+  void _onStore() {
+    if (_picked == _lastPicked) return;
+    setState(() => _lastPicked = _picked);
+  }
+
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(builder: (context, constraints) {
@@ -47,24 +79,18 @@ class _AgentsShellState extends State<AgentsShell> {
           Expanded(child: AgentChatPane(store: store)),
         ]);
       }
-      return ListenableBuilder(
-        listenable: store,
-        builder: (context, _) {
-          final picked = store.draft || store.selectedChatId != null;
-          return Scaffold(
-            key: _scaffold,
-            backgroundColor: Cr.bg,
-            drawer: Drawer(
-              width: Cr.sidebarWidth,
-              backgroundColor: Cr.bgElevated,
-              shape: const RoundedRectangleBorder(),
-              child: SafeArea(child: sidebar),
-            ),
-            body: picked
-                ? AgentChatPane(store: store, onOpenSidebar: () => _scaffold.currentState?.openDrawer())
-                : Material(color: Cr.bgElevated, child: sidebar),
-          );
-        },
+      return Scaffold(
+        key: _scaffold,
+        backgroundColor: Cr.bg,
+        drawer: Drawer(
+          width: Cr.sidebarWidth,
+          backgroundColor: Cr.bgElevated,
+          shape: const RoundedRectangleBorder(),
+          child: SafeArea(child: sidebar),
+        ),
+        body: _picked
+            ? AgentChatPane(store: store, onOpenSidebar: () => _scaffold.currentState?.openDrawer())
+            : Material(color: Cr.bgElevated, child: sidebar),
       );
     });
   }
@@ -86,141 +112,194 @@ class _AgentsSidebarState extends State<AgentsSidebar> {
 
   ChatStore get store => widget.store;
 
+  /// Everything the sidebar shows. A streaming reply notifies the store many times a second
+  /// without changing any of it, so those notifications skip the rebuild.
+  Object _shown() {
+    final c = store.liveComposer;
+    return (
+      store.chats,
+      store.query,
+      store.selectedChatId,
+      store.draft,
+      store.loadingChats,
+      store.sidebarLive,
+      store.hasMoreChats,
+      c != null && c.running ? c.chatId : null,
+    );
+  }
+
+  late Object _lastShown;
+
+  @override
+  void initState() {
+    super.initState();
+    _lastShown = _shown();
+    store.addListener(_onStore);
+  }
+
+  @override
+  void didUpdateWidget(covariant AgentsSidebar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.store != widget.store) {
+      oldWidget.store.removeListener(_onStore);
+      widget.store.addListener(_onStore);
+      _lastShown = _shown();
+    }
+  }
+
   @override
   void dispose() {
+    store.removeListener(_onStore);
     _search.dispose();
     super.dispose();
   }
 
+  void _onStore() {
+    final shown = _shown();
+    if (shown == _lastShown) return;
+    setState(() => _lastShown = shown);
+  }
+
   @override
   Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: store,
-      builder: (context, _) {
-        final sections = store.sections;
-        final pinned = sections.where((s) => s.pinned).toList();
-        final repos = sections.where((s) => !s.pinned).toList();
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 10, 10, 6),
-              child: Material(
-                color: store.draft ? Cr.surfaceHover : Colors.transparent,
-                borderRadius: BorderRadius.circular(Cr.radiusSm),
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(Cr.radiusSm),
-                  onTap: widget.onNewChat,
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-                    child: Row(children: [
-                      Icon(Icons.edit_square, size: 16, color: Cr.text),
-                      SizedBox(width: 10),
-                      Expanded(
-                        child: Text('New Chat',
-                            style: TextStyle(color: Cr.text, fontSize: 13.5, fontWeight: FontWeight.w600)),
-                      ),
-                      Text('⌘N', style: TextStyle(color: Cr.textFaint, fontSize: 11.5)),
-                    ]),
+    final sections = store.sections;
+    final pinned = sections.where((s) => s.pinned).toList();
+    final repos = sections.where((s) => !s.pinned).toList();
+    // Chat rows are built lazily as they scroll in; the few labels and headers are built up front.
+    final entries = <Object>[
+      if (store.chats.isEmpty)
+        Padding(
+          padding: const EdgeInsets.all(24),
+          child: Center(
+            child: store.loadingChats
+                ? const CircularProgressIndicator(strokeWidth: 2)
+                : Text(
+                    store.sidebarLive
+                        ? 'No chats yet. Tap New Chat to start one.'
+                        : 'No chats found on the Mac. Open the Cursor Agents window there, then pull to refresh.',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Cr.textSecondary)),
+          ),
+        ),
+      if (sections.isEmpty && store.chats.isNotEmpty)
+        const Padding(
+          padding: EdgeInsets.all(20),
+          child: Text('No chats match your search.',
+              textAlign: TextAlign.center, style: TextStyle(color: Cr.textSecondary, fontSize: 13)),
+        ),
+      for (final s in pinned) ...[
+        const _SectionLabel('Pinned'),
+        ...s.rows,
+      ],
+      if (repos.isNotEmpty) const _SectionLabel('Repositories'),
+      for (final s in repos) ...[
+        _GroupHeader(
+          key: ValueKey('group:${s.name}'),
+          name: s.name,
+          count: s.rows.length,
+          collapsed: _collapsed.contains(s.name),
+          onTap: () =>
+              setState(() => _collapsed.contains(s.name) ? _collapsed.remove(s.name) : _collapsed.add(s.name)),
+        ),
+        if (!_collapsed.contains(s.name)) ...s.rows,
+      ],
+      if (store.hasMoreChats)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(10, 6, 10, 0),
+          child: TextButton(
+            onPressed: store.loadingChats ? null : store.loadMoreChats,
+            child: Text(store.loadingChats ? 'Loading…' : 'More'),
+          ),
+        ),
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(10, 10, 10, 6),
+          child: Material(
+            color: store.draft ? Cr.surfaceHover : Colors.transparent,
+            borderRadius: BorderRadius.circular(Cr.radiusSm),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(Cr.radiusSm),
+              onTap: widget.onNewChat,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+                child: Row(children: [
+                  Icon(Icons.edit_square, size: 16, color: Cr.text),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text('New Chat',
+                        style: TextStyle(color: Cr.text, fontSize: 13.5, fontWeight: FontWeight.w600)),
                   ),
-                ),
+                  Text('⌘N', style: TextStyle(color: Cr.textFaint, fontSize: 11.5)),
+                ]),
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
-              child: TextField(
-                controller: _search,
-                onChanged: store.search,
-                style: const TextStyle(fontSize: 13, color: Cr.text),
-                decoration: InputDecoration(
-                  isDense: true,
-                  hintText: 'Search',
-                  prefixIcon: const Icon(Icons.search_rounded, size: 17),
-                  prefixIconConstraints: const BoxConstraints(minWidth: 34),
-                  suffixIcon: store.query.isEmpty
-                      ? null
-                      : IconButton(
-                          tooltip: 'Clear',
-                          iconSize: 16,
-                          icon: const Icon(Icons.close_rounded),
-                          onPressed: () {
-                            _search.clear();
-                            store.search('');
-                          },
-                        ),
-                  contentPadding: const EdgeInsets.symmetric(vertical: 9),
-                ),
-              ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+          child: TextField(
+            controller: _search,
+            onChanged: store.search,
+            style: const TextStyle(fontSize: 13, color: Cr.text),
+            decoration: InputDecoration(
+              isDense: true,
+              hintText: 'Search',
+              prefixIcon: const Icon(Icons.search_rounded, size: 17),
+              // As tall as the Clear button's tap area, so the field doesn't jump when it appears.
+              prefixIconConstraints: const BoxConstraints(minWidth: 34, minHeight: 44),
+              suffixIcon: store.query.isEmpty
+                  ? null
+                  : IconButton(
+                      tooltip: 'Clear',
+                      iconSize: 16,
+                      constraints: Cr.tapTarget,
+                      visualDensity: VisualDensity.standard,
+                      icon: const Icon(Icons.close_rounded),
+                      onPressed: () {
+                        _search.clear();
+                        store.search('');
+                      },
+                    ),
+              suffixIconConstraints: Cr.tapTarget,
+              contentPadding: const EdgeInsets.symmetric(vertical: 9),
             ),
-            if (!store.sidebarLive && store.chats.isNotEmpty)
-              const Padding(
-                padding: EdgeInsets.fromLTRB(14, 0, 14, 6),
-                child: Text(
-                    'Live view off — showing chats saved on the Mac. To control agents, open the Agents window '
-                    'or run "Cursor Remote: Restart Cursor with Session Control" on the Mac.',
-                    style: TextStyle(color: Cr.textFaint, fontSize: 11.5)),
-              ),
-            Expanded(
-              child: RefreshIndicator(
-                onRefresh: store.refreshChats,
-                child: ListView(
-                  padding: const EdgeInsets.only(bottom: 16),
-                  children: [
-                    if (store.chats.isEmpty)
-                      Padding(
-                        padding: const EdgeInsets.all(24),
-                        child: Center(
-                          child: store.loadingChats
-                              ? const CircularProgressIndicator(strokeWidth: 2)
-                              : Text(
-                                  store.sidebarLive
-                                      ? 'No chats yet. Tap New Chat to start one.'
-                                      : 'No chats found on the Mac. Open the Cursor Agents window there, then pull to refresh.',
-                                  textAlign: TextAlign.center,
-                                  style: const TextStyle(color: Cr.textSecondary)),
-                        ),
-                      ),
-                    if (sections.isEmpty && store.chats.isNotEmpty)
-                      const Padding(
-                        padding: EdgeInsets.all(20),
-                        child: Text('No chats match your search.',
-                            textAlign: TextAlign.center, style: TextStyle(color: Cr.textSecondary, fontSize: 13)),
-                      ),
-                    for (final s in pinned) ...[
-                      const _SectionLabel('Pinned'),
-                      for (final r in s.rows) _row(r),
-                    ],
-                    if (repos.isNotEmpty) const _SectionLabel('Repositories'),
-                    for (final s in repos) ...[
-                      _GroupHeader(
-                        name: s.name,
-                        count: s.rows.length,
-                        collapsed: _collapsed.contains(s.name),
-                        onTap: () => setState(() =>
-                            _collapsed.contains(s.name) ? _collapsed.remove(s.name) : _collapsed.add(s.name)),
-                      ),
-                      if (!_collapsed.contains(s.name))
-                        for (final r in s.rows) _row(r),
-                    ],
-                    if (store.hasMoreChats)
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(10, 6, 10, 0),
-                        child: TextButton(
-                          onPressed: store.loadingChats ? null : store.loadMoreChats,
-                          child: Text(store.loadingChats ? 'Loading…' : 'More'),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
+          ),
+        ),
+        if (!store.sidebarLive && store.chats.isNotEmpty)
+          const Padding(
+            padding: EdgeInsets.fromLTRB(14, 0, 14, 6),
+            child: Text(
+                'Live view off — showing chats saved on the Mac. To control agents, open the Agents window '
+                'or run "Cursor Remote: Restart Cursor with Session Control" on the Mac.',
+                style: TextStyle(color: Cr.textFaint, fontSize: 11.5)),
+          ),
+        Expanded(
+          child: RefreshIndicator(
+            onRefresh: store.refreshChats,
+            child: ListView.builder(
+              padding: const EdgeInsets.only(bottom: 16),
+              itemCount: entries.length,
+              itemBuilder: (context, i) {
+                final e = entries[i];
+                return e is ChatRow ? _row(e) : e as Widget;
+              },
+              findChildIndexCallback: (key) {
+                if (key is! ValueKey<String>) return null;
+                final i = entries.indexWhere((e) => e is ChatRow && e.id == key.value);
+                return i < 0 ? null : i;
+              },
             ),
-          ],
-        );
-      },
+          ),
+        ),
+      ],
     );
   }
 
   Widget _row(ChatRow r) => ChatRowTile(
+        key: ValueKey(r.id),
         row: r,
         selected: !store.draft && r.id == store.selectedChatId,
         running: r.id == store.liveComposer?.chatId && (store.liveComposer?.running ?? false),
@@ -247,7 +326,7 @@ class _GroupHeader extends StatelessWidget {
   final int count;
   final bool collapsed;
   final VoidCallback onTap;
-  const _GroupHeader({required this.name, required this.count, required this.collapsed, required this.onTap});
+  const _GroupHeader({super.key, required this.name, required this.count, required this.collapsed, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -291,6 +370,13 @@ class ChatRowTile extends StatelessWidget {
             : row.unread
                 ? Cr.accent
                 : null;
+    final status = isRunning
+        ? 'running'
+        : row.waiting
+            ? 'waiting for approval'
+            : row.status == 'error'
+                ? 'error'
+                : 'idle';
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8),
       child: Material(
@@ -302,15 +388,18 @@ class ChatRowTile extends StatelessWidget {
           child: Padding(
             padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
             child: Row(children: [
-              SizedBox(
-                width: 14,
-                child: isRunning
-                    ? const SizedBox(
-                        width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.4, color: Cr.warning))
-                    : dot == null
-                        ? null
-                        : Container(
-                            width: 7, height: 7, decoration: BoxDecoration(color: dot, shape: BoxShape.circle)),
+              Semantics(
+                label: status,
+                child: SizedBox(
+                  width: 14,
+                  child: isRunning
+                      ? const SizedBox(
+                          width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.4, color: Cr.warning))
+                      : dot == null
+                          ? null
+                          : Container(
+                              width: 7, height: 7, decoration: BoxDecoration(color: dot, shape: BoxShape.circle)),
+                ),
               ),
               const SizedBox(width: 6),
               Expanded(

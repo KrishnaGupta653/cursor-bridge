@@ -25,6 +25,8 @@ class ChatStore extends ChangeNotifier {
   bool loadingChats = false;
   String query = '';
   int _othersLoaded = 0;
+  /// Only the reply to the newest `list_chats` is applied; an older one may arrive late.
+  String? _chatsRequest;
 
   String? selectedChatId;
 
@@ -60,8 +62,9 @@ class ChatStore extends ChangeNotifier {
 
   String _nextId() => 'app-${DateTime.now().microsecondsSinceEpoch}-${_seq++}';
 
-  Future<String?> _command(String type, [Map<String, dynamic> fields = const {}]) async {
-    final id = _nextId();
+  /// Pass [id] when a reply must be expected before the command leaves.
+  Future<String?> _command(String type, [Map<String, dynamic> fields = const {}, String? id]) async {
+    id ??= _nextId();
     _sent[id] = type;
     if (type == 'get_chat' && fields['chatId'] != null) _sentChat[id] = fields['chatId'].toString();
     if (_sent.length > 200) {
@@ -130,7 +133,7 @@ class ChatStore extends ChangeNotifier {
     await _command('list_chats', {
       'limit': chatsPageSize,
       if (query.trim().isNotEmpty) 'query': query.trim(),
-    });
+    }, _chatsRequest = _nextId());
   }
 
   Future<void> loadMoreChats() async {
@@ -142,7 +145,7 @@ class ChatStore extends ChangeNotifier {
       'limit': chatsPageSize,
       'expand': true,
       if (query.trim().isNotEmpty) 'query': query.trim(),
-    });
+    }, _chatsRequest = _nextId());
   }
 
   void search(String value) {
@@ -214,7 +217,13 @@ class ChatStore extends ChangeNotifier {
     }
   }
 
-  Future<void> stop() => _command('agent_stop', {if (selectedChatId != null) 'chatId': selectedChatId});
+  /// A draft has no chat to stop until Cursor names it; a bare Stop could hit the chat open before.
+  bool get canStop => !draft && selectedChatId != null && (liveComposer?.canStop ?? true);
+
+  Future<void> stop() async {
+    if (!canStop) return;
+    await _command('agent_stop', {'chatId': selectedChatId});
+  }
 
   Future<void> setModel(String model) =>
       _command('set_model', {'model': model, if (selectedChatId != null) 'chatId': selectedChatId});
@@ -245,10 +254,15 @@ class ChatStore extends ChangeNotifier {
   Future<FileDiff> fileDiff(String path) async {
     final chatId = selectedChatId;
     if (chatId == null) throw StateError('No chat selected');
-    final id = await _command('get_file_diff', {'chatId': chatId, 'path': path});
-    if (id == null) throw StateError(error ?? 'Could not request the diff');
+    final id = _nextId();
     final completer = Completer<FileDiff>();
     _diffs[id] = completer;
+    // reset() may fail it before anyone listens.
+    completer.future.ignore();
+    if (await _command('get_file_diff', {'chatId': chatId, 'path': path}, id) == null) {
+      _diffs.remove(id);
+      throw StateError(error ?? 'Could not request the diff');
+    }
     return completer.future.timeout(const Duration(seconds: 30), onTimeout: () {
       _diffs.remove(id);
       throw TimeoutException('The diff did not arrive. Check the connection and try again.');
@@ -319,6 +333,7 @@ class ChatStore extends ChangeNotifier {
     final correlationId = data['correlationId']?.toString();
     switch (type) {
       case 'chats':
+        if (correlationId != null && _chatsRequest != null && correlationId != _chatsRequest) return true;
         _applyChats(data);
         break;
       case 'chat':
@@ -350,7 +365,8 @@ class ChatStore extends ChangeNotifier {
         _sent.remove(correlationId);
         awaitingReply = false;
         pendingPrompt = null;
-        final chatId = data['chatId']?.toString() ?? composer?.chatId;
+        // No fallback to the composer's chat: during a draft that is still the chat open before.
+        final chatId = data['chatId']?.toString();
         if (draft && chatId != null && chatId.isNotEmpty) {
           unawaited(selectChat(chatId));
           unawaited(refreshChats());
@@ -459,6 +475,7 @@ class ChatStore extends ChangeNotifier {
       }
       return;
     }
+    if (type == 'list_chats' && correlationId != _chatsRequest) return;
     final message = (data['error_message'] ?? data['error'] ?? 'Command failed').toString();
     if (type == 'get_file_diff') {
       _diffs.remove(correlationId)?.completeError(StateError(message));
