@@ -397,7 +397,7 @@ If the Telegram bot is set up, you can pair a phone while away from the Mac:
 |------------------|-------------|
 | `/app` | Link to the web app (pre-fills the relay session ID when there is one) |
 | `/relay` | Relay session ID and whether the Mac is connected to it |
-| `/pair` | One-time pairing code for the phone |
+| `/pair` | One-tap link that pairs the phone; the one-time code is also shown |
 
 - `/pair` works only for the authorized user in the authorized private chat, with
   `cursorRemote.remoteActions` on and the Mac already connected to a relay session. It never

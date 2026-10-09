@@ -357,13 +357,17 @@ From the Telegram bot (if you set it up):
 |------------------|-------------|
 | `/app` | Link to the web app (pre-fills the relay session ID when there is one) |
 | `/relay` | Relay session ID and whether the Mac is connected to it |
-| `/pair` | One-time pairing code for the phone, for pairing when you are away from the Mac |
+| `/pair` | One-tap link that pairs the phone (the one-time code is also shown), for pairing when you are away from the Mac |
 
 `/pair` codes are always single use and expire after 5 minutes (even with
 `cursorRemote.reusablePairingCode` on); the message is deleted when the code expires. `/pair` needs
 remote actions on and the Mac connected to a relay session, allows 3 codes per 15 minutes, shows a
 notification on the Mac and is written to the audit log without the code. Telegram bot chats are not
 end-to-end encrypted, so keep the bot token private.
+
+The one-tap link carries the code after `#` (`/?session=ABC123#code=…`). Browsers never send that part
+to a server, link previews are off for the message, and the app removes it from the address bar before
+it starts. Don't forward the message: whoever taps first gets the device slot (the Mac is notified).
 
 ### Keep the Mac awake
 
