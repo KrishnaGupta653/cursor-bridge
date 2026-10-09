@@ -67,6 +67,11 @@ How relay sessions behave:
 - A session lasts **24 hours**. After that, or if the ID is already taken, the extension switches to
   a new random ID and you pair the phone again. An ID is never reused.
 - Pairing codes work once and expire after **5 minutes**.
+- Optional `cursorRemote.reusablePairingCode`: one code for the whole session, for up to 3 devices,
+  shown again each time you run Pair Relay Client. Anyone who sees it can join until the session ends
+  or you start a new one, so keep it private. You get a notification for every device that joins.
+- The app stays logged in through page refreshes and restarts until the session ends or you tap
+  **Log out** in the app.
 - After Cursor restarts, one window reconnects to the last session on its own; the phone keeps working.
 - **Cursor Remote: Start New Relay Session** revokes the current session and shows a new pairing
   code. **Cursor Remote: Revoke Relay Session** just revokes it.
@@ -193,6 +198,10 @@ Cursor Remote는 `127.0.0.1:9222`의 Chrome DevTools Protocol로 Cursor 창을 �
 - 세션은 **24시간** 유지됩니다. 만료되거나 이미 사용된 ID이면 새 ID로 바뀌고 휴대폰을 다시
   페어링합니다. 한 번 쓴 ID는 다시 쓸 수 없습니다.
 - 페어링 코드는 한 번만 쓸 수 있고 **5분** 후 만료됩니다.
+- 선택 설정 `cursorRemote.reusablePairingCode`: 세션 전체에 코드 하나(최대 3대), Pair Relay Client를 다시
+  실행하면 같은 코드를 보여 줍니다. 코드를 본 사람은 세션이 끝나거나 새 세션을 시작할 때까지 접속할 수
+  있으니 공유하지 마세요. 기기가 참여할 때마다 알림이 뜹니다.
+- 앱은 세션이 끝나거나 앱에서 **Log out**할 때까지 새로 고침·재시작 후에도 로그인을 유지합니다.
 - Cursor를 다시 시작하면 한 창이 마지막 세션에 자동으로 다시 연결됩니다.
 - **Start New Relay Session**은 현재 세션을 폐기하고 새 코드를 보여주고, **Revoke Relay Session**은
   폐기만 합니다.

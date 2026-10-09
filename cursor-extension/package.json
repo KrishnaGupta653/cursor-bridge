@@ -2,7 +2,7 @@
   "name": "cursor-remote-extension",
   "displayName": "Cursor Remote",
   "description": "Remote control Cursor AI from your mobile device via WebSocket or Relay Server - Code anywhere, anytime with session-based connection",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "publisher": "jaloveeye",
   "license": "MIT",
   "repository": {
@@ -110,6 +110,11 @@
           ],
           "default": "enabled",
           "markdownDescription": "Lets paired phones and Telegram open chats, start new chats, switch model or mode, stop the agent, and approve or reject its requests. Approve and reject always need a confirm tap and only act on the exact request shown. Every action is written to the Cursor Remote output as an `[Audit]` line. Set to `disabled` to turn all of these off."
+        },
+        "cursorRemote.reusablePairingCode": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Use one pairing code for the whole relay session (up to 3 devices) instead of a new single-use code each time. Anyone who sees the code can connect until the session ends or you start a new session. You are notified of every device that joins. Turning this off does not cancel a code already shown; run **Cursor Remote: Start New Relay Session** for that. Needs a relay that supports reusable codes; otherwise you get a single-use code."
         },
         "cursorRemote.allowedWebSocketOrigins": {
           "type": "array",

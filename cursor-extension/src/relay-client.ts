@@ -47,6 +47,40 @@ export interface RelayMessage {
   timestamp?: number;
 }
 
+export interface PairingCode {
+  code: string;
+  /** False when single use, also when an older relay ignored the request for a reusable code. */
+  reusable: boolean;
+  expiresAt: number;
+  usesLeft?: number;
+}
+
+export interface DevicePaired {
+  sessionId: string;
+  deviceId: string;
+  reusable: boolean;
+  usesLeft: number;
+}
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/** How long a pairing code lasts and how often it can be used, for the pairing dialog title. */
+export function pairingCodeTerms(pairing: PairingCode, requestedReusable: boolean, now = Date.now()): string {
+  if (!pairing.reusable) {
+    const minutes = Math.max(1, Math.round((pairing.expiresAt - now) / 60_000));
+    return `single use, expires in ${plural(minutes, "minute")}${requestedReusable ? "; this relay does not offer reusable codes yet" : ""}`;
+  }
+  const minutes = Math.max(1, Math.floor((pairing.expiresAt - now) / 60_000));
+  const valid = minutes >= 60 ? `${plural(Math.floor(minutes / 60), "hour")} ${plural(minutes % 60, "minute")}` : plural(minutes, "minute");
+  return `reusable: ${plural(pairing.usesLeft ?? 0, "use")} left, valid for ${valid}`;
+}
+
+export function devicePairedMessage(event: DevicePaired): string {
+  return event.reusable
+    ? `Cursor Remote: a new device joined relay session ${event.sessionId} (${plural(event.usesLeft, "pairing use")} left).`
+    : `Cursor Remote: a new device joined relay session ${event.sessionId}.`;
+}
+
 export interface Session {
   sessionId: string;
   createdAt: number;
@@ -67,6 +101,7 @@ export class RelayClient {
   private onSessionExpiredCallback: ((expired: string, next: string) => void) | null = null;
   private onRejectedCallback: ((sid: string, statusCode: number) => void) | null = null;
   private onTargetGoneCallback: ((clientId: string) => void) | null = null;
+  private onDevicePairedCallback: ((event: DevicePaired) => void) | null = null;
   private connectInFlight: Promise<void> | null = null;
   /** 익스텐션 시작 시 사용자가 입력한 세션 ID (이 세션만 연결 시도) */
   private targetSessionId: string | null = null;
@@ -139,6 +174,11 @@ export class RelayClient {
   /** Called with the client ID of a phone the relay no longer delivers to (it left the session). */
   setOnTargetGone(callback: (clientId: string) => void) {
     this.onTargetGoneCallback = callback;
+  }
+
+  /** Called whenever the relay enrolled a new device into this Mac's session. */
+  setOnDevicePaired(callback: (event: DevicePaired) => void) {
+    this.onDevicePairedCallback = callback;
   }
 
   /**
@@ -325,6 +365,12 @@ export class RelayClient {
         this.log(
           `📨 Processing message: id=${msg.id}, type=${msg.type}, from=${msg.from}`
         );
+        // Phones can't send as "relay": /api/send stamps their role into `from`.
+        if (msg?.type === "device_paired" && msg.from === "relay") {
+          try { await this.devicePaired(msg.data); }
+          catch { this.logError(`Relay notice ${msg.id} dropped`); }
+          continue;
+        }
         // Forward message to callback (Extension WebSocket server)
         if (this.onMessageCallback) {
           try {
@@ -379,6 +425,8 @@ export class RelayClient {
    * connects to a brand-new one. Returns the new session ID, or null if it could not connect.
    */
   async startNewSession(): Promise<string | null> {
+    const previous = this.sessionId ?? this.targetSessionId;
+    if (previous) await this.secrets?.delete(this.pairingCodeKey(previous));
     if (this.isConnected) {
       try { await this.disconnectSession(); } catch { /* already revoked or expired */ }
     }
@@ -394,15 +442,67 @@ export class RelayClient {
   }
 
   async createMobilePairingCode(): Promise<string> {
+    return (await this.getPairingCode(false)).code;
+  }
+
+  private pairingCodeKey(sid: string): string {
+    return `cursorRemote.relay.v2.pairing:${this.relayServerUrl}:${sid}`;
+  }
+
+  private async savedPairingCode(sid: string): Promise<PairingCode | null> {
+    const raw = await this.secrets?.get(this.pairingCodeKey(sid));
+    if (!raw) return null;
+    try {
+      const saved = JSON.parse(raw) as PairingCode;
+      if (typeof saved.code === "string" && saved.reusable && saved.expiresAt > Date.now() && (saved.usesLeft ?? 0) > 0) return saved;
+    } catch { /* replaced below */ }
+    await this.secrets?.delete(this.pairingCodeKey(sid));
+    return null;
+  }
+
+  /**
+   * With [reusable], the session's current reusable code is shown again while it is valid; a new one
+   * (which invalidates the old) is minted only when it is gone, expired or used up.
+   */
+  async getPairingCode(reusable: boolean): Promise<PairingCode> {
     if (!this.isConnected || !this.sessionId) throw new Error("Connect the extension to a relay session first");
-    const result = await this.httpRequestWithStatus(`${this.relayServerUrl}/api/pair`, "POST", { sessionId: this.sessionId });
-    if (result.statusCode !== 200 || typeof result.body?.data?.pairingCode !== "string") throw new Error("Unable to create relay pairing code");
-    return result.body.data.pairingCode;
+    const sid = this.sessionId;
+    if (reusable) {
+      const saved = await this.savedPairingCode(sid);
+      if (saved) return saved;
+    }
+    const result = await this.httpRequestWithStatus(`${this.relayServerUrl}/api/pair`, "POST",
+      { sessionId: sid, ...(reusable ? { reusable: true } : {}) });
+    const data = result.body?.data;
+    if (result.statusCode !== 200 || typeof data?.pairingCode !== "string") throw new Error("Unable to create relay pairing code");
+    const seconds = Number.isFinite(data.expiresInSeconds) && data.expiresInSeconds > 0 ? data.expiresInSeconds : 300;
+    const code: PairingCode = { code: data.pairingCode, reusable: reusable && data.reusable === true, expiresAt: Date.now() + seconds * 1000 };
+    if (code.reusable) {
+      code.usesLeft = Number.isSafeInteger(data.usesLeft) ? data.usesLeft : 0;
+      await this.secrets?.store(this.pairingCodeKey(sid), JSON.stringify(code));
+    }
+    return code;
+  }
+
+  private async devicePaired(data: any): Promise<void> {
+    const sid = this.sessionId;
+    if (!sid || !data || typeof data.deviceId !== "string") return;
+    const usesLeft = Number.isSafeInteger(data.usesLeft) ? data.usesLeft : 0;
+    const reusable = data.reusable === true;
+    if (reusable) {
+      const saved = await this.savedPairingCode(sid);
+      if (saved && usesLeft > 0) {
+        await this.secrets?.store(this.pairingCodeKey(sid), JSON.stringify({ ...saved, usesLeft: Math.min(usesLeft, saved.usesLeft ?? usesLeft) }));
+      } else if (saved) await this.secrets?.delete(this.pairingCodeKey(sid));
+    }
+    this.log(`A new device joined relay session ${sid}${reusable ? ` (${usesLeft} pairing uses left)` : ""}`);
+    this.onDevicePairedCallback?.({ sessionId: sid, deviceId: data.deviceId, reusable, usesLeft });
   }
 
   async disconnectSession(): Promise<void> {
     if (!this.sessionId || !this.capabilityToken) return;
     const sid = this.sessionId;
+    await this.secrets?.delete(this.pairingCodeKey(sid));
     const result = await this.httpRequestWithStatus(`${this.relayServerUrl}/api/disconnect`, "POST", { sessionId: sid });
     if (result.statusCode !== 200) throw new Error("Relay disconnect failed; credentials may already be revoked");
     await this.secrets?.delete(this.credentialKey(sid));
@@ -456,7 +556,10 @@ export class RelayClient {
         const expired = endpoint === "connect" && result.statusCode === 401;
         const taken = endpoint === "session" && result.statusCode === 409;
         if (expired || taken) {
-          if (expired) await this.secrets?.delete(this.credentialKey(sid));
+          if (expired) {
+            await this.secrets?.delete(this.credentialKey(sid));
+            await this.secrets?.delete(this.pairingCodeKey(sid));
+          }
           if (stale()) return;
           this.capabilityToken = null;
           const next = newRelaySessionId();

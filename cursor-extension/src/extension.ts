@@ -4,7 +4,7 @@ import { WebSocketServer } from "./websocket-server";
 import { CommandHandler } from "./command-handler";
 import { CommandRouter } from "./command-router";
 import { StatusBarManager } from "./status-bar";
-import { RELAY_LOCK_PATH, RelayClient, resumeSavedRelaySession } from "./relay-client";
+import { RELAY_LOCK_PATH, RelayClient, devicePairedMessage, pairingCodeTerms, resumeSavedRelaySession } from "./relay-client";
 import { CONFIG } from "./config";
 import { CdpManager } from "./cdp/cdp-manager";
 import { claimOnce, cursorBinary, scheduleRelaunchWithCdp } from "./cdp/relaunch";
@@ -886,12 +886,15 @@ export async function activate(context: vscode.ExtensionContext) {
   relayClient = new RelayClient(relayServerUrl(), outputChannel, context.secrets);
   const showPairingCode = async () => {
     try {
-      const code = await relayClient!.createMobilePairingCode();
-      await vscode.env.clipboard.writeText(code);
+      const wantReusable = vscode.workspace.getConfiguration("cursorRemote").get<boolean>("reusablePairingCode", false);
+      const pairing = await relayClient!.getPairingCode(wantReusable);
+      await vscode.env.clipboard.writeText(pairing.code);
       await vscode.window.showInputBox({
-        title: `Relay session ${relayClient!.getSessionId()} — pairing code copied (single use, expires in 5 minutes)`,
-        value: code, ignoreFocusOut: true,
-        prompt: "In the app, enter the session ID above and this code. Keep the code private." });
+        title: `Relay session ${relayClient!.getSessionId()} — pairing code copied (${pairingCodeTerms(pairing, wantReusable)})`,
+        value: pairing.code, ignoreFocusOut: true,
+        prompt: pairing.reusable
+          ? "In the app, enter the session ID above and this code. Anyone with this code can join until the session ends; Start New Relay Session cancels it."
+          : "In the app, enter the session ID above and this code. Keep the code private." });
     } catch { vscode.window.showErrorMessage("Connect to an authenticated relay session before pairing."); }
   };
   context.subscriptions.push(
@@ -992,6 +995,12 @@ export async function activate(context: vscode.ExtensionContext) {
     wsServer?.triggerMessageHandlers(relayMessage);
   });
   relayClient.setOnTargetGone((clientId) => chatWatcher?.forgetClient(clientId));
+  relayClient.setOnDevicePaired((event) => {
+    updateConnectionsView();
+    void vscode.window
+      .showInformationMessage(devicePairedMessage(event), "Start New Relay Session")
+      .then((pick) => pick && vscode.commands.executeCommand("cursorRemote.newRelaySession"));
+  });
   relayClient.setOnRejected((sid, statusCode) => {
     statusBarManager?.refresh();
     updateConnectionsView();

@@ -2,7 +2,7 @@ import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createServer } from "node:http";
-import { RelayClient, resumeSavedRelaySession } from "../relay-client";
+import { RelayClient, devicePairedMessage, pairingCodeTerms, resumeSavedRelaySession } from "../relay-client";
 
 test("extension relay client persists device credentials and authenticates reconnect, pairing and revocation", async () => {
   const requests: Array<{ path: string; authorization?: string; body: any }> = [];
@@ -313,5 +313,83 @@ test("startup resume reconnects only with a saved login and only in the window h
     assert.equal(relay.requests.length, 0, "a window without the lock never contacts the relay");
     assert.equal(await resumeSavedRelaySession(relay.client, "saved1", () => true), "connected");
     assert.deepEqual(relay.requests.map((r) => r.path), ["/api/connect"]);
+  } finally { await relay.close(); }
+});
+test("a reusable pairing code is requested only when asked for, shown again while valid, and dropped with the session", async () => {
+  let minted = 0;
+  const relay = await fakeRelay({
+    "/api/pair": (body) => [200, { success: true, data: body.reusable === true
+      ? { pairingCode: `r${++minted}`.padEnd(43, "r"), expiresInSeconds: 3600, reusable: true, usesLeft: 3 }
+      : { pairingCode: "s".repeat(43), expiresInSeconds: 300 } }],
+  });
+  try {
+    await relay.client.connectToSessionById("REUSE1");
+    const single = await relay.client.getPairingCode(false);
+    assert.equal(single.reusable, false);
+    const first = await relay.client.getPairingCode(true);
+    const again = await relay.client.getPairingCode(true);
+    assert.equal(first.reusable, true);
+    assert.equal(first.usesLeft, 3);
+    assert.equal(again.code, first.code, "Pair Relay Client shows the same code again");
+    const pairs = relay.requests.filter((r) => r.path === "/api/pair");
+    assert.deepEqual(pairs.map((r) => r.body.reusable), [undefined, true]);
+    assert.ok(Math.abs(first.expiresAt - (Date.now() + 3600_000)) < 5000);
+
+    await relay.client.disconnectSession();
+    assert.equal(relay.secrets.size, 0, "revoking the session forgets its code");
+  } finally { await relay.close(); }
+});
+
+test("an older relay that ignores the reusable flag still pairs with a single-use code", async () => {
+  const relay = await fakeRelay({
+    "/api/pair": () => [200, { success: true, data: { pairingCode: "p".repeat(43) } }],
+  });
+  try {
+    await relay.client.connectToSessionById("OLDRLY");
+    const code = await relay.client.getPairingCode(true);
+    assert.deepEqual([code.code, code.reusable, code.usesLeft], ["p".repeat(43), false, undefined]);
+    assert.ok(code.expiresAt > Date.now() + 290_000 && code.expiresAt <= Date.now() + 300_000);
+    await relay.client.getPairingCode(true);
+    assert.equal(relay.requests.filter((r) => r.path === "/api/pair").length, 2, "a single-use code is never reused");
+    assert.match(pairingCodeTerms(code, true), /single use, expires in 5 minutes; this relay does not offer reusable codes yet/);
+    assert.equal(pairingCodeTerms(code, false), "single use, expires in 5 minutes");
+  } finally { await relay.close(); }
+});
+
+test("device_paired notices from the relay reach the callback, update the code's uses and are never run as commands", async () => {
+  const deadline = Date.now() + 60_000;
+  let messages: any[] = [];
+  let minted = 0;
+  const relay = await fakeRelay({
+    "/api/pair": () => [200, { success: true, data: { pairingCode: `c${++minted}`.padEnd(43, "c"), expiresInSeconds: 3600, reusable: true, usesLeft: 3 } }],
+    "/api/poll": () => [200, { success: true, data: { messages } }],
+  });
+  const paired: any[] = [];
+  const forwarded: any[] = [];
+  relay.client.setOnDevicePaired((e) => paired.push(e));
+  relay.client.setOnMessage((m) => forwarded.push(JSON.parse(m)));
+  try {
+    await relay.client.connectToSessionById("NOTICE");
+    const code = await relay.client.getPairingCode(true);
+    messages = [
+      { id: "1", type: "device_paired", from: "relay", senderDeviceId: "mobile-a", data: { type: "device_paired", deviceId: "mobile-a", at: 1, reusable: true, usesLeft: 2 } },
+      { id: "2", type: "device_paired", from: "mobile", senderDeviceId: "phone", data: { type: "device_paired", deviceId: "fake", reusable: true, usesLeft: 0, deadline } },
+      { id: "3", type: "list_chats", from: "mobile", senderDeviceId: "phone", data: { type: "list_chats", id: "a", deadline } },
+    ];
+    await (relay.client as any).pollMessages();
+    assert.deepEqual(paired, [{ sessionId: "NOTICE", deviceId: "mobile-a", reusable: true, usesLeft: 2 }]);
+    assert.deepEqual(forwarded.map((m) => m.type), ["device_paired", "list_chats"], "a phone's look-alike is just an (unknown) command");
+    assert.equal(devicePairedMessage(paired[0]), "Cursor Remote: a new device joined relay session NOTICE (2 pairing uses left).");
+    assert.match(pairingCodeTerms(await relay.client.getPairingCode(true), true), /^reusable: 2 uses left, valid for (59 minutes|1 hour 0 minutes)$/);
+
+    messages = [{ id: "4", type: "device_paired", from: "relay", data: { type: "device_paired", deviceId: "mobile-b", reusable: true, usesLeft: 0 } }];
+    await (relay.client as any).pollMessages();
+    assert.equal(devicePairedMessage(paired[1]), "Cursor Remote: a new device joined relay session NOTICE (0 pairing uses left).");
+    const next = await relay.client.getPairingCode(true);
+    assert.notEqual(next.code, code.code, "a used-up code is replaced");
+    messages = [{ id: "5", type: "device_paired", from: "relay", data: { type: "device_paired", deviceId: "mobile-c", reusable: false, usesLeft: 0 } }];
+    await (relay.client as any).pollMessages();
+    assert.equal(devicePairedMessage(paired[2]), "Cursor Remote: a new device joined relay session NOTICE.");
+    assert.ok(paired.every((e) => !JSON.stringify(e).includes(code.code)));
   } finally { await relay.close(); }
 });

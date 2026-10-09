@@ -5,6 +5,17 @@ All notable changes to the "Cursor Remote" extension will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-10-09
+
+### Added
+- **재사용 페어링 코드 (선택)**: `cursorRemote.reusablePairingCode`를 켜면 릴레이 세션 전체에 코드 하나로 최대 3대를 페어링합니다. Pair Relay Client를 다시 실행하면 같은 코드와 남은 횟수·유효 시간을 보여 줍니다. 코드를 본 사람은 세션이 끝나거나 새 세션을 시작할 때까지 접속할 수 있습니다. 기본값은 일회용 코드입니다
+- **새 기기 알림**: 릴레이가 기기를 페어링할 때마다 "A new device joined relay session …" 알림과 `Start New Relay Session` 버튼을 표시합니다
+- **앱**: 페이지 새로 고침·앱 재시작 후에도 세션이 끝날 때까지 로그인을 유지하고, 사이드바·상단 버튼·설정에 **Log out**을 추가했습니다
+
+### Changed
+- **릴레이**: `POST /api/pair`가 `{ "reusable": true }`를 받습니다 (세션 만료까지, 최대 3회, 새 코드·세션 폐기 시 무효). 모든 페어링 후 Mac에 `device_paired` 알림을 보냅니다
+- 재사용 코드는 Start New Relay Session, Revoke Relay Session, 세션 만료 시 Extension 저장소에서도 지워집니다
+
 ## [0.5.0] - 2026-10-08
 
 ### Added
