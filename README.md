@@ -369,6 +369,11 @@ The one-tap link carries the code after `#` (`/?session=ABC123#code=…`). Brows
 to a server, link previews are off for the message, and the app removes it from the address bar before
 it starts. Don't forward the message: whoever taps first gets the device slot (the Mac is notified).
 
+When the bot starts, it sends "🟢 Cursor Remote started" with a "Tap to open the session" link (no
+pairing code; a phone with a saved login reconnects from it, otherwise send `/pair`). It waits up to a
+minute for the relay session, sends at most once every 2 minutes, and can be turned off with
+`cursorRemote.telegramStartNotice`.
+
 ### Keep the Mac awake
 
 The phone can only reach Cursor while the Mac is awake and online. While you are away, run

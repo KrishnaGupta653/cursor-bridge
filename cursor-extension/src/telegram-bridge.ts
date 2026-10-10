@@ -69,6 +69,8 @@ export function pairLink(sessionId: string, code: string): string {
 
 const NO_RELAY_SESSION =
   "No relay session. On the Mac run Cursor Remote: Start New Relay Session or Connect to Relay Session.";
+const START_NOTICE_RELAY_WAIT_MS = 60_000;
+const START_NOTICE_MIN_GAP_MS = 2 * 60_000;
 const PAIR_LIMIT = 3;
 const PAIR_WINDOW_MS = 15 * 60 * 1000;
 
@@ -377,6 +379,7 @@ export class TelegramBridge {
   private mtprotoSends = new MtprotoSendTracker();
   private now = () => Date.now();
   private schedule = (fn: () => void, ms: number): NodeJS.Timeout => setTimeout(fn, ms);
+  private wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms).unref?.());
 
   constructor(
     outputChannel: vscode.OutputChannel,
@@ -501,7 +504,60 @@ export class TelegramBridge {
     if (!result.ok && this.lockPath && !result.error?.startsWith(TELEGRAM_LOCKED_PREFIX)) {
       releaseTelegramLock(this.lockPath);
     }
+    if (result.ok) void this.announceStarted();
     return result;
+  }
+
+  /**
+   * "Cursor Remote started" to the authorized private chats, with a link to the relay session once the
+   * Mac is on one. No pairing code: a saved login reconnects by itself, and /pair makes a code on request.
+   */
+  private async announceStarted(): Promise<void> {
+    if (!vscode.workspace.getConfiguration("cursorRemote").get<boolean>("telegramStartNotice", true)) return;
+    if (!this.claimStartNotice()) return;
+    const stops = this.stopCount;
+    const deadline = this.now() + START_NOTICE_RELAY_WAIT_MS;
+    let relay = this.relay?.status();
+    while (this.relay && !(relay?.connected && relay.sessionId) && this.now() < deadline) {
+      await this.wait(2000);
+      if (stops !== this.stopCount) return;
+      relay = this.relay.status();
+    }
+    if (stops !== this.stopCount || !this.running) return;
+    const host = escapeHtml(os.hostname().replace(/\.local$/i, ""));
+    const sessionId = relay?.connected ? relay.sessionId : null;
+    const text = (sessionId
+      ? [
+          `🟢 Cursor Remote started on ${host}`,
+          `Relay session ${escapeHtml(sessionId)}, Mac connected.`,
+          `👉 <a href="${escapeHtml(appLink(sessionId))}">Tap to open the session</a>`,
+          "Not signed in on this phone? Send /pair.",
+        ]
+      : [
+          `🟢 Cursor Remote started on ${host}`,
+          "No relay session yet. On the Mac run Cursor Remote: Start New Relay Session, then send /relay.",
+          `App: ${escapeHtml(APP_URL)}`,
+        ]).join("\n");
+    for (const userId of this.allowed) {
+      if (this.allowedChats.has(userId)) void this.sendTracked(userId, text);
+    }
+  }
+
+  /** Window reloads restart the bot; announce at most once per START_NOTICE_MIN_GAP_MS. */
+  private claimStartNotice(): boolean {
+    const marker = path.join(path.dirname(this.secretsPath), "telegram.started");
+    const now = this.now();
+    try {
+      if (now - Number(fs.readFileSync(marker, "utf8")) < START_NOTICE_MIN_GAP_MS) return false;
+    } catch {
+      // No marker yet.
+    }
+    try {
+      fs.writeFileSync(marker, String(now), { mode: 0o600 });
+    } catch {
+      // Not being able to write it only risks a repeat notice.
+    }
+    return true;
   }
 
   private async startUnlocked(secretsPath?: string): Promise<{ ok: boolean; error?: string }> {

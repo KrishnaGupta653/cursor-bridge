@@ -282,3 +282,63 @@ test("pairLink puts only a valid code in the fragment and falls back to the plai
   assert.equal(pairLink("abc123", code), APP);
   assert.equal(pairLink("ABC123", `${"A".repeat(42)}"`), `${APP}?session=ABC123`);
 });
+
+function startFixture(relayState = { sessionId: "ABC123" as string | null, connected: true }) {
+  const f = fixture(relayState);
+  const dir = require("node:fs").mkdtempSync(require("node:path").join(require("node:os").tmpdir(), "cr-start-"));
+  f.bridge.secretsPath = require("node:path").join(dir, "telegram.json");
+  f.bridge.running = true;
+  const waits: number[] = [];
+  f.bridge.wait = async (ms: number) => { waits.push(ms); f.advance(ms); };
+  const messages = () => f.api.filter((a) => a.method === "sendMessage").map((a) => a.body);
+  return { ...f, relayState, waits, messages };
+}
+
+test("on start the bot announces itself with a tap-to-open session link and no pairing code", async () => {
+  const f = startFixture();
+  await f.bridge.announceStarted();
+  const [msg, ...rest] = f.messages();
+  assert.equal(rest.length, 0);
+  assert.equal(msg.chat_id, 1);
+  assert.equal(msg.parse_mode, "HTML");
+  assert.equal(msg.disable_web_page_preview, true);
+  assert.match(msg.text, /^🟢 Cursor Remote started on .+\nRelay session ABC123, Mac connected\.\n/);
+  assert.ok(msg.text.includes(`<a href="${APP}?session=ABC123">Tap to open the session</a>`));
+  assert.ok(msg.text.endsWith("Not signed in on this phone? Send /pair."));
+  assert.ok(!msg.text.includes("#code="));
+  assert.equal(f.codes.length, 0, "no pairing code is minted at start");
+  assert.deepEqual(f.waits, []);
+});
+
+test("the start notice waits for the relay to connect, and says so when there is no session", async () => {
+  const late = startFixture({ sessionId: null, connected: false });
+  late.bridge.wait = async (ms: number) => {
+    late.waits.push(ms);
+    late.advance(ms);
+    if (late.waits.length === 3) Object.assign(late.relayState, { sessionId: "XYZ789", connected: true });
+  };
+  await late.bridge.announceStarted();
+  assert.equal(late.waits.length, 3);
+  assert.ok(late.messages()[0].text.includes(`${APP}?session=XYZ789`));
+
+  const none = startFixture({ sessionId: null, connected: false });
+  await none.bridge.announceStarted();
+  assert.equal(none.waits.length, 30, "gives up after a minute");
+  assert.match(none.messages()[0].text, /No relay session yet\. On the Mac run Cursor Remote: Start New Relay Session, then send \/relay\.\nApp: https:\/\/cursor-remote-app\.vercel\.app\/$/);
+});
+
+test("the start notice is sent at most once per 2 minutes, and not after the bot stops", async () => {
+  const f = startFixture();
+  await f.bridge.announceStarted();
+  f.advance(60_000);
+  await f.bridge.announceStarted();
+  assert.equal(f.messages().length, 1, "a quick window reload stays quiet");
+  f.advance(61_000);
+  await f.bridge.announceStarted();
+  assert.equal(f.messages().length, 2);
+
+  const stopped = startFixture({ sessionId: null, connected: false });
+  stopped.bridge.wait = async () => { stopped.bridge.stopCount++; };
+  await stopped.bridge.announceStarted();
+  assert.equal(stopped.messages().length, 0);
+});
