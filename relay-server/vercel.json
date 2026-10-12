@@ -1,6 +1,5 @@
 {
   "version": 2,
-  "regions": ["bom1"],
   "builds": [
     { "src": "api/relay.ts", "use": "@vercel/node" }
   ],

@@ -5,6 +5,7 @@ import { mkdtemp, access, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
+import net from 'node:net';
 import { once } from 'node:events';
 
 // Uses an isolated local Redis over a private Unix socket, never a configured service.
@@ -15,6 +16,58 @@ const cli = (...args) => {
   return result.stdout.trim();
 };
 
+class RespError { constructor(message) { this.message = message; } }
+
+/** One RESP2 reply from [buf] at [i] as [value, nextIndex], or null if more bytes are needed. */
+function parseResp(buf, i = 0) {
+  const end = buf.indexOf('\r\n', i);
+  if (end < 0) return null;
+  const type = String.fromCharCode(buf[i]);
+  const line = buf.toString('utf8', i + 1, end);
+  const next = end + 2;
+  if (type === '+') return [line, next];
+  if (type === '-') return [new RespError(line), next];
+  if (type === ':') return [Number(line), next];
+  if (type === '$') {
+    const n = Number(line);
+    if (n < 0) return [null, next];
+    return buf.length < next + n + 2 ? null : [buf.toString('utf8', next, next + n), next + n + 2];
+  }
+  if (type === '*') {
+    const n = Number(line);
+    if (n < 0) return [null, next];
+    const items = [];
+    let at = next;
+    for (let k = 0; k < n; k++) {
+      const item = parseResp(buf, at);
+      if (!item) return null;
+      items.push(item[0]); at = item[1];
+    }
+    return [items, at];
+  }
+  throw new Error('Unexpected RESP reply');
+}
+
+function redisCommand(args) {
+  const parts = [Buffer.from(`*${args.length}\r\n`)];
+  for (const arg of args) {
+    const bytes = Buffer.from(String(arg));
+    parts.push(Buffer.from(`$${bytes.length}\r\n`), bytes, Buffer.from('\r\n'));
+  }
+  return new Promise((resolve, reject) => {
+    const conn = net.createConnection(socket);
+    let received = Buffer.alloc(0);
+    conn.setTimeout(3000, () => conn.destroy(new Error('Local fixture Redis timed out')));
+    conn.on('data', chunk => {
+      received = Buffer.concat([received, chunk]);
+      const reply = parseResp(received);
+      if (reply) { conn.end(); resolve(reply[0]); }
+    });
+    conn.on('error', reject);
+    conn.write(Buffer.concat(parts));
+  });
+}
+
 before(async () => {
   dir = await mkdtemp(join(tmpdir(), 'cursor-relay-test-'));
   socket = join(dir, 'redis.sock');
@@ -24,18 +77,19 @@ before(async () => {
   child.on('error', error => { childError = error; });
   const encode = value => typeof value === 'string' ? Buffer.from(value).toString('base64')
     : Array.isArray(value) ? value.map(encode) : value;
+  // Commands go over the socket, not redis-cli argv: Linux caps one argument at 128 KB.
   bridge = http.createServer(async (req, res) => {
     try {
       let raw = ''; for await (const chunk of req) raw += chunk;
       const input = JSON.parse(raw);
-      const run = command => {
-        const result = spawnSync('redis-cli', ['-s',socket,'--json',...command.map(String)], { encoding:'utf8', timeout: 3000 });
-        if (result.status !== 0) return { error: 'Local fixture Redis command failed' };
-        let value = JSON.parse(result.stdout);
-        if (req.headers['upstash-encoding'] === 'base64') value = encode(value);
-        return { result: value };
+      const run = async command => {
+        const value = await redisCommand(command);
+        if (value instanceof RespError) return { error: value.message };
+        return { result: req.headers['upstash-encoding'] === 'base64' ? encode(value) : value };
       };
-      const result = Array.isArray(input[0]) ? input.map(run) : run(input);
+      let result;
+      if (Array.isArray(input[0])) { result = []; for (const command of input) result.push(await run(command)); }
+      else result = await run(input);
       res.setHeader('Content-Type','application/json'); res.end(JSON.stringify(result));
     } catch { res.statusCode = 500; res.end(JSON.stringify({error:'Fixture bridge failed'})); }
   });

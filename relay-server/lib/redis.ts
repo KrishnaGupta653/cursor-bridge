@@ -8,22 +8,34 @@ import {
   CommandEvent,
 } from "./types.js";
 
+/**
+ * Upstash's own variable names, or the KV_REST_API_* names that Vercel's Upstash integration adds.
+ * Each pair is taken whole, so a URL from one database is never used with another's token.
+ */
+export function redisConfig(env: NodeJS.ProcessEnv = process.env): { url: string; token: string } | null {
+  if (env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN) {
+    return { url: env.UPSTASH_REDIS_REST_URL, token: env.UPSTASH_REDIS_REST_TOKEN };
+  }
+  if (env.KV_REST_API_URL && env.KV_REST_API_TOKEN) {
+    return { url: env.KV_REST_API_URL, token: env.KV_REST_API_TOKEN };
+  }
+  return null;
+}
+
 // Upstash Redis client (lazy initialization)
 let _redis: Redis | null = null;
 
 function getRedis(): Redis {
   if (!_redis) {
-    const url = process.env.UPSTASH_REDIS_REST_URL;
-    const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-
-    if (!url || !token) {
-      const errorMsg = `Redis not configured: URL=${!!url}, Token=${!!token}. Please set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN environment variables.`;
+    const config = redisConfig();
+    if (!config) {
+      const errorMsg = "Redis not configured. Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN (or connect Upstash from the Vercel Marketplace, which sets KV_REST_API_URL and KV_REST_API_TOKEN).";
       console.error(errorMsg);
       throw new Error(errorMsg);
     }
 
     try {
-      _redis = new Redis({ url, token });
+      _redis = new Redis(config);
     } catch (error) {
       console.error("Failed to initialize Redis client:", error);
       throw new Error(
@@ -34,6 +46,20 @@ function getRedis(): Redis {
     }
   }
   return _redis;
+}
+
+/** For /api/health: whether Redis is configured and answers within [timeoutMs]. Never returns details. */
+export async function redisHealth(timeoutMs = 3000): Promise<"ok" | "not_configured" | "unreachable"> {
+  if (!redisConfig()) return "not_configured";
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("timeout")), timeoutMs); });
+    return (await Promise.race([getRedis().ping(), timeout])) === "PONG" ? "ok" : "unreachable";
+  } catch {
+    return "unreachable";
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Commands issued in the same tick share one HTTP round trip (Upstash auto-pipelining),

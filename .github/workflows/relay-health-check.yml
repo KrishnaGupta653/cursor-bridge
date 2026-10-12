@@ -1,5 +1,6 @@
-# Scheduled relay server check: calls /api/health and, on failure, updates the single open issue (creating it if none exists)
-# Written: 2026-02-02
+# Scheduled relay check: calls /api/health and, on failure, updates the single open issue (creating it if none exists).
+# Set the repository variable RELAY_BASE_URL (Settings → Secrets and variables → Actions → Variables) to
+# your relay, e.g. https://my-relay.vercel.app. Without it the scheduled run does nothing.
 
 name: Relay server health check
 
@@ -9,21 +10,21 @@ permissions:
 
 on:
   schedule:
-    # Daily at 09:00, 15:00, 21:00 KST (00:00, 06:00, 12:00 UTC)
+    # 00:00, 06:00, 12:00 UTC
     - cron: '0 0,6,12 * * *'
   workflow_dispatch:
     inputs:
       relay_base_url:
-        description: 'Relay server base URL'
+        description: 'Relay server base URL (defaults to the RELAY_BASE_URL repository variable)'
         required: false
-        default: 'https://cursor-remote-rela.vercel.app'
 
 env:
-  RELAY_BASE_URL: ${{ github.event.inputs.relay_base_url || 'https://cursor-remote-rela.vercel.app' }}
+  RELAY_BASE_URL: ${{ github.event.inputs.relay_base_url || vars.RELAY_BASE_URL }}
 
 jobs:
   check:
     name: Check relay health
+    if: github.event.inputs.relay_base_url != '' || vars.RELAY_BASE_URL != ''
     runs-on: ubuntu-latest
     steps:
       - name: Health check

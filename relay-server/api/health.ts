@@ -1,32 +1,25 @@
-import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { ApiResponse } from '../lib/types.js';
+import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { redisHealth } from "../lib/redis.js";
+import { cors } from "../lib/relay-auth.js";
 
-export default async function handler(
-  req: VercelRequest,
-  res: VercelResponse
-) {
-  // CORS headers
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Device-Id, X-Device-Type');
-  res.setHeader('Access-Control-Max-Age', '86400'); // 24 hours
-  
-  // CORS preflight
-  if (req.method === 'OPTIONS') {
-    res.writeHead(200, {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Device-Id, X-Device-Type',
-      'Access-Control-Max-Age': '86400',
-    });
-    return res.end();
-  }
-
-  const response: ApiResponse<{ status: string }> = {
-    success: true,
-    data: { status: 'healthy' },
+/**
+ * Setup and uptime check. 200 only when Redis answers; 503 says which part is missing, never how
+ * it is configured.
+ */
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  cors(res);
+  if (req.method === "OPTIONS") return res.status(204).end();
+  if (req.method !== "GET") return res.status(405).json({ success: false, error: "Method not allowed" });
+  const redis = await redisHealth();
+  const healthy = redis === "ok";
+  return res.status(healthy ? 200 : 503).json({
+    success: healthy,
+    data: { status: healthy ? "healthy" : "unhealthy", redis, protocolVersion: 2 },
+    ...(healthy ? {} : {
+      error: redis === "not_configured"
+        ? "Redis is not configured. Add Upstash Redis to this Vercel project, then redeploy."
+        : "Redis did not answer. Check the Upstash database and its token, then redeploy.",
+    }),
     timestamp: Date.now(),
-  };
-  
-  return res.status(200).json(response);
+  });
 }

@@ -241,10 +241,50 @@ test('unexpected failures log the route, error code and request ID, never the er
   assert.ok(!log.includes('leaked-secret-value'));
 });
 
-test('health reports only its status', async () => {
+test('Redis settings: Upstash names first, else the Vercel integration names, each as a whole pair', async () => {
+  const { redisConfig } = await import('../.test-dist/lib/redis.js');
+  const up = { UPSTASH_REDIS_REST_URL: 'https://up.example', UPSTASH_REDIS_REST_TOKEN: 'up-token' };
+  const kv = { KV_REST_API_URL: 'https://kv.example', KV_REST_API_TOKEN: 'kv-token' };
+  assert.deepEqual(redisConfig({ ...up, ...kv }), { url: 'https://up.example', token: 'up-token' });
+  assert.deepEqual(redisConfig(kv), { url: 'https://kv.example', token: 'kv-token' });
+  assert.deepEqual(redisConfig({ UPSTASH_REDIS_REST_URL: 'https://up.example', ...kv }), { url: 'https://kv.example', token: 'kv-token' });
+  assert.equal(redisConfig({ UPSTASH_REDIS_REST_URL: 'https://up.example', KV_REST_API_TOKEN: 'kv-token' }), null);
+  assert.equal(redisConfig({}), null);
+});
+
+test('health is 200 only when Redis answers, and never shows how it is configured', async () => {
+  const http = await import('node:http');
   const health = (await import('../.test-dist/api/health.js')).default;
-  const res = response();
-  await health({ method: 'GET', headers: {}, query: {} }, res);
-  assert.equal(res.code, 200);
-  assert.deepEqual(res.value.data, { status: 'healthy' });
+  const saved = Object.fromEntries(['UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN', 'KV_REST_API_URL', 'KV_REST_API_TOKEN']
+    .map((k) => [k, process.env[k]]));
+  const check = async () => { const res = response(); await health({ method: 'GET', headers: {}, query: {} }, res); return res; };
+  let fake;
+  try {
+    for (const k of Object.keys(saved)) delete process.env[k];
+    let res = await check();
+    assert.equal(res.code, 503);
+    assert.deepEqual(res.value.data, { status: 'unhealthy', redis: 'not_configured', protocolVersion: 2 });
+
+    fake = http.createServer((req, res) => {
+      const pong = { result: req.headers['upstash-encoding'] === 'base64' ? Buffer.from('PONG').toString('base64') : 'PONG' };
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify(req.url === '/pipeline' ? [pong] : pong));
+    });
+    await new Promise((r) => fake.listen(0, '127.0.0.1', r));
+    process.env.KV_REST_API_URL = `http://127.0.0.1:${fake.address().port}`;
+    process.env.KV_REST_API_TOKEN = 'secret-health-token';
+    res = await check();
+    assert.equal(res.code, 200);
+    assert.deepEqual(res.value.data, { status: 'healthy', redis: 'ok', protocolVersion: 2 });
+
+    fake.closeAllConnections();
+    await new Promise((r) => fake.close(r));
+    res = await check();
+    assert.equal(res.code, 503);
+    assert.equal(res.value.data.redis, 'unreachable');
+    assert.ok(!JSON.stringify(res.value).includes('secret-health-token') && !JSON.stringify(res.value).includes('127.0.0.1'));
+  } finally {
+    if (fake?.listening) { fake.closeAllConnections(); fake.close(); }
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
 });
