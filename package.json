@@ -21,5 +21,13 @@
     "mobile",
     "websocket"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KrishnaGupta653/cursor-bridge.git"
+  },
+  "homepage": "https://github.com/KrishnaGupta653/cursor-bridge",
+  "bugs": {
+    "url": "https://github.com/KrishnaGupta653/cursor-bridge/issues"
+  }
 }
