@@ -39,6 +39,7 @@ import { AgentMode, CommandMessage } from "./types";
 import { WebSocketServer } from "./websocket-server";
 import { ChatWatcher } from "./chat-watcher";
 import { ComposerState } from "./cdp/agents-window";
+import { appLink, normalizeAppUrl, pairLink } from "./links";
 
 export interface TelegramSecrets {
   enabled?: boolean;
@@ -49,22 +50,6 @@ export interface TelegramSecrets {
   apiHash?: string;
   /** auto | botapi | mtproto */
   transport?: string;
-}
-
-export const APP_URL = "https://cursor-remote-app.vercel.app/";
-
-/** The web app link; the session ID pre-fills the app's Relay field. Never carries a pairing code. */
-export function appLink(sessionId: string | null | undefined): string {
-  return sessionId && /^[A-Z0-9]{6}$/.test(sessionId) ? `${APP_URL}?session=${sessionId}` : APP_URL;
-}
-
-/**
- * One-tap pairing link. The code rides in the fragment, which browsers never send to a server, so it
- * stays out of Vercel's request logs and Telegram's preview fetch; the app strips it before starting.
- */
-export function pairLink(sessionId: string, code: string): string {
-  if (!/^[A-Z0-9]{6}$/.test(sessionId) || !/^[A-Za-z0-9_-]{43}$/.test(code)) return appLink(sessionId);
-  return `${appLink(sessionId)}#code=${code}`;
 }
 
 const NO_RELAY_SESSION =
@@ -105,7 +90,7 @@ const DEFAULT_SECRETS_PATH = path.join(
 );
 
 const TG_TEXT_LIMIT = 3900;
-const HELP_TEXT = [
+const helpText = (app: string) => [
   "Cursor Remote",
   "",
   "Agents window",
@@ -129,7 +114,7 @@ const HELP_TEXT = [
   "",
   "Replies arrive when the agent pauses.",
   "",
-  `App: ${APP_URL}`,
+  `App: ${app}`,
 ].join("\n");
 
 const BOT_COMMANDS = [
@@ -530,17 +515,26 @@ export class TelegramBridge {
       ? [
           `🟢 Cursor Remote started on ${host}`,
           `Relay session ${escapeHtml(sessionId)}, Mac connected.`,
-          `👉 <a href="${escapeHtml(appLink(sessionId))}">Tap to open the session</a>`,
+          `👉 <a href="${escapeHtml(this.appLink(sessionId))}">Tap to open the session</a>`,
           "Not signed in on this phone? Send /pair.",
         ]
       : [
           `🟢 Cursor Remote started on ${host}`,
           "No relay session yet. On the Mac run Cursor Remote: Start New Relay Session, then send /relay.",
-          `App: ${escapeHtml(APP_URL)}`,
+          `App: ${escapeHtml(this.appLink())}`,
         ]).join("\n");
     for (const userId of this.allowed) {
       if (this.allowedChats.has(userId)) void this.sendTracked(userId, text);
     }
+  }
+
+  private appUrl(): string {
+    return normalizeAppUrl(vscode.workspace.getConfiguration("cursorRemote").get<string>("appUrl", ""));
+  }
+
+  /** The app link with this Mac's relay, so a phone that never set one up still lands on it. */
+  private appLink(sessionId?: string | null): string {
+    return appLink(this.appUrl(), this.relay?.status().serverUrl, sessionId);
   }
 
   /** Window reloads restart the bot; announce at most once per START_NOTICE_MIN_GAP_MS. */
@@ -1231,11 +1225,11 @@ export class TelegramBridge {
     switch (cmd) {
       case "start":
       case "help":
-        await this.sendText(chatId, HELP_TEXT);
+        await this.sendText(chatId, helpText(this.appLink()));
         return;
 
       case "app":
-        await this.sendText(chatId, `Open Cursor Remote: ${appLink(this.relay?.status().sessionId)}`);
+        await this.sendText(chatId, `Open Cursor Remote: ${this.appLink(this.relay?.status().sessionId)}`);
         return;
 
       case "relay": {
@@ -1243,7 +1237,7 @@ export class TelegramBridge {
         await this.sendText(
           chatId,
           relay?.sessionId
-            ? `Relay session ${relay.sessionId}\nMac: ${relay.connected ? "connected" : "not connected"}\nApp: ${appLink(relay.sessionId)}`
+            ? `Relay session ${relay.sessionId}\nMac: ${relay.connected ? "connected" : "not connected"}\nApp: ${this.appLink(relay.sessionId)}`
             : NO_RELAY_SESSION
         );
         return;
@@ -1582,7 +1576,7 @@ export class TelegramBridge {
     const minutes = Math.max(1, Math.round(seconds / 60));
     const messageId = await this.sendTracked(chatId, [
       `Relay session ${escapeHtml(sessionId)}`,
-      `👉 <a href="${escapeHtml(pairLink(sessionId, pairing.code))}">Tap to open the app and connect</a>`,
+      `👉 <a href="${escapeHtml(pairLink(this.appUrl(), relay.serverUrl, sessionId, pairing.code))}">Tap to open the app and connect</a>`,
       `Works once, expires in ${minutes} minute${minutes === 1 ? "" : "s"}. Don't forward this message.`,
       `Or enter it by hand: <code>${escapeHtml(pairing.code)}</code>`,
     ].join("\n"));

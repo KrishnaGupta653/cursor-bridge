@@ -1,6 +1,6 @@
 # Cursor Remote 📱
 
-[![Version](https://img.shields.io/badge/version-0.6.0-blue.svg)](https://github.com/KrishnaGupta653/cursor-bridge)
+[![Version](https://img.shields.io/badge/version-0.7.0-blue.svg)](https://github.com/KrishnaGupta653/cursor-bridge)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **Watch and control Cursor's Agents window from your phone or Telegram**
@@ -26,7 +26,11 @@ agent and approve or reject its requests. A Telegram bot offers the same control
    and click **Install**. Or download the `.vsix` from
    [Releases](https://github.com/KrishnaGupta653/cursor-bridge/releases) and use
    `Extensions` → `...` → `Install from VSIX...`.
-2. Optional, for CLI prompts: install and sign in to the Cursor CLI
+2. Run **Cursor Remote: Set Up** from the Command Palette. It checks your relay (each user deploys
+   their own, free, with one Deploy button), sets up the Telegram bot and finds your Telegram ID,
+   shows a QR code that signs in your phone, and turns on session control. The step-by-step guide with
+   every link is [SETUP.md](https://github.com/KrishnaGupta653/cursor-bridge/blob/main/SETUP.md).
+3. Optional, for CLI prompts: install and sign in to the Cursor CLI
    (`curl https://cursor.com/install -fsS | bash`, then `agent login`).
 
 ### Upgrading to 0.6.0
@@ -127,6 +131,8 @@ written to the **Cursor Remote** output as an `[Audit]` line.
 
 | Command | What it does |
 |---------|--------------|
+| `Cursor Remote: Set Up` | Relay, Telegram bot, phone QR code and session control, step by step |
+| `Cursor Remote: Diagnose` | Check the relay, session, Telegram and session control (no secrets in the report) |
 | `Cursor Remote: Quick Actions` | The status-bar menu with every common action |
 | `Cursor Remote: Restart Cursor with Session Control` | Reopen Cursor with session control on |
 | `Cursor Remote: Pair Client` | One-time code for a phone on the same Wi-Fi |
@@ -146,7 +152,8 @@ written to the **Cursor Remote** output as an `[Audit]` line.
 |---------|---------|---------|
 | `cursorRemote.enableCdp` | `false` | Allow session control of Cursor's windows |
 | `cursorRemote.remoteActions` | `enabled` | `disabled` turns off open/new chat, model, mode, stop, approve and reject from the phone and Telegram |
-| `cursorRemote.relayServerUrl` | built-in | Your own relay (`https://…`) |
+| `cursorRemote.relayServerUrl` | none | Your relay (`https://…`); Set Up fills it in |
+| `cursorRemote.appUrl` | hosted app | Web app the phone links open; only for a self-hosted app |
 | `cursorRemote.allowedWebSocketOrigins` | localhost:8080 | Browser origins allowed on the local server |
 | `cursorRemote.cdpPort` | `9222` | Session-control port (always on `127.0.0.1`) |
 | `cursorRemote.telegramSecretsPath` | `~/.config/cursor-remote/telegram.json` | Telegram settings file |
@@ -162,7 +169,7 @@ and no generic command execution. See [PROTOCOL.md](https://github.com/KrishnaGu
 npm install
 npm test                  # compile + unit tests
 npx tsc --noEmit -p .     # type-check
-npx --yes @vscode/vsce package --no-dependencies --allow-missing-repository --skip-license
+npx --yes @vscode/vsce package --no-dependencies
 ```
 
 ### Contributing

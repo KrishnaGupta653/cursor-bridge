@@ -5,6 +5,23 @@ All notable changes to the "Cursor Remote" extension will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-10-13
+
+### Added
+- **Cursor Remote: Set Up**, a four-step wizard:
+  - **Relay**: checks your relay's `/api/health` and says exactly what's wrong (no Redis, Redis down, a login wall, the wrong project, an old version). It has a Deploy button that creates your own relay on Vercel with Upstash Redis.
+  - **Telegram**: checks the bot token with Telegram, then learns your user and chat ID from the first `/start` you send (after a confirm), so there are no IDs to look up. Where Telegram's Bot API is blocked, it falls back to MTProto with your `api_id`/`api_hash`. It writes `telegram.json` readable only by you (0600) and sends a test message.
+  - **Phone**: shows a QR code with a one-time sign-in link (expires in 5 minutes).
+  - **Session control**: turns it on, can restart Cursor by itself when it's off, and on macOS can add a login item that opens Cursor with session control.
+- **Cursor Remote: Diagnose**: checks the relay, the relay session, the local server, session control, the login item and the Telegram bot. The report never contains tokens or codes, so it is safe to paste into an issue.
+- **`cursorRemote.appUrl`**: point phone links at a self-hosted web app.
+- Phone links from Telegram (`/app`, `/relay`, `/pair`, the start notice) and the Set Up QR code carry your relay (`?relay=…`), so the shared web app connects to it with no typing. The app asks before using a relay from a link.
+- Set Up and Diagnose are in the status bar menu. The first-run notice offers Set Up.
+
+### Changed
+- **There is no built-in relay any more.** Each user runs their own; set `cursorRemote.relayServerUrl` or run Set Up. Relay commands without a relay offer Set Up instead of failing.
+- Changing `cursorRemote.relayServerUrl` takes effect at once, without reloading the window. The old relay's session is dropped, and logins stay stored per relay.
+
 ## [0.6.4] - 2026-10-12
 
 ### Added

@@ -39,20 +39,26 @@ export async function resumeSavedRelaySession(
   return client.isConnectedToSession() ? "connected" : "failed";
 }
 
+export const NO_RELAY_SERVER = "No relay server is set up. Run Cursor Remote: Set Up.";
+
 /** The relay client as Telegram sees it: status and single-use codes only, never stored credentials. */
 export interface TelegramRelay {
-  status(): { sessionId: string | null; connected: boolean };
+  status(): { sessionId: string | null; connected: boolean; serverUrl?: string | null };
   createSingleUseCode(): Promise<{ code: string; expiresInSeconds: number }>;
   onTelegramCode?(sessionId: string): void;
 }
 
 /** Codes made for Telegram are always single use, whatever cursorRemote.reusablePairingCode says. */
 export function relayForTelegram(
-  client: () => Pick<RelayClient, "getSessionId" | "isConnectedToSession" | "getPairingCode"> | null,
+  client: () => Pick<RelayClient, "getSessionId" | "isConnectedToSession" | "getPairingCode" | "getServerUrl"> | null,
   onTelegramCode?: (sessionId: string) => void
 ): TelegramRelay {
   return {
-    status: () => ({ sessionId: client()?.getSessionId() ?? null, connected: client()?.isConnectedToSession() ?? false }),
+    status: () => ({
+      sessionId: client()?.getSessionId() ?? null,
+      connected: client()?.isConnectedToSession() ?? false,
+      serverUrl: client()?.getServerUrl() || null,
+    }),
     createSingleUseCode: async () => {
       const relay = client();
       if (!relay) throw new Error("No relay client");
@@ -154,6 +160,27 @@ export class RelayClient {
     this.outputChannel = outputChannel;
   }
 
+  /** The relay this Mac talks to, or "" when none is set up yet. */
+  getServerUrl(): string {
+    return this.relayServerUrl;
+  }
+
+  /** Switch relays: the old session and login stay with the old relay (logins are stored per relay). */
+  setServerUrl(url: string): void {
+    if (url === this.relayServerUrl) return;
+    this.stop();
+    this.capabilityToken = null;
+    this.targetSessionId = null;
+    this.relayServerUrl = url;
+    this.log(url ? `Relay server is now ${url}` : "Relay server cleared");
+  }
+
+  private requireServer(action: string): boolean {
+    if (this.relayServerUrl) return true;
+    this.logError(action, NO_RELAY_SERVER);
+    return false;
+  }
+
   private log(message: string, level: "info" | "warn" | "error" = "info") {
     const timestamp = new Date().toLocaleTimeString();
     const logMessage = `[${timestamp}] [Relay] ${message}`;
@@ -216,6 +243,7 @@ export class RelayClient {
       this.logError("connectToSessionById", "session ID is empty");
       return;
     }
+    if (!this.requireServer("connectToSessionById")) return;
     if (this.sessionId && this.isConnected) {
       this.log(`🔌 Disconnecting from session ${this.sessionId}, then connecting to ${trimmed}`);
       this.sessionId = null;
@@ -251,6 +279,7 @@ export class RelayClient {
       this.logError("start", "session ID is required");
       return;
     }
+    if (!this.relayServerUrl) throw new Error(NO_RELAY_SERVER);
     this.targetSessionId = sid;
     this.targetPin =
       pin != null && typeof pin === "string" && pin.trim() ? pin.trim() : null;
@@ -449,6 +478,7 @@ export class RelayClient {
    * connects to a brand-new one. Returns the new session ID, or null if it could not connect.
    */
   async startNewSession(): Promise<string | null> {
+    if (!this.requireServer("startNewSession")) return null;
     const previous = this.sessionId ?? this.targetSessionId;
     if (previous) await this.secrets?.delete(this.pairingCodeKey(previous));
     if (this.isConnected) {

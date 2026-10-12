@@ -6,8 +6,8 @@ export const CONFIG = {
   // WebSocket server port
   WEBSOCKET_PORT: 8766,
 
-  // Relay server URL
-  RELAY_SERVER_URL: process.env.RELAY_SERVER_URL || "https://cursor-remote-rela.vercel.app",
+  // Relay server URL for development only; users set cursorRemote.relayServerUrl (there is no shared relay)
+  RELAY_SERVER_URL: process.env.RELAY_SERVER_URL || "",
 
   // CDP (Existing Cursor Agent) — localhost only
   ENABLE_CDP:

@@ -8,7 +8,6 @@ import { MtprotoSendTracker, mtprotoDeleteLine, mtprotoSendLine } from "../teleg
 const Module = require("node:module");
 const originalLoad = Module._load;
 let TelegramBridge: any;
-let pairLink: any;
 let CommandRouter: any;
 let showPairingCodeBox: any;
 try {
@@ -21,12 +20,15 @@ try {
     }
     return originalLoad.call(this, name, ...args);
   };
-  ({ TelegramBridge, pairLink } = require("../telegram-bridge"));
+  ({ TelegramBridge } = require("../telegram-bridge"));
   CommandRouter = require("../command-router").CommandRouter;
   showPairingCodeBox = require("../pairing-box").showPairingCodeBox;
 } finally { Module._load = originalLoad; }
 
 const APP = "https://cursor-remote-app.vercel.app/";
+const RELAY = "https://relay.test";
+const link = (sid: string) => `${APP}?relay=${encodeURIComponent(RELAY)}&session=${sid}`;
+const APP_ONLY = `${APP}?relay=${encodeURIComponent(RELAY)}`;
 
 function fixture(relayState: { sessionId: string | null; connected: boolean } = { sessionId: "ABC123", connected: true }) {
   const out: string[] = [];
@@ -37,7 +39,7 @@ function fixture(relayState: { sessionId: string | null; connected: boolean } = 
   const codes: string[] = [];
   const notified: string[] = [];
   const relay = {
-    status: () => ({ ...relayState }),
+    status: () => ({ ...relayState, serverUrl: RELAY }),
     createSingleUseCode: async () => {
       const code = `PAIRCODE${codes.length + 1}`.padEnd(43, "x");
       codes.push(code);
@@ -76,10 +78,10 @@ test("Telegram /app links the web app, with the relay session when there is one,
   const f = fixture();
   f.flags.remoteActions = false;
   await f.send("/app");
-  assert.deepEqual(f.sent.map((s) => s.text), [`Open Cursor Remote: ${APP}?session=ABC123`]);
+  assert.deepEqual(f.sent.map((s) => s.text), [`Open Cursor Remote: ${link("ABC123")}`]);
   const none = fixture({ sessionId: null, connected: false });
   await none.send("/app");
-  assert.deepEqual(none.sent.map((s) => s.text), [`Open Cursor Remote: ${APP}`]);
+  assert.deepEqual(none.sent.map((s) => s.text), [`Open Cursor Remote: ${APP_ONLY}`]);
 });
 
 test("Telegram /start and /help end with the app link and list /app, /relay and /pair", async () => {
@@ -87,7 +89,7 @@ test("Telegram /start and /help end with the app link and list /app, /relay and 
   await f.send("/start");
   await f.send("/help");
   for (const { text } of f.sent) {
-    assert.ok(text.endsWith(`\nApp: ${APP}`));
+    assert.ok(text.endsWith(`\nApp: ${APP_ONLY}`));
     for (const cmd of ["/app ", "/relay ", "/pair "]) assert.ok(text.includes(cmd), cmd);
   }
 });
@@ -95,7 +97,7 @@ test("Telegram /start and /help end with the app link and list /app, /relay and 
 test("Telegram /relay shows the session and Mac status, or how to start one, and never a code", async () => {
   const f = fixture({ sessionId: "ABC123", connected: false });
   await f.send("/relay");
-  assert.equal(f.sent[0].text, `Relay session ABC123\nMac: not connected\nApp: ${APP}?session=ABC123`);
+  assert.equal(f.sent[0].text, `Relay session ABC123\nMac: not connected\nApp: ${link("ABC123")}`);
   const none = fixture({ sessionId: null, connected: false });
   await none.send("/relay");
   assert.equal(none.sent[0].text,
@@ -141,7 +143,7 @@ test("Telegram /pair sends one single-use code message, tells the Mac, and delet
   assert.equal(body.disable_web_page_preview, true);
   assert.equal(body.text, [
     "Relay session ABC123",
-    `👉 <a href="${APP}?session=ABC123#code=${f.codes[0]}">Tap to open the app and connect</a>`,
+    `👉 <a href="${link("ABC123").replace(/&/g, "&amp;")}#code=${f.codes[0]}">Tap to open the app and connect</a>`,
     "Works once, expires in 5 minutes. Don't forward this message.",
     `Or enter it by hand: <code>${f.codes[0]}</code>`,
   ].join("\n"));
@@ -275,14 +277,6 @@ test("the MTProto bridge's send-with-ref and delete commands (Python, fake clien
   assert.equal(result.status, 0, result.stderr);
 });
 
-test("pairLink puts only a valid code in the fragment and falls back to the plain app link", () => {
-  const code = "A".repeat(42) + "_";
-  assert.equal(pairLink("ABC123", code), `${APP}?session=ABC123#code=${code}`);
-  assert.equal(pairLink("ABC123", "short"), `${APP}?session=ABC123`);
-  assert.equal(pairLink("abc123", code), APP);
-  assert.equal(pairLink("ABC123", `${"A".repeat(42)}"`), `${APP}?session=ABC123`);
-});
-
 function startFixture(relayState = { sessionId: "ABC123" as string | null, connected: true }) {
   const f = fixture(relayState);
   const dir = require("node:fs").mkdtempSync(require("node:path").join(require("node:os").tmpdir(), "cr-start-"));
@@ -303,7 +297,7 @@ test("on start the bot announces itself with a tap-to-open session link and no p
   assert.equal(msg.parse_mode, "HTML");
   assert.equal(msg.disable_web_page_preview, true);
   assert.match(msg.text, /^🟢 Cursor Remote started on .+\nRelay session ABC123, Mac connected\.\n/);
-  assert.ok(msg.text.includes(`<a href="${APP}?session=ABC123">Tap to open the session</a>`));
+  assert.ok(msg.text.includes(`<a href="${link("ABC123").replace(/&/g, "&amp;")}">Tap to open the session</a>`));
   assert.ok(msg.text.endsWith("Not signed in on this phone? Send /pair."));
   assert.ok(!msg.text.includes("#code="));
   assert.equal(f.codes.length, 0, "no pairing code is minted at start");
@@ -319,12 +313,12 @@ test("the start notice waits for the relay to connect, and says so when there is
   };
   await late.bridge.announceStarted();
   assert.equal(late.waits.length, 3);
-  assert.ok(late.messages()[0].text.includes(`${APP}?session=XYZ789`));
+  assert.ok(late.messages()[0].text.includes(link("XYZ789").replace(/&/g, "&amp;")));
 
   const none = startFixture({ sessionId: null, connected: false });
   await none.bridge.announceStarted();
   assert.equal(none.waits.length, 30, "gives up after a minute");
-  assert.match(none.messages()[0].text, /No relay session yet\. On the Mac run Cursor Remote: Start New Relay Session, then send \/relay\.\nApp: https:\/\/cursor-remote-app\.vercel\.app\/$/);
+  assert.match(none.messages()[0].text, /No relay session yet\. On the Mac run Cursor Remote: Start New Relay Session, then send \/relay\.\nApp: https:\/\/cursor-remote-app\.vercel\.app\/\?relay=https%3A%2F%2Frelay\.test$/);
 });
 
 test("the start notice is sent at most once per 2 minutes, and not after the bot stops", async () => {

@@ -4,7 +4,9 @@ import { WebSocketServer } from "./websocket-server";
 import { CommandHandler } from "./command-handler";
 import { CommandRouter } from "./command-router";
 import { StatusBarManager } from "./status-bar";
-import { RELAY_LOCK_PATH, RelayClient, devicePairedMessage, pairingCodeTerms, relayForTelegram, resumeSavedRelaySession } from "./relay-client";
+import { NO_RELAY_SERVER, RELAY_LOCK_PATH, RelayClient, devicePairedMessage, pairingCodeTerms, relayForTelegram, resumeSavedRelaySession } from "./relay-client";
+import { normalizeRelayUrl } from "./links";
+import { SetupDeps, diagnose, runSetup } from "./setup/wizard";
 import { CONFIG } from "./config";
 import { CdpManager } from "./cdp/cdp-manager";
 import { claimOnce, cursorBinary, scheduleRelaunchWithCdp } from "./cdp/relaunch";
@@ -173,10 +175,17 @@ let pairingAfterConnect = false;
 let resumingRelay = false;
 
 function relayServerUrl(): string {
-  const v = (vscode.workspace.getConfiguration("cursorRemote").get<string>("relayServerUrl") ?? "")
-    .trim()
-    .replace(/\/+$/, "");
-  return /^https:\/\/[^\s/]+/i.test(v) ? v : CONFIG.RELAY_SERVER_URL;
+  const v = vscode.workspace.getConfiguration("cursorRemote").get<string>("relayServerUrl") ?? "";
+  return normalizeRelayUrl(v) ?? normalizeRelayUrl(CONFIG.RELAY_SERVER_URL) ?? "";
+}
+
+/** True, after offering Set Up, when this Mac has no relay server yet. */
+function noRelayServer(): boolean {
+  if (relayServerUrl()) return false;
+  void vscode.window
+    .showWarningMessage(`Cursor Remote: ${NO_RELAY_SERVER}`, "Set Up")
+    .then((pick) => pick && vscode.commands.executeCommand("cursorRemote.setup"));
+  return true;
 }
 
 const telegramRelay = relayForTelegram(() => relayClient, (sessionId) => {
@@ -225,7 +234,7 @@ function updateConnectionsView() {
     originAllowed: !lan || allowedOrigins().includes(`http://${lan}:8080`),
     relaySessionId: relayClient?.isConnectedToSession() ? relayClient.getSessionId() : null,
     relayStoreLabel: lastRelayStoreLabel,
-    relayServerUrl: relayServerUrl(),
+    relayServerUrl: relayServerUrl() || "not set up (run Cursor Remote: Set Up)",
     localClientIds: wsServer ? wsServer.getClientIds() : [],
     tunnelWssUrl: cloudflareTunnel?.getWssUrl() ?? null,
     telegramRunning: telegramBridge?.isRunning() ?? false,
@@ -523,7 +532,7 @@ export async function activate(context: vscode.ExtensionContext) {
         outputChannel.show();
         return;
       }
-      if (relayOwnedElsewhere()) return undefined;
+      if (noRelayServer() || relayOwnedElsewhere()) return undefined;
       const sid = await vscode.window.showInputBox({
         title: "Cursor Remote: Relay Session ID",
         prompt: "Press Enter to reuse your last session, or type any new 6-character ID (a taken ID is swapped for a fresh one).",
@@ -845,6 +854,8 @@ export async function activate(context: vscode.ExtensionContext) {
           : { label: "$(plug) Connect to relay…", run: () => connectRelayFlow() },
         { label: "$(refresh) Start new relay session", description: "Drops the old one", run: cmd("cursorRemote.newRelaySession") },
         { label: "Troubleshooting", kind: vscode.QuickPickItemKind.Separator },
+        { label: "$(wand) Set Up", description: "Relay, Telegram, phone, session control", run: cmd("cursorRemote.setup") },
+        { label: "$(pulse) Diagnose", description: "Check every part", run: cmd("cursorRemote.diagnose") },
         { label: "$(output) Show log", run: () => outputChannel.show(true) },
         { label: "$(debug-restart) Restart server", description: "Signs out paired devices", run: cmd("cursorRemote.restartLocalServer") },
         ...(running ? [{ label: "$(debug-stop) Stop server", run: cmd("cursorRemote.stop") }] : []),
@@ -858,7 +869,7 @@ export async function activate(context: vscode.ExtensionContext) {
   );
 
   const connectRelayFlow = async () => {
-    if (!relayClient || relayOwnedElsewhere()) return;
+    if (!relayClient || noRelayServer() || relayOwnedElsewhere()) return;
     const sid = await vscode.window.showInputBox({
       title: "Cursor Remote: Connect to Relay",
       prompt: "6-character session ID (the phone joins the same ID). Afterwards run Pair Relay Client.",
@@ -943,7 +954,7 @@ export async function activate(context: vscode.ExtensionContext) {
       await showPairingCode();
     }),
     vscode.commands.registerCommand("cursorRemote.newRelaySession", async () => {
-      if (relayOwnedElsewhere()) return;
+      if (noRelayServer() || relayOwnedElsewhere()) return;
       const pick = await vscode.window.showWarningMessage(
         "Start a new relay session? The current session is revoked and phones must pair again.",
         { modal: true },
@@ -973,6 +984,14 @@ export async function activate(context: vscode.ExtensionContext) {
     }),
   );
   wsServer.setRelayClient(relayClient);
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (!e.affectsConfiguration("cursorRemote.relayServerUrl") || !relayClient) return;
+      relayClient.setServerUrl(relayServerUrl());
+      statusBarManager?.refresh();
+      updateConnectionsView();
+    })
+  );
   // In relay mode, include relaySessionId when saving chat history
   if (commandHandler) {
     commandHandler.setGetRelaySessionId(
@@ -1080,6 +1099,57 @@ export async function activate(context: vscode.ExtensionContext) {
     outputChannel.appendLine(`[CDP] Restarting Cursor with session control on 127.0.0.1:${port}`);
     await vscode.commands.executeCommand("workbench.action.quit");
   };
+  const telegramSecretsPath = () =>
+    (vscode.workspace.getConfiguration("cursorRemote").get<string>("telegramSecretsPath", "") || "").trim() ||
+    defaultTelegramSecretsPath();
+  const setupDeps: SetupDeps = {
+    output: outputChannel,
+    extensionVersion: String(context.extension.packageJSON.version ?? ""),
+    appRoot: vscode.env.appRoot,
+    relay: () => relayClient,
+    relayServerUrl,
+    relayOwnedElsewhere,
+    saveSessionId: (sid) => context.globalState.update("cursorRemote.sessionId", sid),
+    cdpStatus: () => cdpManager?.getStatus() ?? {
+      enabled: vscode.workspace.getConfiguration("cursorRemote").get<boolean>("enableCdp", false),
+      connected: false,
+      port: CONFIG.CDP_PORT,
+    },
+    restartWithSessionControl,
+    telegramRunning: () => telegramBridge?.isRunning() ?? false,
+    stopTelegram: async () => { await telegramBridge?.stop(); statusBarManager?.refresh(); },
+    startTelegram: () => vscode.commands.executeCommand("cursorRemote.restartTelegramBot"),
+    telegramSecretsPath,
+    localServer: () => ({ running: wsServer?.isRunning() ?? false, port: wsServer?.getActualPort() ?? null }),
+  };
+  context.subscriptions.push(
+    vscode.commands.registerCommand("cursorRemote.setup", async () => {
+      try {
+        await runSetup(setupDeps);
+      } catch (e) {
+        outputChannel.appendLine(`[Setup] Failed: ${e instanceof Error ? e.message : String(e)}`);
+        vscode.window.showErrorMessage("Cursor Remote: Set Up stopped with an error. See the log.", "Show Log")
+          .then((pick) => pick && outputChannel.show(true));
+      }
+      statusBarManager?.refresh();
+      updateConnectionsView();
+    }),
+    vscode.commands.registerCommand("cursorRemote.diagnose", async () => {
+      const report = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: "Cursor Remote: checking everything…" },
+        () => diagnose(setupDeps)
+      );
+      outputChannel.appendLine(`\n[Diagnose]\n${report}\n`);
+      outputChannel.show(true);
+      const pick = await vscode.window.showInformationMessage(
+        report.includes("❌") ? "Cursor Remote: some checks failed; see the log." : "Cursor Remote: all checks passed.",
+        "Copy Report",
+        "Run Set Up"
+      );
+      if (pick === "Copy Report") await vscode.env.clipboard.writeText(report);
+      else if (pick === "Run Set Up") await vscode.commands.executeCommand("cursorRemote.setup");
+    })
+  );
   context.subscriptions.push(
     vscode.commands.registerCommand("cursorRemote.restartWithSessionControl", async () => {
       if (cdpManager?.getStatus().connected) {
@@ -1138,11 +1208,13 @@ export async function activate(context: vscode.ExtensionContext) {
     void context.globalState.update("cursorRemote.welcomed", true);
     void serversReady.then(async () => {
       const pick = await vscode.window.showInformationMessage(
-        "Cursor Remote is running. Click “Remote” in the status bar any time for every action — start by pairing your phone.",
-        "Pair a device",
+        relayServerUrl()
+          ? "Cursor Remote is running. Click “Remote” in the status bar any time for every action — start by pairing your phone."
+          : "Cursor Remote is installed. Set Up walks you through your relay, Telegram bot and phone in a few minutes.",
+        "Set Up",
         "Quick Actions"
       );
-      if (pick === "Pair a device") await vscode.commands.executeCommand("cursorRemote.pairClient");
+      if (pick === "Set Up") await vscode.commands.executeCommand("cursorRemote.setup");
       else if (pick === "Quick Actions") await vscode.commands.executeCommand("cursorRemote.statusBarClick");
     });
   }

@@ -403,10 +403,10 @@ test("Telegram codes are always single use and leave the session's reusable code
   });
   const telegram = relayForTelegram(() => relay.client);
   try {
-    assert.deepEqual(telegram.status(), { sessionId: null, connected: false });
+    assert.deepEqual(telegram.status(), { sessionId: null, connected: false, serverUrl: relay.client.getServerUrl() });
     await assert.rejects(telegram.createSingleUseCode());
     await relay.client.connectToSessionById("TGPAIR");
-    assert.deepEqual(telegram.status(), { sessionId: "TGPAIR", connected: true });
+    assert.deepEqual(telegram.status(), { sessionId: "TGPAIR", connected: true, serverUrl: relay.client.getServerUrl() });
     const reusable = await relay.client.getPairingCode(true);
     const saved = new Map(relay.secrets);
     const single = await telegram.createSingleUseCode();
@@ -416,4 +416,27 @@ test("Telegram codes are always single use and leave the session's reusable code
     assert.deepEqual(relay.secrets, saved, "the stored reusable code is untouched");
     assert.equal((await relay.client.getPairingCode(true)).code, reusable.code);
   } finally { await relay.close(); }
+});
+
+test("with no relay server the client refuses to connect, and switching relays drops the session", async () => {
+  const lines: string[] = [];
+  const none = new RelayClient("", { appendLine: (l: string) => lines.push(l) } as any);
+  await assert.rejects(none.start("ABC123"), /No relay server is set up\. Run Cursor Remote: Set Up\./);
+  assert.equal(await none.startNewSession(), null);
+  await none.connectToSessionById("ABC123");
+  assert.equal(none.isConnectedToSession(), false);
+  assert.ok(lines.some((l) => l.includes("No relay server is set up")));
+
+  const relay = await fakeRelay({});
+  try {
+    await relay.client.connectToSessionById("SWITCH");
+    assert.equal(relay.client.isConnectedToSession(), true);
+    relay.client.setServerUrl("https://other.example");
+    assert.equal(relay.client.isConnectedToSession(), false);
+    assert.equal(relay.client.getSessionId(), null);
+    assert.equal(relay.client.getServerUrl(), "https://other.example");
+  } finally {
+    relay.client.stop();
+    await relay.close();
+  }
 });
