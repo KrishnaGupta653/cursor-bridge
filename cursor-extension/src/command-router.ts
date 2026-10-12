@@ -218,6 +218,9 @@ export class CommandRouter {
         case "unwatch_chat":
           result = this.handleUnwatchChat(command);
           break;
+        case "watch_chats":
+          result = this.handleWatchChats(command);
+          break;
         case "get_composer_state":
           result = await this.handleComposerState(command);
           break;
@@ -232,6 +235,7 @@ export class CommandRouter {
         case "set_model":
         case "set_mode":
         case "agent_stop":
+        case "chat_action":
           result = await this.handleAgentsAction(command);
           break;
         default:
@@ -783,6 +787,12 @@ export class CommandRouter {
     return { success: true, message: "Watching chat" };
   }
 
+  private handleWatchChats(command: CommandMessage): CommandResult {
+    if (!command.clientId) return { success: false, error: "Unattributed watch" };
+    this.requireChat().watcher.watchList({ clientId: command.clientId, targetDeviceId: command.senderDeviceId });
+    return { success: true, message: "Watching chat statuses" };
+  }
+
   private handleUnwatchChat(command: CommandMessage): CommandResult {
     if (!command.clientId) return { success: false, error: "Unattributed unwatch" };
     this.requireChat().watcher.unwatch({ clientId: command.clientId, targetDeviceId: command.senderDeviceId });
@@ -839,6 +849,10 @@ export class CommandRouter {
       case "set_mode":
         result = await agents.setMode(String(command.mode), command.chatId, group);
         break;
+      case "chat_action":
+        result = await agents.rowAction(command.chatId as string, String(command.action));
+        this.audit(command, result.ok, `action=${command.action}`);
+        return result.ok ? { success: true, data: { action: command.action } } : { success: false, error: result.error };
       default:
         result = await agents.stop(command.chatId, group);
     }

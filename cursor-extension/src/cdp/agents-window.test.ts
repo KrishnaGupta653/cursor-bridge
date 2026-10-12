@@ -387,3 +387,38 @@ describe("AgentsWindow lock", () => {
     assert.deepEqual(delivered[chatB], ["for B"]);
   });
 });
+
+describe("AgentsWindow row actions", () => {
+  const CHAT = "chat-aaaa-1111";
+  let pin: El;
+  let archive: El;
+  let agents: AgentsWindow;
+
+  function sidebar(pinLabel: string) {
+    pin = new El("button", { "aria-label": pinLabel });
+    archive = new El("button", { "aria-label": "Archive" });
+    (globalThis as any).document = new El("#document").add(
+      new El("li", { "data-sidebar-item-key": `row:${CHAT}` }).add(new El("div", { "data-sidebar-menu-button": "" }, "Chat A"), pin, archive),
+      new El("li", { "data-sidebar-item-key": "row:chat-bbbb-2222" }).add(new El("button", { "aria-label": "Archive" }))
+    );
+    agents = new AgentsWindow(() => ({ evaluate: async <T>(e: string) => (0, eval)(e) as T, send: async () => undefined }));
+  }
+
+  afterEach(() => delete (globalThis as any).document);
+
+  it("clicks only that row's own button", async () => {
+    sidebar("Pin");
+    assert.deepEqual(await agents.rowAction(CHAT, "pin"), { ok: true });
+    assert.deepEqual(await agents.rowAction(CHAT, "archive"), { ok: true });
+    assert.deepEqual([pin.clicks, archive.clicks], [1, 1]);
+  });
+
+  it("pinning a pinned chat is a no-op, and unknown chats or actions click nothing", async () => {
+    sidebar("Unpin");
+    assert.deepEqual(await agents.rowAction(CHAT, "pin"), { ok: true, already: true });
+    assert.equal((await agents.rowAction("chat-cccc-3333", "archive")).ok, false);
+    assert.equal((await agents.rowAction(CHAT, "delete")).ok, false);
+    assert.equal((await agents.rowAction('x"],body,[a="', "archive")).ok, false);
+    assert.deepEqual([pin.clicks, archive.clicks], [0, 0]);
+  });
+});

@@ -20,8 +20,8 @@ class Cr {
 
   // Text
   static const text = Color(0xFFE8EAED);
-  static const textSecondary = Color(0xFF9AA3B2);
-  static const textFaint = Color(0xFF798193);
+  static const textSecondary = Color(0xFFA7AFBD);
+  static const textFaint = Color(0xFF8A92A4);
 
   // Accent (blue — not purple)
   static const accent = Color(0xFF5B8DEF);
@@ -47,6 +47,8 @@ class Cr {
   static const tapTarget = BoxConstraints(minWidth: 44, minHeight: 44);
 
   static const sidebarWidth = 300.0;
+  static const sidebarMinWidth = 240.0;
+  static const sidebarMaxWidth = 520.0;
   static const wideBreakpoint = 900.0;
   static const tabletBreakpoint = 700.0;
 }

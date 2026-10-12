@@ -200,9 +200,11 @@ class CursorConnection extends ChangeNotifier {
   }
 
   /// Relay polling cadence: fast while the user or the agent is active, slower otherwise,
-  /// and none while the app is hidden (each poll costs the relay several Redis commands).
+  /// and none while the app is hidden (each poll costs the relay several Redis commands)
+  /// unless [pollWhenHidden] says notifications need it.
   static const activePoll = Duration(seconds: 2);
   static const idlePoll = Duration(seconds: 10);
+  static const hiddenPoll = Duration(seconds: 30);
   static const activeWindow = Duration(minutes: 2);
   static const maxReconnectAttempts = 5;
 
@@ -228,6 +230,9 @@ class CursorConnection extends ChangeNotifier {
 
   /// True while a reply is expected, so polling stays fast.
   bool Function()? isBusy;
+
+  /// True when a hidden app should keep polling slowly, so chat notifications still arrive.
+  bool Function()? pollWhenHidden;
 
   WebSocketChannel? _socket;
   String? _localUrl;
@@ -281,6 +286,7 @@ class CursorConnection extends ChangeNotifier {
     if (visible == _visible) return;
     _visible = visible;
     if (!visible) {
+      if (pollWhenHidden?.call() ?? false) return;
       _pollTimer?.cancel();
       _pollTimer = null;
     } else if (connected && type == ConnectionType.relay) {
@@ -290,6 +296,7 @@ class CursorConnection extends ChangeNotifier {
   }
 
   Duration get pollDelay {
+    if (!_visible) return hiddenPoll;
     final active = (isBusy?.call() ?? false) ||
         DateTime.now().difference(_lastActivity) < activeWindow;
     return active ? activePoll : idlePoll;
@@ -718,7 +725,7 @@ class CursorConnection extends ChangeNotifier {
 
   void _schedulePoll(Duration delay) {
     _pollTimer?.cancel();
-    if (!_visible || !connected || type != ConnectionType.relay) {
+    if ((!_visible && !(pollWhenHidden?.call() ?? false)) || !connected || type != ConnectionType.relay) {
       _pollTimer = null;
       return;
     }

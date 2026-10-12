@@ -21,15 +21,16 @@ const allowed = new Set([
   "get_sessions", "sessions", "get_agent_history", "agent_history",
   "select_session", "get_agent_state", "get_agent_plan", "get_plan",
   "agent_prompt", "cli_prompt", "insert_text",
-  "list_chats", "get_chat", "watch_chat", "unwatch_chat", "get_composer_state", "list_models",
-  "get_file_diff", "open_chat", "new_chat", "set_model", "set_mode", "agent_stop",
+  "list_chats", "get_chat", "watch_chat", "unwatch_chat", "watch_chats", "get_composer_state", "list_models",
+  "get_file_diff", "open_chat", "new_chat", "set_model", "set_mode", "agent_stop", "chat_action",
   "approve_action", "reject_action", "stop_prompt",
 ]);
 
 const CHAT_ID = /^[A-Za-z0-9-]{8,80}$/;
 const REQUEST_ID = /^req-[a-z0-9]{1,16}$/;
 const MODES = new Set(["Agent", "Ask", "Plan", "Debug", "Multitask"]);
-const NEEDS_CHAT = new Set(["get_chat", "watch_chat", "open_chat", "get_file_diff", "approve_action", "reject_action"]);
+const NEEDS_CHAT = new Set(["get_chat", "watch_chat", "open_chat", "get_file_diff", "approve_action", "reject_action", "chat_action"]);
+const CHAT_ACTIONS = new Set(["pin", "unpin", "archive"]);
 
 function validChat(v: unknown): boolean {
   return typeof v === "string" && CHAT_ID.test(v);
@@ -37,7 +38,7 @@ function validChat(v: unknown): boolean {
 
 export function remoteCommandError(command: {
   type: string; terminal?: unknown; prompt?: unknown; sessionId?: unknown;
-  chatId?: unknown; requestId?: unknown; confirmed?: unknown; path?: unknown; mode?: unknown; model?: unknown;
+  chatId?: unknown; requestId?: unknown; confirmed?: unknown; path?: unknown; mode?: unknown; model?: unknown; action?: unknown;
   newChat?: unknown;
 }): string | null {
   if (!allowed.has(command.type)) return "Command is not an allowed remote capability";
@@ -63,6 +64,9 @@ export function remoteCommandError(command: {
       (typeof command.path !== "string" || !command.path || command.path.length > 1024 || command.path.includes("\0"))) {
     return "Valid file path required";
   }
+  if (command.type === "chat_action" && (typeof command.action !== "string" || !CHAT_ACTIONS.has(command.action))) {
+    return "Action must be pin, unpin or archive";
+  }
   if (command.type === "set_mode" && (typeof command.mode !== "string" || !MODES.has(command.mode))) {
     return "Mode must be Agent, Ask, Plan, Debug or Multitask";
   }
@@ -80,7 +84,7 @@ export function evaluateCommandPolicy(input: CommandPolicyInput): CommandPolicyR
     "chat_response_complete", "agent_state", "agent_plan", "sessions", "agent_history",
     "cdp_status", "cdp_targets", "connection_status", "log", "error", "session_info",
     "chat_history", "terminal_output",
-    "chats", "chat", "chat_delta", "composer_state", "file_diff", "models"]);
+    "chats", "chat", "chat_delta", "chat_statuses", "composer_state", "file_diff", "models"]);
   const payload = input.data || {};
   const error = input.deviceType === "pc" && responses.has(input.messageType)
     ? null : remoteCommandError({ ...payload, type: input.messageType });

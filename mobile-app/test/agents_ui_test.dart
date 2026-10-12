@@ -1,6 +1,8 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:cursor_remote/models/chat_models.dart';
 import 'package:cursor_remote/screens/agent_control_center.dart';
@@ -153,6 +155,117 @@ void main() {
     await settle(tester);
     expect(find.text('Pinned'), findsOneWidget);
     expect(tester.takeException(), isNull);
+    await finish(tester, store);
+  });
+
+  test('live statuses update the rows, count for the tab title, and flag chats that finish or need approval', () {
+    final (store, sent) = fakeStore();
+    final seen = <String>[];
+    store.onAttention = (row, why) => seen.add('${row.title}:${why.name}');
+    store.watchChats();
+    expect(sent.last['type'], 'watch_chats');
+    expect([store.attentionCount, tabTitle(store.attentionCount)], [0, 'Cursor Remote']);
+
+    store.applyInbound({
+      'type': 'chat_statuses',
+      'statuses': [
+        {'id': chatA, 'status': 'waiting', 'unread': false},
+        {'id': chatB, 'status': 'done', 'unread': true},
+        {'id': 'not-in-the-list', 'status': 'running', 'unread': false},
+      ],
+    });
+    expect(seen, ['Fix login:waiting', 'Add search:finished']);
+    expect(store.chats.map((c) => c.status), ['waiting', 'done', 'done']);
+    expect(store.chats.first.pinned, isTrue, reason: 'only status and unread change');
+    expect(tabTitle(store.attentionCount), '(2) Cursor Remote');
+
+    seen.clear();
+    final before = store.chats;
+    store.applyInbound({'type': 'chat_statuses', 'statuses': [{'id': chatA, 'status': 'waiting', 'unread': false}]});
+    expect([seen, identical(store.chats, before)], [isEmpty, isTrue]);
+
+    store.applyInbound({'type': 'command_result', 'correlationId': sent.first['id'], 'success': false, 'error': 'old relay'});
+    expect(store.error, isNull, reason: 'an extension or relay without watch_chats is not an error');
+    store.dispose();
+  });
+
+  testWidgets('the sidebar refreshes with a button, marks chats awaiting approval, and has no dead shortcut or second Log out',
+      (tester) async {
+    final (store, sent) = fakeStore();
+    store.applyInbound({'type': 'chat_statuses', 'statuses': [{'id': chatC, 'status': 'waiting', 'unread': false}]});
+    await pumpShell(tester, store, size: const Size(1200, 800));
+    expect(find.text('⌘N'), findsNothing);
+    expect(find.text('Log out'), findsNothing);
+    expect(find.text('Approval'), findsOneWidget);
+
+    await tester.tap(find.text('website'));
+    await tester.pump();
+    expect(find.text('Docs pass'), findsNothing);
+    expect(find.text('Approval'), findsOneWidget, reason: 'a collapsed repository still shows it');
+
+    await tester.tap(find.byTooltip('Refresh'));
+    await tester.pump();
+    expect(sent.last['type'], 'list_chats');
+    await finish(tester, store);
+  });
+
+  testWidgets('hovering a row offers Pin and Archive like Cursor; Archive asks first; touch uses a long press',
+      (tester) async {
+    final (store, sent) = fakeStore();
+    await pumpShell(tester, store, size: const Size(1200, 800));
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    addTearDown(mouse.removePointer);
+    await mouse.addPointer(location: Offset.zero);
+    await mouse.moveTo(tester.getCenter(find.text('Docs pass')));
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('Pin'));
+    await tester.pump();
+    expect([sent.last['type'], sent.last['chatId'], sent.last['action']], ['chat_action', chatC, 'pin']);
+    store.applyInbound({'type': 'command_result', 'correlationId': sent.last['id'], 'success': true});
+    expect(sent.last['type'], 'list_chats', reason: 'the list reloads to show the new pin');
+
+    final before = sent.length;
+    await tester.tap(find.byTooltip('Archive'));
+    await settle(tester);
+    expect(find.text('Archive this chat?'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await settle(tester);
+    expect(sent.length, before, reason: 'cancel sends nothing');
+    await tester.tap(find.byTooltip('Archive'));
+    await settle(tester);
+    await tester.tap(find.widgetWithText(FilledButton, 'Archive'));
+    await settle(tester);
+    expect([sent.last['type'], sent.last['action']], ['chat_action', 'archive']);
+
+    await mouse.moveTo(Offset.zero);
+    await tester.longPress(find.text('Fix login'));
+    await settle(tester);
+    await tester.tap(find.text('Unpin'));
+    await settle(tester);
+    expect([sent.last['chatId'], sent.last['action']], [chatA, 'unpin']);
+    await finish(tester, store);
+  });
+
+  testWidgets('the sidebar can be dragged wider, within limits, and double-clicked back', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final (store, _) = fakeStore();
+    await pumpShell(tester, store, size: const Size(1400, 800));
+    double width() => tester.getSize(find.byType(AgentsSidebar)).width;
+    Offset handle() => Offset(width() + 3, 400);
+    expect(width(), Cr.sidebarWidth);
+    await tester.dragFrom(handle(), const Offset(100, 0));
+    await tester.pump();
+    expect(width(), closeTo(Cr.sidebarWidth + 100, 20));
+    await tester.dragFrom(handle(), const Offset(900, 0));
+    await tester.pump();
+    expect(width(), Cr.sidebarMaxWidth);
+
+    await tester.tapAt(handle());
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.tapAt(handle());
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(width(), Cr.sidebarWidth);
     await finish(tester, store);
   });
 

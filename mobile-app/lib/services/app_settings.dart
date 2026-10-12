@@ -14,6 +14,8 @@ class AppSettings extends ChangeNotifier {
   static const String _keyShowHistory = 'show_history';
   static const String _keyDefaultAgentMode = 'default_agent_mode';
   static const String _keyConnectionHistory = 'connection_history';
+  static const String _keyNotifyChats = 'notify_chats';
+  static const String _keySidebarWidth = 'sidebar_width';
 
   // Maximum number of history entries
   static const int _maxHistoryCount = 5;
@@ -22,10 +24,18 @@ class AppSettings extends ChangeNotifier {
   bool _showHistory = false; // hidden by default
   String _defaultAgentMode = 'auto';
   List<ConnectionHistoryItem> _connectionHistory = [];
+  bool _notifyChats = false;
+  double? _sidebarWidth;
 
   // getters
   bool get showHistory => _showHistory;
   String get defaultAgentMode => _defaultAgentMode;
+
+  /// Browser notifications when a chat finishes or needs approval while the tab is hidden.
+  bool get notifyChats => _notifyChats;
+
+  /// The Agents sidebar's width on wide screens, once dragged.
+  double? get sidebarWidth => _sidebarWidth;
   List<ConnectionHistoryItem> get connectionHistory =>
       List.unmodifiable(_connectionHistory);
 
@@ -36,6 +46,8 @@ class AppSettings extends ChangeNotifier {
     _showHistory = prefs.getBool(_keyShowHistory) ?? false;
 
     _defaultAgentMode = prefs.getString(_keyDefaultAgentMode) ?? 'auto';
+    _notifyChats = prefs.getBool(_keyNotifyChats) ?? false;
+    _sidebarWidth = prefs.getDouble(_keySidebarWidth);
 
     final historyJson = prefs.getString(_keyConnectionHistory);
     if (historyJson != null && historyJson.isNotEmpty) {
@@ -50,6 +62,23 @@ class AppSettings extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_keyShowHistory, value);
     notifyListeners();
+  }
+
+  Future<void> setNotifyChats(bool value) async {
+    _notifyChats = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyNotifyChats, value);
+    notifyListeners();
+  }
+
+  Future<void> setSidebarWidth(double? value) async {
+    _sidebarWidth = value;
+    final prefs = await SharedPreferences.getInstance();
+    if (value == null) {
+      await prefs.remove(_keySidebarWidth);
+    } else {
+      await prefs.setDouble(_keySidebarWidth, value);
+    }
   }
 
   Future<void> setDefaultAgentMode(String mode) async {

@@ -79,12 +79,14 @@ device that asked. Nothing is broadcast to other devices.
 | `get_chat` | `chatId` | `chat` (paged items) |
 | `watch_chat` | `chatId`, `fromTotal` | live `chat_delta` and `composer_state` |
 | `unwatch_chat` | — | — |
+| `watch_chats` | — | live `chat_statuses` (`statuses`: `id`, `status`, `unread` per sidebar row), sent only when they change |
 | `get_composer_state` | — | `composer_state` |
 | `list_models` | — | `models` |
 | `get_file_diff` | `chatId`, `path` | `file_diff` (read-only, contained to the chat's repository) |
 
 A watch lapses after 10 minutes unless the app sends `watch_chat` again; the app renews it while
-the chat is open. A `chat_delta` carries `fromSeq` and `total`; on a gap the app reloads the chat once.
+the chat is open. `watch_chats` lapses the same way; the app renews it while connected, even when hidden.
+A `chat_delta` carries `fromSeq` and `total`; on a gap the app reloads the chat once.
 
 ### Prompting
 
@@ -99,7 +101,8 @@ When the agent finishes, the asking device gets one `chat_response` with the fin
 ### Remote actions
 
 `open_chat`, `new_chat`, `set_model` (`model`), `set_mode` (`mode`: Agent, Ask, Plan, Debug,
-Multitask), `agent_stop`, `stop_prompt`, `approve_action` and `reject_action`.
+Multitask), `agent_stop`, `stop_prompt`, `approve_action`, `reject_action` and `chat_action`
+(`chatId`, `action`: pin, unpin or archive; clicks that row's own button in Cursor's sidebar).
 
 - All of them are turned off when `cursorRemote.remoteActions` is `disabled`.
 - Every attempt, allowed or refused, is written to the **Cursor Remote** output as an `[Audit]` line.

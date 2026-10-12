@@ -92,7 +92,7 @@ void main() {
       expect(find.text('Connecting…'), findsNothing);
       expect(find.text('Relay'), findsOneWidget);
 
-      await tester.tap(find.text('Log out'));
+      await tester.tap(find.byTooltip('Log out'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
       expect(find.text("Log out of session ABC123? You'll need a new pairing code to connect again."), findsOneWidget);

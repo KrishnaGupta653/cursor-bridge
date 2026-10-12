@@ -7,12 +7,18 @@ import '../models/chat_models.dart';
 /// Sends one command to the extension; resolves to an error message, or null when it was sent.
 typedef CommandSender = Future<String?> Function(Map<String, dynamic> command);
 
+/// A chat that needs a look: it finished running, or it is waiting for approval.
+enum ChatAttention { finished, waiting }
+
 /// Agents-window state for the app: the sidebar list, the open chat, the
 /// composer, and the replies to commands it sent.
 class ChatStore extends ChangeNotifier {
   ChatStore({required this.send});
 
   final CommandSender send;
+
+  /// Called when a chat in the list finishes or starts waiting for approval.
+  void Function(ChatRow row, ChatAttention why)? onAttention;
 
   /// The extension drops a watch after 10 minutes unless it is renewed.
   static const watchRenewInterval = Duration(minutes: 2);
@@ -61,6 +67,7 @@ class ChatStore extends ChangeNotifier {
   final Map<String, String> _sentChat = {};
   final Map<String, Completer<FileDiff>> _diffs = {};
   Timer? _renewTimer;
+  Timer? _listTimer;
   Timer? _searchDebounce;
   bool _visible = true;
   bool _resyncing = false;
@@ -131,6 +138,9 @@ class ChatStore extends ChangeNotifier {
 
   List<SidebarSection> get sections => groupChats(chats, query: query);
 
+  /// Chats waiting for approval or with an unread answer, as Cursor marks them.
+  int get attentionCount => chats.where((c) => c.waiting || c.unread).length;
+
   // ---- Sidebar -------------------------------------------------------------
 
   Future<void> refreshChats() async {
@@ -152,6 +162,13 @@ class ChatStore extends ChangeNotifier {
       'expand': true,
       if (query.trim().isNotEmpty) 'query': query.trim(),
     }, _chatsRequest = _nextId());
+  }
+
+  /// Follow the sidebar's statuses (running, waiting, unread), hidden or not, until [reset].
+  void watchChats() {
+    unawaited(_command('watch_chats'));
+    _listTimer?.cancel();
+    _listTimer = Timer.periodic(watchRenewInterval, (_) => unawaited(_command('watch_chats')));
   }
 
   void search(String value) {
@@ -230,6 +247,9 @@ class ChatStore extends ChangeNotifier {
     if (!canStop) return;
     await _command('agent_stop', {'chatId': selectedChatId});
   }
+
+  /// Pin, unpin or archive a chat with the row's own buttons in Cursor's sidebar.
+  Future<void> chatAction(String chatId, String action) => _command('chat_action', {'chatId': chatId, 'action': action});
 
   Future<void> setModel(String model) =>
       _command('set_model', {'model': model, if (selectedChatId != null) 'chatId': selectedChatId});
@@ -312,6 +332,7 @@ class ChatStore extends ChangeNotifier {
   /// Forget everything tied to the old connection.
   void reset() {
     _renewTimer?.cancel();
+    _listTimer?.cancel();
     for (final c in _diffs.values) {
       if (!c.isCompleted) c.completeError(StateError('Disconnected'));
     }
@@ -347,6 +368,9 @@ class ChatStore extends ChangeNotifier {
         break;
       case 'chat_delta':
         _applyDelta(data);
+        break;
+      case 'chat_statuses':
+        if (!_applyStatuses(data)) return true;
         break;
       case 'composer_state':
         if (data['state'] is Map) {
@@ -409,6 +433,35 @@ class ChatStore extends ChangeNotifier {
     }
     hasMoreChats = data['hasMore'] == true;
     loadingChats = false;
+  }
+
+  /// Updates the rows the list already has; false when nothing changed.
+  bool _applyStatuses(Map<String, dynamic> data) {
+    final byId = <String, Map>{};
+    for (final s in (data['statuses'] as List? ?? const []).whereType<Map>()) {
+      byId[s['id']?.toString() ?? ''] = s;
+    }
+    var changed = false;
+    final next = <ChatRow>[];
+    for (final row in chats) {
+      final s = byId[row.id];
+      final updated = s == null ? row : _updated(row, s['status']?.toString() ?? row.status, s['unread'] == true);
+      changed |= !identical(updated, row);
+      next.add(updated);
+    }
+    if (changed) chats = next;
+    return changed;
+  }
+
+  ChatRow _updated(ChatRow row, String status, bool unread) {
+    if (status == row.status && unread == row.unread) return row;
+    final next = row.withStatus(status, unread);
+    if (next.waiting && !row.waiting) {
+      onAttention?.call(next, ChatAttention.waiting);
+    } else if (row.running && !next.running && !next.waiting) {
+      onAttention?.call(next, ChatAttention.finished);
+    }
+    return next;
   }
 
   void _applyChat(Map<String, dynamic> data) {
@@ -482,6 +535,7 @@ class ChatStore extends ChangeNotifier {
         unawaited(selectChat(newChatId, keepPrompt: true));
         unawaited(refreshChats());
       }
+      if (type == 'chat_action') unawaited(refreshChats());
       return;
     }
     if (type == 'list_chats' && correlationId != _chatsRequest) return;
@@ -497,13 +551,15 @@ class ChatStore extends ChangeNotifier {
       pendingPrompt = null;
     }
     _settle(type, forChat);
-    if (type == 'watch_chat' || type == 'unwatch_chat') return;
+    // An older extension or relay doesn't know watch_chats; the list then just isn't live.
+    if (type == 'watch_chat' || type == 'unwatch_chat' || type == 'watch_chats') return;
     error = message;
   }
 
   @override
   void dispose() {
     _renewTimer?.cancel();
+    _listTimer?.cancel();
     _searchDebounce?.cancel();
     super.dispose();
   }

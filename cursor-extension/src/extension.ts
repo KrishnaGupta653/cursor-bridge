@@ -332,6 +332,11 @@ export async function activate(context: vscode.ExtensionContext) {
       cdpManager?.agents.attached
         ? cdpManager.agents.composerState()
         : { ok: false as const, error: "Cursor Agents window is not attached" },
+    chatStatuses: async () => {
+      if (!cdpManager?.agents.attached) return null;
+      const result = await cdpManager.agents.sidebar();
+      return result.ok ? result.rows.map((r) => ({ id: r.id, status: r.status, unread: r.unread })) : null;
+    },
     send: (payload) => wsServer?.send(JSON.stringify(payload)),
     logError: (msg, err) =>
       outputChannel.appendLine(`${msg}${err ? ` - ${err instanceof Error ? err.message : String(err)}` : ""}`),

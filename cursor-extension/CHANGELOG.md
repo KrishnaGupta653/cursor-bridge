@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`cursorRemote.appUrl`**: point phone links at a self-hosted web app.
 - Phone links from Telegram (`/app`, `/relay`, `/pair`, the start notice) and the Set Up QR code carry your relay (`?relay=…`), so the shared web app connects to it with no typing. The app asks before using a relay from a link.
 - Set Up and Diagnose are in the status bar menu. The first-run notice offers Set Up.
+- The phone's chat list stays live: running, approval and unread marks update as they change in Cursor (`watch_chats`, pushed only on change). Chats awaiting approval show an **Approval** badge, also on collapsed repositories, and the browser tab shows how many chats need a look.
+- Optional browser notifications (Settings → Notifications) when a chat finishes or needs approval while the tab is in the background. While they're on, a hidden tab still polls the relay every 30 seconds.
+- Pin, Unpin and Archive from the phone: hover a row (or long-press on touch), like Cursor's own sidebar. Archive asks first. These are remote actions: gated by `cursorRemote.remoteActions` and audited.
+- A **Live / Saved** pill in the app's top bar says whether the chat list is live from the Mac. The sidebar can be dragged wider (double-click resets), and secondary text is easier to read.
 
 ### Changed
 - **There is no built-in relay any more.** Each user runs their own; set `cursorRemote.relayServerUrl` or run Set Up. Relay commands without a relay offer Set Up instead of failing.
@@ -26,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Telegram "Cursor Remote started" notice is no longer lost when Cursor quits while waiting for the relay (for example, an auto-restart with session control); the restarted window sends it.
 - With the live view off (Cursor opened without session control, or the Agents window closed), the phone keeps your pinned chats and groups as Cursor last showed them, and says what's off and how to fix it.
 - Auto-restart with session control retries once when Cursor reopens itself plainly (for example, after an update), and then asks instead of staying off silently. Only one window acts per launch.
+- The app's sidebar: the dead "⌘N" hint and the second Log out are gone (Log out stays in the top bar), and a Refresh button replaces pull-to-refresh, which a mouse can't do.
 
 ## [0.6.4] - 2026-10-12
 

@@ -5,11 +5,14 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'models/connection_models.dart';
+import 'models/chat_models.dart';
 import 'services/app_settings.dart';
 import 'services/chat_store.dart';
 import 'services/connection.dart';
 import 'services/launch_code_stub.dart'
     if (dart.library.js_interop) 'services/launch_code_web.dart';
+import 'services/web_attention_stub.dart'
+    if (dart.library.js_interop) 'services/web_attention_web.dart' as attention;
 import 'screens/agent_control_center.dart';
 import 'screens/connection_landing.dart';
 import 'theme/app_theme.dart';
@@ -731,10 +734,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return MessageItem(logText, type: MessageType.log, logLevel: level);
   }
 
+  void _notifyChat(ChatRow row, ChatAttention why) {
+    if (!AppSettings().notifyChats || !attention.pageHidden) return;
+    attention.showNotification(why == ChatAttention.waiting ? 'Needs your approval' : 'Finished', row.title,
+        tag: row.id, onTap: () => _chats.selectChat(row.id));
+  }
+
   /// Reload the Agents sidebar and resume watching the open chat (after connect / reconnect).
   void _refreshAgents() {
     if (!_isConnected) return;
     _chats.refreshChats();
+    _chats.watchChats();
     _chats.resume();
   }
 
@@ -1667,7 +1677,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       ..askPairingCode = (({required bool relay}) =>
           relay ? _showPinDialog() : _showLocalPairDialog())
       ..isBusy = (() => _chats.running || _chats.awaitingReply || _isWaitingForResponse)
+      ..pollWhenHidden = (() => AppSettings().notifyChats && attention.notificationPermission == 'granted')
       ..addListener(_onConnectionChanged);
+    _chats.onAttention = _notifyChat;
     final linkRelay = widget.launchRelayUrl;
     if (linkRelay != null && linkRelay != _conn.relayUrl) {
       _connectionType = ConnectionType.relay;
@@ -2230,6 +2242,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               ),
             ),
             if (_selectedAgentBackend == 'cdp')
+              ListenableBuilder(
+                listenable: _chats,
+                builder: (context, _) => _chats.chats.isEmpty || (narrow && _chats.sidebarLive)
+                    ? const SizedBox.shrink()
+                    : Padding(
+                        padding: const EdgeInsets.only(right: 6),
+                        child: Tooltip(
+                          message: _chats.sidebarLive
+                              ? 'The chat list is live from Cursor on the Mac.'
+                              : liveOffNotice(_chats.liveOffReason, _chats.sidebarSavedAt),
+                          child: CrStatusChip(ok: _chats.sidebarLive, label: _chats.sidebarLive ? 'Live' : 'Saved'),
+                        ),
+                      ),
+              ),
+            if (_selectedAgentBackend == 'cdp')
               IconButton(
                 icon: Icon(_conn.relaySession != null ? Icons.logout_rounded : Icons.link_off_rounded, size: 20),
                 tooltip: _conn.relaySession != null ? 'Log out' : 'Disconnect',
@@ -2295,7 +2322,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           : _selectedAgentBackend == 'cdp'
           ? Listener(
               onPointerDown: (_) => _conn.markActive(),
-              child: AgentsShell(store: _chats, onLogOut: _conn.relaySession != null ? _confirmLogOut : null),
+              child: AgentsShell(store: _chats),
             )
           : _isCompactView
           ? _buildCompactBody()
@@ -3272,7 +3299,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                 borderRadius:
                                     BorderRadius.circular(Cr.radiusLg),
                               ),
-                              child: AgentsShell(store: _chats, onLogOut: _conn.relaySession != null ? _confirmLogOut : null),
+                              child: AgentsShell(store: _chats),
                             ),
                           ),
                         )
@@ -4426,6 +4453,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   child: CrSectionLabel('Features'),
                 ),
                 _buildShowHistoryTile(),
+                if (attention.notificationsSupported) _buildNotifyTile(),
               ],
             ),
           ),
@@ -4487,6 +4515,36 @@ class _SettingsPageState extends State<SettingsPage> {
       subtitle: const Text('Show history section on main screen'),
       value: _settings.showHistory,
       onChanged: (value) => _settings.setShowHistory(value),
+    );
+  }
+
+  Widget _buildNotifyTile() {
+    return SwitchListTile(
+      secondary: Container(
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.secondaryContainer,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Icon(
+          Icons.notifications_outlined,
+          color: Theme.of(context).colorScheme.onSecondaryContainer,
+          size: 20,
+        ),
+      ),
+      title: const Text('Notifications'),
+      subtitle: const Text('When a chat finishes or needs approval while this tab is in the background'),
+      value: _settings.notifyChats && attention.notificationPermission == 'granted',
+      onChanged: (value) async {
+        if (value && !await attention.requestNotifications()) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                content: Text('Notifications are blocked for this site. Allow them in the browser\'s site settings.')));
+          }
+          return;
+        }
+        await _settings.setNotifyChats(value);
+      },
     );
   }
 

@@ -52,6 +52,19 @@ class ChatRow {
   bool get running => status == 'running';
   bool get waiting => status == 'waiting';
 
+  ChatRow withStatus(String status, bool unread) => ChatRow(
+      id: id,
+      title: title,
+      time: time,
+      group: group,
+      pinned: pinned,
+      status: status,
+      unread: unread,
+      active: active,
+      repoName: repoName,
+      updatedAt: updatedAt,
+      inSidebar: inSidebar);
+
   /// Sidebar time label: Cursor's own when shown there, else relative to now.
   String timeLabel([DateTime? now]) {
     if (time.isNotEmpty) return time;
@@ -75,6 +88,9 @@ class SidebarSection {
 
 /// Pinned first, then one section per repository in the order rows arrive
 /// (Cursor's sidebar order, then transcript-only chats by recency).
+/// The browser tab's title: how many chats need a look, as Cursor marks them.
+String tabTitle(int attention) => attention > 0 ? '($attention) Cursor Remote' : 'Cursor Remote';
+
 /// Why the live Agents sidebar is off, and what to do on the Mac.
 String liveOffReasonText(String? reason) => reason == 'session-control'
     ? 'Live view off: Cursor on the Mac was opened without session control. '

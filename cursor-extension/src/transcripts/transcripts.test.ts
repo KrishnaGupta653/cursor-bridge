@@ -133,6 +133,49 @@ test("git diffs are read-only, contained, and fall back to transcript snippets",
   assert.match(fallback.diff, /^--- a\/a\.ts\n\+\+\+ b\/a\.ts\n@@ -1,1 \+1,1 @@ StrReplace\n-old\n\+new$/);
 });
 
+test("sidebar statuses reach list watchers only when they change, and lapse unless renewed", async () => {
+  let statuses: any[] | null = [{ id: CHAT_A, status: "running", unread: false }];
+  let reads = 0;
+  const sent: any[] = [];
+  const watcher = new ChatWatcher({
+    index: { since: () => null } as any,
+    composerState: async () => ({ ok: false, error: "not attached" }),
+    chatStatuses: async () => (reads++, statuses),
+    send: (p) => sent.push(p),
+    logError: () => {},
+    tickMs: 60_000,
+  });
+  const phone = { clientId: "relay:S1", targetDeviceId: "phone" };
+  const t0 = 1_000_000;
+  await watcher.tick(t0);
+  assert.equal(reads, 0, "nobody watches the list: the sidebar isn't read");
+
+  watcher.watchList(phone, t0);
+  await watcher.tick(t0 + 1);
+  assert.deepEqual(sent, [{ type: "chat_statuses", clientId: "relay:S1", targetDeviceId: "phone", statuses }]);
+  await watcher.tick(t0 + 10_000);
+  assert.equal(sent.length, 1, "unchanged statuses are not sent again");
+
+  statuses = [{ id: CHAT_A, status: "waiting", unread: false }];
+  await watcher.tick(t0 + 20_000);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].statuses[0].status, "waiting");
+  statuses = null;
+  await watcher.tick(t0 + 30_000);
+  assert.equal(sent.length, 2, "an unreadable sidebar sends nothing");
+
+  watcher.watchList(phone, t0 + 5 * 60_000);
+  await watcher.tick(t0 + 11 * 60_000);
+  const before = reads;
+  await watcher.tick(t0 + 16 * 60_000);
+  assert.equal(reads, before, "the renewed watch lapsed 10 minutes after renewal");
+  watcher.watchList(phone, t0);
+  watcher.forgetClient("relay:S1");
+  await watcher.tick(t0 + 17 * 60_000);
+  assert.equal(reads, before);
+  watcher.dispose();
+});
+
 test("chat watches are isolated per subscriber and lapse unless renewed", async () => {
   const totals: Record<string, number> = { [CHAT_A]: 3, [CHAT_B]: 1 };
   const mtimes: Record<string, number> = { [CHAT_A]: 1, [CHAT_B]: 1 };

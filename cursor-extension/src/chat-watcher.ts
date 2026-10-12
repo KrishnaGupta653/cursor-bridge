@@ -4,7 +4,7 @@
  * composer check. Nothing is broadcast: every payload carries its subscriber's identity.
  */
 
-import { ComposerState, ActionResult } from "./cdp/agents-window";
+import { ComposerState, ActionResult, RowStatus } from "./cdp/agents-window";
 import { ChatItem, TranscriptIndex } from "./transcripts/transcript-index";
 
 export interface Subscriber {
@@ -31,9 +31,23 @@ interface ReplyWait extends Subscriber {
   correlationId?: string;
 }
 
+/** What a sidebar row shows at a glance; pushed to list watchers when it changes. */
+export interface ChatStatus {
+  id: string;
+  status: RowStatus;
+  unread: boolean;
+}
+
+interface ListWatch extends Subscriber {
+  lastBody: string;
+  expiresAt: number;
+}
+
 export interface ChatWatcherOptions {
   index: TranscriptIndex;
   composerState: () => Promise<ActionResult<{ state: ComposerState }>>;
+  /** The live sidebar's row statuses, or null when it can't be read. */
+  chatStatuses?: () => Promise<ChatStatus[] | null>;
   send: (payload: Record<string, unknown>) => void;
   logError: (msg: string, err?: unknown) => void;
   tickMs?: number;
@@ -66,6 +80,7 @@ function isRelay(s: Subscriber): boolean {
 export class ChatWatcher {
   private watches = new Map<string, Watch>();
   private replies = new Map<string, ReplyWait>();
+  private lists = new Map<string, ListWatch>();
   private observers = new Set<(state: ComposerState) => void>();
   private timer: NodeJS.Timeout | null = null;
   private busy = false;
@@ -102,6 +117,22 @@ export class ChatWatcher {
     this.ensureTimer();
   }
 
+  /** Push sidebar status changes to `sub` until the watch lapses; renewing keeps the last state sent. */
+  watchList(sub: Subscriber, nowMs: number = Date.now()): void {
+    const existing = this.lists.get(key(sub));
+    if (existing) {
+      existing.expiresAt = nowMs + WATCH_TTL_MS;
+      return;
+    }
+    if (this.lists.size >= MAX_WATCHES) {
+      const oldest = this.lists.keys().next().value;
+      if (oldest) this.lists.delete(oldest);
+    }
+    this.lists.set(key(sub), { clientId: sub.clientId, targetDeviceId: sub.targetDeviceId, lastBody: "", expiresAt: nowMs + WATCH_TTL_MS });
+    this.lastComposerAt = 0;
+    this.ensureTimer();
+  }
+
   unwatch(sub: Subscriber): boolean {
     const removed = this.watches.delete(key(sub));
     this.stopIfIdle();
@@ -112,6 +143,7 @@ export class ChatWatcher {
   forgetClient(clientId: string): void {
     for (const [k, w] of this.watches) if (w.clientId === clientId) this.watches.delete(k);
     for (const [k, r] of this.replies) if (r.clientId === clientId) this.replies.delete(k);
+    for (const [k, l] of this.lists) if (l.clientId === clientId) this.lists.delete(k);
     this.stopIfIdle();
   }
 
@@ -172,6 +204,7 @@ export class ChatWatcher {
     this.timer = null;
     this.watches.clear();
     this.replies.clear();
+    this.lists.clear();
     this.observers.clear();
   }
 
@@ -181,14 +214,14 @@ export class ChatWatcher {
   }
 
   private stopIfIdle(): void {
-    if (this.timer && !this.watches.size && !this.replies.size && !this.observers.size) {
+    if (this.timer && !this.watches.size && !this.replies.size && !this.lists.size && !this.observers.size) {
       clearInterval(this.timer);
       this.timer = null;
     }
   }
 
   private composerInterval(): number {
-    const subs = [...this.watches.values(), ...this.replies.values()];
+    const subs = [...this.watches.values(), ...this.replies.values(), ...this.lists.values()];
     if (subs.some((s) => !isRelay(s))) return LOCAL_COMPOSER_MS;
     if (subs.length) return RELAY_COMPOSER_MS;
     return OBSERVER_COMPOSER_MS;
@@ -200,11 +233,14 @@ export class ChatWatcher {
     this.busy = true;
     try {
       for (const [k, w] of this.watches) if (w.expiresAt <= now) this.watches.delete(k);
+      for (const [k, l] of this.lists) if (l.expiresAt <= now) this.lists.delete(k);
       this.stopIfIdle();
       for (const w of this.watches.values()) this.pushDelta(w, now);
-      if (!this.watches.size && !this.replies.size && !this.observers.size) return;
+      if (!this.watches.size && !this.replies.size && !this.lists.size && !this.observers.size) return;
       if (now - this.lastComposerAt >= this.composerInterval()) {
         this.lastComposerAt = now;
+        if (this.lists.size && this.options.chatStatuses) this.pushStatuses(await this.options.chatStatuses());
+        if (!this.watches.size && !this.replies.size && !this.observers.size) return;
         const result = await this.options.composerState();
         if (result.ok) {
           this.lastState = result.state;
@@ -263,6 +299,16 @@ export class ChatWatcher {
         chatId: w.chatId,
         state: view,
       });
+    }
+  }
+
+  private pushStatuses(statuses: ChatStatus[] | null): void {
+    if (!statuses) return;
+    const body = JSON.stringify(statuses);
+    for (const l of this.lists.values()) {
+      if (l.lastBody === body) continue;
+      l.lastBody = body;
+      this.options.send({ type: "chat_statuses", clientId: l.clientId, targetDeviceId: l.targetDeviceId, statuses });
     }
   }
 

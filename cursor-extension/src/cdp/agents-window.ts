@@ -81,6 +81,7 @@ export const SELECTORS = {
 
 export const MODES = ["Agent", "Ask", "Plan", "Debug", "Multitask"];
 const CHAT_ID_RE = /^[A-Za-z0-9-]{8,80}$/;
+export const ROW_ACTIONS = new Set(["pin", "unpin", "archive"]);
 
 function call(fn: (...args: any[]) => unknown, ...args: unknown[]): string {
   return `(${fn.toString()})(${args.map((a) => JSON.stringify(a)).join(",")})`;
@@ -161,6 +162,22 @@ function pageSidebar(S: typeof SELECTORS) {
  * The newest approve/reject pair outside the sidebar, with the exact button elements.
  * Shared by pageComposer and pageResolve so a resolve clicks the card whose ID it checked.
  */
+/** Clicks a row's own Pin, Unpin or Archive button, which Cursor keeps on every sidebar row. */
+export function pageRowAction(S: typeof SELECTORS, chatId: string, action: string) {
+  const li = document.querySelector('[data-sidebar-item-key="row:' + chatId + '"]');
+  if (!li) return { ok: false, error: "Chat is not in the Agents sidebar (it may be archived)" };
+  const want = action === "archive" ? "Archive" : action === "pin" ? "Pin" : "Unpin";
+  const done = action === "pin" ? "Unpin" : action === "unpin" ? "Pin" : "";
+  const buttons = Array.from(li.querySelectorAll("button[aria-label]")) as any[];
+  const button = buttons.find((b) => b.getAttribute("aria-label") === want);
+  if (!button) {
+    if (done && buttons.some((b) => b.getAttribute("aria-label") === done)) return { ok: true, already: true };
+    return { ok: false, error: "Cursor doesn't offer " + want + " for this chat" };
+  }
+  button.click();
+  return { ok: true };
+}
+
 export function pagePending(S: typeof SELECTORS) {
   const clean = (s: any) => String(s || "").replace(/\s+/g, " ").trim();
   const hash = (s: string) => {
@@ -536,6 +553,12 @@ export class AgentsWindow {
 
   newChat(): Promise<ActionResult> {
     return this.locked(() => this.run(call(pageNewChat, SELECTORS)));
+  }
+
+  rowAction(chatId: string, action: string): Promise<ActionResult> {
+    if (!CHAT_ID_RE.test(chatId)) return Promise.resolve({ ok: false, error: "Invalid chat ID" });
+    if (!ROW_ACTIONS.has(action)) return Promise.resolve({ ok: false, error: "Action must be pin, unpin or archive" });
+    return this.locked(() => this.run(call(pageRowAction, SELECTORS, chatId, action)));
   }
 
   stop(chatId?: string, group?: string): Promise<ActionResult> {

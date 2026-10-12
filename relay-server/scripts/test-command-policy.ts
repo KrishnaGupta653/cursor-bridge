@@ -22,6 +22,9 @@ const cases = [
   { messageType: "get_file_diff", data: { chatId: CHAT } },
   { messageType: "set_mode", data: { mode: "Root" } },
   { messageType: "set_model", data: {} },
+  { messageType: "chat_statuses" },
+  { messageType: "chat_action", data: { chatId: CHAT, action: "delete" } },
+  { messageType: "chat_action", data: { action: "pin" } },
 ];
 for (const input of cases) assert.equal(evaluateCommandPolicy(input).decision, "deny");
 for (const input of [
@@ -33,6 +36,9 @@ for (const input of [
   { messageType: "get_chat", data: { chatId: CHAT, before: 10 } },
   { messageType: "watch_chat", data: { chatId: CHAT, fromTotal: 4 } },
   { messageType: "unwatch_chat" },
+  { messageType: "watch_chats" },
+  { messageType: "chat_action", data: { chatId: CHAT, action: "archive" } },
+  { messageType: "chat_statuses", deviceType: "pc" },
   { messageType: "get_file_diff", data: { chatId: CHAT, path: "src/a.ts" } },
   { messageType: "agent_prompt", data: { chatId: CHAT, text: "hi" } },
   { messageType: "agent_prompt", data: { newChat: true, text: "hi" } },
@@ -44,4 +50,4 @@ for (const input of [
   { messageType: "stop_prompt", data: { type: "stop_prompt", id: "c1" } },
 ]) assert.equal(evaluateCommandPolicy(input).decision, "allow");
 assert.equal(evaluateCommandPolicy({ messageType: "stop_prompt", data: { type: "execute_command" } }).decision, "deny");
-console.log("PASS: 20 denied capability/alias cases and 17 allowed typed messages");
+console.log("PASS: 23 denied capability/alias cases and 20 allowed typed messages");

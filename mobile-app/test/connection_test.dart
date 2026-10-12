@@ -91,6 +91,34 @@ void main() {
     expect(const SendResult(error: 'HTTP 500', policyDecision: 'deny').failure, 'HTTP 500');
   });
 
+  testWidgets('a hidden app polls the relay only when notifications ask for it, and slowly', (tester) async {
+    var polls = 0;
+    final client = MockClient((req) async {
+      if (req.url.path == '/api/poll') polls++;
+      return http.Response(jsonEncode({'success': true, 'protocolVersion': 2,
+        'data': {'deviceId': 'mobile-1', 'token': 'a' * 43, 'messages': []}}), 200);
+    });
+    var notify = false;
+    final conn = CursorConnection(relayUrl: 'https://relay.test')..pollWhenHidden = (() => notify);
+    await http.runWithClient(() async {
+      await conn.connectRelay('ABC123', '123456');
+      conn.setVisible(false);
+      expect(conn.pollDelay, CursorConnection.hiddenPoll);
+      final off = polls;
+      await tester.pump(const Duration(minutes: 2));
+      expect(polls, off, reason: 'hidden without notifications: no polling');
+
+      conn.setVisible(true);
+      await tester.pump();
+      notify = true;
+      conn.setVisible(false);
+      final on = polls;
+      await tester.pump(const Duration(seconds: 65));
+      expect(polls - on, inInclusiveRange(2, 3), reason: 'hidden with notifications: about every 30 seconds');
+    }, () => client);
+    conn.dispose();
+  });
+
   group('relay connect errors', () {
     Future<CursorConnection> connectWith(int status, String errorCode, {bool firstOk = true, VoidCallback? onGaveUp}) async {
       var calls = 0;
