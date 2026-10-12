@@ -6,11 +6,12 @@ Action.
 ## 1. Health check
 
 ```bash
-curl -s https://cursor-remote-rela.vercel.app/api/health
+curl -s https://<your-relay>/api/health
 ```
 
-Expected: HTTP 200 with `"success": true` and `"data": { "status": "healthy" }`. The endpoint
-deliberately reports nothing else (no Redis or configuration details).
+Expected: HTTP 200 with `"data": { "status": "healthy", "redis": "ok", "protocolVersion": 2 }`.
+HTTP 503 means Redis is missing (`"redis": "not_configured"`) or not answering (`"unreachable"`).
+The endpoint never reports configuration values or tokens.
 
 If it fails:
 

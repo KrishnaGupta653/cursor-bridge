@@ -1,44 +1,24 @@
-# Cursor Remote Mobile App
+# Cursor Remote app
 
-A Flutter app for controlling the Cursor IDE remotely.
+The Flutter app for Cursor Remote: Cursor's Agents sidebar and chats on your phone, over your relay or
+the same Wi-Fi. It's hosted at <https://cursor-remote-app.vercel.app> and works with any relay; setup
+is in [SETUP.md](../SETUP.md).
 
-## Features
-
-- Server connection (WebSocket)
-- Sending text input
-- Running commands
-- Viewing the message log
-
-## Web deployment (Vercel)
-
-Flutter Web is deployed to **Vercel** at https://cursor-remote-app.vercel.app. Vercel has no Flutter build environment, so only the **locally built output** (`build/web`) is uploaded.
-
-```bash
-cd mobile-app
-flutter pub get
-flutter build web --release --base-href /
-cp vercel-build-output.json build/web/vercel.json
-cd build/web && vercel --prod
-```
-
-See [DEPLOY_INSTRUCTIONS.md](DEPLOY_INSTRUCTIONS.md) for the full procedure.
-
-## Build (mobile)
+## Run and test
 
 ```bash
 flutter pub get
-flutter build apk
+flutter test
+flutter run -d chrome --dart-define=RELAY_URL=http://localhost:3000   # optional default relay
 ```
 
-## Run
+Links can carry the relay and session: `/?relay=https%3A%2F%2Fmy-relay.vercel.app&session=ABC123`,
+plus `#code=…` for one-tap pairing (the fragment never reaches a server and the app removes it at start).
+A relay from a link is used only after the user confirms it, and only https relays (http on localhost)
+are accepted.
 
-```bash
-flutter run
-```
+## Build
 
-## Usage
-
-1. Launch the app
-2. Enter the server address (e.g. `192.168.0.10`)
-3. Tap Connect
-4. Enter and send commands
+- Web: see [docs/self-host-app.md](../docs/self-host-app.md).
+- Android: `flutter build apk --release`.
+- iOS: `cd ios && pod install && cd .. && flutter build ios`.

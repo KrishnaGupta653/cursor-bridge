@@ -36,7 +36,7 @@ Cursor Remote lets you control Cursor IDE on your PC remotely from a mobile devi
 | Component | Description |
 |-----------|-------------|
 | **Cursor Extension** (`cursor-extension/`) | VS Code/Cursor extension, ID `krishnagupta653.cursor-remote-extension` |
-| **Relay Server** (`relay-server/`) | Vercel + Upstash Redis, default <https://cursor-remote-rela.vercel.app> |
+| **Relay Server** (`relay-server/`) | Vercel + Upstash Redis; each user deploys their own ([SETUP.md](SETUP.md#2-deploy-your-relay)) |
 | **Mobile App** (`mobile-app/`) | Flutter app for Android/iOS, also deployed as the web app <https://cursor-remote-app.vercel.app> |
 
 ```
@@ -326,7 +326,7 @@ signs out every device.
 Phone / Web app  ⇄  HTTPS polling  ⇄  Vercel relay (Upstash Redis)  ⇄  HTTPS polling  ⇄  Cursor Extension
 
 * Works even when the PC and phone are on different networks
-* Default relay: https://cursor-remote-rela.vercel.app
+* Your own relay: run **Cursor Remote: Set Up** to deploy and check it ([SETUP.md](SETUP.md))
 ```
 
 ### Step 1: Connect the Mac to a session
@@ -729,8 +729,8 @@ Relay request failed (HTTP ...)
 **Fix:**
 ```bash
 # 1. Check the server status
-curl https://cursor-remote-rela.vercel.app/api/health
-# Healthy response: {"success":true,"data":{"status":"healthy"},...}
+curl https://<your-relay>/api/health
+# Healthy response: {"success":true,"data":{"status":"healthy","redis":"ok",...},...}
 ```
 
 2. Behind a corporate proxy (Zscaler etc.), check that Node trusts the root certificate

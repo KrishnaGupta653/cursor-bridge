@@ -59,7 +59,7 @@ and asks you to pair the phone again.
 ## 3. Quick API check
 
 ```bash
-curl -s https://cursor-remote-rela.vercel.app/api/health
+curl -s https://<your-relay>/api/health
 ```
 
 Only `{ "status": "healthy" }` is returned. All other endpoints need a capability token, so test them

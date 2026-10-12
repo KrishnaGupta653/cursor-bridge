@@ -3,7 +3,8 @@
 The relay lets the phone reach the Cursor extension from any network. It runs as one Vercel
 function backed by Upstash Redis and only forwards messages; it never talks to Cursor itself.
 
-Production: `https://cursor-remote-rela.vercel.app`. The full message format is in
+Each user deploys their own relay; the one-click Deploy button and every step are in
+[SETUP.md](../SETUP.md#2-deploy-your-relay). The full message format is in
 [PROTOCOL.md](../PROTOCOL.md#relay-api).
 
 ## Architecture

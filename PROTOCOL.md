@@ -114,7 +114,7 @@ CDP method are rejected with a `command_result` error.
 
 ## Relay API
 
-Base URL: `https://cursor-remote-rela.vercel.app` (or your own deployment). All endpoints answer
+Base URL: your relay deployment, e.g. `https://cursor-remote-relay.vercel.app`. All endpoints answer
 `{ "success": bool, "data": …, "error": …, "timestamp": ms }`; session endpoints add `"protocolVersion": 2`.
 Authenticated calls send `Authorization: Bearer <capability token>`.
 
