@@ -74,8 +74,8 @@ allows 12 functions per deployment.
    vercel --prod
    ```
 
-4. Check it: `curl https://<your-relay>/api/health` should return `"status": "healthy"`.
-5. To use your own relay, set `cursorRemote.relayServerUrl` in Cursor and the relay URL in the app.
+4. Check it: `curl https://<your-relay>/api/health` should return `"redis": "ok"`.
+5. In Cursor run **Cursor Remote: Set Up** and paste the relay address; phone links then carry it to the app.
 
 ## Local development and tests
 

@@ -242,7 +242,7 @@ Type `Cursor Remote` or `cursorRemote` in the settings search box.
 **Main settings:**
 - **Cursor Remote: Enable Cdp** (`cursorRemote.enableCdp`) - allow session control (required to control the Agents window)
 - **Cursor Remote: Remote Actions** (`cursorRemote.remoteActions`) - `disabled` turns off opening chats/new chats, model and mode changes, stop, and approve/reject from the phone and Telegram
-- **Cursor Remote: Relay Server Url** (`cursorRemote.relayServerUrl`) - set only when you use your own relay deployment
+- **Cursor Remote: Relay Server Url** (`cursorRemote.relayServerUrl`) - your relay's https address; **Cursor Remote: Set Up** fills it in
 - **Cursor Remote: Allowed Web Socket Origins** (`cursorRemote.allowedWebSocketOrigins`) - browser origins allowed in local mode
 
 #### Turn on session control (required)
@@ -418,12 +418,11 @@ terminal (Ctrl+C to stop):
 caffeinate -dimsu
 ```
 
-### Deploying your own relay (optional)
+### Deploying your relay
 
-To use your own relay instead of the default one, follow [relay-server/README.md](./relay-server/README.md)
-(Upstash Redis + Vercel, environment variables `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`) and
-deploy from `relay-server` with `vercel --prod`. Then change `cursorRemote.relayServerUrl` in the Cursor
-settings and the relay URL in the app.
+There is no shared relay: each user deploys their own (free) with the Deploy button in
+[SETUP.md](./SETUP.md#2-deploy-your-relay), then runs **Cursor Remote: Set Up**, which checks it and
+saves it in `cursorRemote.relayServerUrl`. Phone links from Set Up and Telegram carry the relay to the app.
 
 ---
 
