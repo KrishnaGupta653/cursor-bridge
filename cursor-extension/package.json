@@ -2,7 +2,7 @@
   "name": "cursor-remote-extension",
   "displayName": "Cursor Remote",
   "description": "Remote control Cursor AI from your mobile device via WebSocket or Relay Server - Code anywhere, anytime with session-based connection",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "publisher": "krishnagupta653",
   "author": "Krishna Gupta",
   "license": "MIT",
@@ -102,6 +102,11 @@
           "type": "boolean",
           "default": true,
           "description": "Auto-start Telegram bot on activation when secrets file exists and enabled is true."
+        },
+        "cursorRemote.autoRestartWithSessionControl": {
+          "type": "boolean",
+          "default": false,
+          "description": "When Cursor opens without session control (from the Dock, or after an update), restart it with session control on after a 10-second countdown you can cancel, instead of asking. Needs cursorRemote.enableCdp. Retries at most once every 10 minutes; otherwise the usual prompt is shown."
         },
         "cursorRemote.telegramStartNotice": {
           "type": "boolean",

@@ -188,6 +188,24 @@ const telegramRelay = relayForTelegram(() => relayClient, (sessionId) => {
     .then((pick) => pick && vscode.commands.executeCommand("cursorRemote.newRelaySession"));
 });
 
+/** A cancellable countdown notification; true when it ran out without Cancel. */
+function autoRestartCountdown(seconds: number): Thenable<boolean> {
+  return vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: "Cursor Remote: restarting Cursor with session control", cancellable: true },
+    async (progress, token) => {
+      for (let left = seconds; left > 0; left--) {
+        if (token.isCancellationRequested) return false;
+        progress.report({
+          message: `in ${left} s, so your phone and Telegram can send, stop and approve. You'll be asked about unsaved files.`,
+          increment: 100 / seconds,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      return !token.isCancellationRequested;
+    }
+  );
+}
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -1084,7 +1102,14 @@ export async function activate(context: vscode.ExtensionContext) {
       outputChannel.appendLine(`[CDP] Start failed: ${e instanceof Error ? e.message : String(e)}`);
     }
     const status = cdpManager?.getStatus();
-    if (!status?.enabled || status.connected || !claimOnce("cdp-offer", 2 * 60 * 1000)) return;
+    if (!status?.enabled || status.connected) return;
+    // The 10-minute claim also stops a loop when a relaunch still comes up without session control.
+    if (vscode.workspace.getConfiguration("cursorRemote").get<boolean>("autoRestartWithSessionControl", false) &&
+        claimOnce("cdp-auto-restart", 10 * 60 * 1000)) {
+      if (await autoRestartCountdown(10)) await restartWithSessionControl();
+      return;
+    }
+    if (!claimOnce("cdp-offer", 2 * 60 * 1000)) return;
     const choice = await vscode.window.showWarningMessage(
       "Cursor Remote: session control is off because Cursor was opened normally. Your phone and Telegram can read chats but can't send, stop or approve.",
       "Restart Cursor with Session Control",

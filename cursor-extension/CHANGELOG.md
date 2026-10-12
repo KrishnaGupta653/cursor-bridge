@@ -5,6 +5,11 @@ All notable changes to the "Cursor Remote" extension will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.4] - 2026-10-12
+
+### Added
+- **`cursorRemote.autoRestartWithSessionControl`** (off by default): when Cursor opens without session control (from the Dock, or after an update), it restarts itself with session control after a 10-second countdown you can cancel, instead of asking. Unsaved files are still asked about. At most once every 10 minutes, so a relaunch that still lacks session control falls back to the usual prompt
+
 ## [0.6.3] - 2026-10-10
 
 ### Added

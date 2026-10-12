@@ -300,7 +300,8 @@ The extension drives Cursor's Agents window through the Chrome DevTools Protocol
    files, quits and reopens with session control on.
 
 Without it the phone can read chats but cannot send, stop or approve. If Cursor was opened normally,
-the extension offers the restart once.
+the extension offers the restart once. With `"cursorRemote.autoRestartWithSessionControl": true` it
+restarts by itself instead, after a 10-second countdown you can cancel (at most once every 10 minutes).
 
 ### Local Mode (Same Wi-Fi Network)
 
