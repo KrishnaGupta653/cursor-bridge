@@ -58,6 +58,28 @@ export function scheduleRelaunchWithCdp(bin: string, port: number): void {
  * Every Cursor window runs this extension; only one should nag. Returns true for the first
  * caller within `windowMs`, using a marker file in the user's temp folder.
  */
+/**
+ * Like claimOnce, but up to `max` claims per `windowMs`, across all Cursor windows. Lets an automatic
+ * step retry once when the first try didn't stick, without ever looping.
+ */
+export function claimAttempt(name: string, windowMs: number, max: number, now: number = Date.now()): boolean {
+  const marker = path.join(os.tmpdir(), `cursor-remote-${name}.json`);
+  let recent: number[] = [];
+  try {
+    const parsed = JSON.parse(fs.readFileSync(marker, "utf8"));
+    if (Array.isArray(parsed)) recent = parsed.filter((t) => typeof t === "number" && now - t < windowMs && t <= now);
+  } catch {
+    // No attempts yet.
+  }
+  if (recent.length >= max) return false;
+  try {
+    fs.writeFileSync(marker, JSON.stringify([...recent, now]), { mode: 0o600 });
+  } catch {
+    // Not being able to record it only risks one extra attempt.
+  }
+  return true;
+}
+
 export function claimOnce(name: string, windowMs: number, now: number = Date.now()): boolean {
   const marker = path.join(os.tmpdir(), `cursor-remote-${name}`);
   try {

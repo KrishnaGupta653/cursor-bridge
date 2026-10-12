@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { claimOnce, cursorBinary, relaunchEnv, scheduleRelaunchWithCdp } from "./relaunch";
+import { claimAttempt, claimOnce, cursorBinary, relaunchEnv, scheduleRelaunchWithCdp } from "./relaunch";
 
 test("the relaunched Cursor does not inherit the extension host's Node mode", () => {
   const env = relaunchEnv({
@@ -42,6 +42,22 @@ test("claimOnce lets only the first window prompt within the window", () => {
     assert.equal(claimOnce(name, 60_000, now), true);
     assert.equal(claimOnce(name, 60_000, now + 1_000), false);
     assert.equal(claimOnce(name, 60_000, now + 61_000), true);
+  } finally {
+    fs.rmSync(marker, { force: true });
+  }
+});
+
+test("claimAttempt allows a retry, then stops until the window passes", () => {
+  const name = `test-attempt-${process.pid}-${Date.now()}`;
+  const marker = path.join(os.tmpdir(), `cursor-remote-${name}.json`);
+  try {
+    const now = Date.now();
+    assert.equal(claimAttempt(name, 600_000, 2, now), true);
+    assert.equal(claimAttempt(name, 600_000, 2, now + 60_000), true);
+    assert.equal(claimAttempt(name, 600_000, 2, now + 120_000), false);
+    assert.equal(claimAttempt(name, 600_000, 2, now + 601_000), true);
+    fs.writeFileSync(marker, "not json");
+    assert.equal(claimAttempt(name, 600_000, 2, now), true);
   } finally {
     fs.rmSync(marker, { force: true });
   }

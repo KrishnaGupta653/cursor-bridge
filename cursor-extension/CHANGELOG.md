@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - The Telegram "Cursor Remote started" notice is no longer lost when Cursor quits while waiting for the relay (for example, an auto-restart with session control); the restarted window sends it.
+- With the live view off (Cursor opened without session control, or the Agents window closed), the phone keeps your pinned chats and groups as Cursor last showed them, and says what's off and how to fix it.
+- Auto-restart with session control retries once when Cursor reopens itself plainly (for example, after an update), and then asks instead of staying off silently. Only one window acts per launch.
 
 ## [0.6.4] - 2026-10-12
 
