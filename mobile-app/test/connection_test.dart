@@ -187,7 +187,8 @@ void main() {
         expect(first.connected, isTrue);
         first.dispose();
         final stored = jsonDecode((await saved())!) as Map;
-        expect(stored, {'sessionId': 'ABC123', 'deviceId': 'mobile-1', 'token': token, 'credentialExpiresAt': later});
+        expect(stored, {'sessionId': 'ABC123', 'deviceId': 'mobile-1', 'token': token, 'credentialExpiresAt': later,
+          'relayUrl': 'https://relay.test'});
 
         final restarted = connection();
         expect(await restarted.restoreRelayLogin(), isTrue);
@@ -295,7 +296,9 @@ void main() {
       final attempts = fake.requests.where((r) => r.url.path == '/api/connect').toList();
       expect(attempts.last.headers['Authorization'], isNull, reason: 'a code is never shadowed by the old login');
       expect(conn.lastError, contains('Send /pair in Telegram'));
-      expect(await saved(), savedJson(), reason: 'a wrong code does not log you out');
+      final kept = RelayLogin.fromJson(jsonDecode((await saved())!))!;
+      expect(kept.token, token, reason: 'a wrong code does not log you out');
+      expect(kept.relayUrl, 'https://relay.test', reason: 'an older login is re-saved with the relay it works on');
 
       await http.runWithClient(() => conn.connectRelay('ABC123', 'g' * 43), () => fake.client);
       expect(conn.connected, isTrue);
@@ -353,6 +356,67 @@ void main() {
       expect(conn.connected, isFalse);
       expect(await saved(), isNull);
       expect(fake.requests.map((r) => r.url.path), containsAll(['/api/disconnect', '/api/connect']));
+    });
+  });
+
+  group('relay server choice', () {
+    setUp(() => SharedPreferences.setMockInitialValues({}));
+
+    test('only a plain https origin is accepted (http just for localhost)', () {
+      expect(normalizeRelayUrl(' https://my-relay.vercel.app/ '), 'https://my-relay.vercel.app');
+      expect(normalizeRelayUrl('https://relay.example:8443'), 'https://relay.example:8443');
+      expect(normalizeRelayUrl('http://localhost:3000'), 'http://localhost:3000');
+      for (final bad in ['http://my-relay.vercel.app', 'https://my-relay.vercel.app/api', 'https://a@b.example',
+          'https://b.example?x=1', 'https://b.example#x', 'javascript:alert(1)', 'my-relay.vercel.app', '']) {
+        expect(normalizeRelayUrl(bad), isNull, reason: bad);
+      }
+      expect(launchRelayUrl(Uri.parse('https://app.test/?relay=https%3A%2F%2Fmine.vercel.app&session=ABC123')),
+          'https://mine.vercel.app');
+      expect(launchRelayUrl(Uri.parse('https://app.test/?relay=http%3A%2F%2Fevil.example')), isNull);
+    });
+
+    test('the saved choice wins over the build default, and a bad saved value is ignored', () async {
+      expect(await RelayServer.load(), isNull);
+      expect(await RelayServer.load(buildDefault: 'https://built.example'), 'https://built.example');
+      await RelayServer.save('https://mine.example/');
+      expect(await RelayServer.load(buildDefault: 'https://built.example'), 'https://mine.example');
+      SharedPreferences.setMockInitialValues({RelayServer.storageKey: 'http://evil.example'});
+      expect(await RelayServer.load(buildDefault: 'https://built.example'), 'https://built.example');
+    });
+
+    test("a login is never sent to a relay that didn't issue it", () async {
+      final login = RelayLogin(sessionId: 'ABC123', deviceId: 'mobile-1', token: 't' * 43,
+          expiresAt: DateTime.now().add(const Duration(hours: 1)).millisecondsSinceEpoch, relayUrl: 'https://a.example');
+      final requests = <http.Request>[];
+      final client = MockClient((req) async { requests.add(req); return http.Response('{}', 500); });
+      final conn = CursorConnection(relayUrl: 'https://b.example');
+      addTearDown(conn.dispose);
+      expect(await http.runWithClient(() => conn.restoreRelayLogin(login), () => client), isFalse);
+      expect(requests, isEmpty);
+      expect(login.belongsTo('https://a.example'), isTrue);
+      expect(RelayLogin.fromJson(jsonDecode(jsonEncode(login.toJson())))!.relayUrl, 'https://a.example');
+    });
+
+    test('switching relays drops every credential held for the old one', () async {
+      final client = MockClient((req) async => http.Response(jsonEncode({'success': true, 'protocolVersion': 2,
+            'data': {'deviceId': 'mobile-1', 'token': 'n' * 43, 'credentialExpiresAt': DateTime.now().millisecondsSinceEpoch + 60000}}), 200));
+      final conn = CursorConnection(relayUrl: 'https://a.example')..setVisible(false);
+      addTearDown(conn.dispose);
+      await http.runWithClient(() => conn.connectRelay('ABC123', 'p' * 43), () => client);
+      expect(conn.relayHeaders('ABC123')['Authorization'], 'Bearer ${'n' * 43}');
+      conn.setRelayUrl('https://b.example');
+      expect(conn.relayUrl, 'https://b.example');
+      expect(conn.relayHeaders('ABC123')['Authorization'], isNull);
+    });
+
+    test('with no relay set, connecting asks for one and sends nothing', () async {
+      final requests = <http.Request>[];
+      final client = MockClient((req) async { requests.add(req); return http.Response('{}', 500); });
+      final conn = CursorConnection(relayUrl: '');
+      addTearDown(conn.dispose);
+      await http.runWithClient(() => conn.connectRelay('ABC123', 'p' * 43), () => client);
+      expect(requests, isEmpty);
+      expect(conn.lastError, noRelayMessage);
     });
   });
 }

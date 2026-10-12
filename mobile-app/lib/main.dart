@@ -15,11 +15,9 @@ import 'screens/connection_landing.dart';
 import 'theme/app_theme.dart';
 import 'widgets/cr_ui.dart';
 
-// Relay server URL (public default; override requires rebuild)
-const String kRelayServerUrl = String.fromEnvironment(
-  'RELAY_URL',
-  defaultValue: 'https://cursor-remote-rela.vercel.app',
-);
+/// A relay to use until the user picks one (`--dart-define=RELAY_URL=https://…`). Empty in the
+/// public app: every user runs their own relay and the app learns it from a link or the Relay field.
+const String kRelayServerUrl = String.fromEnvironment('RELAY_URL');
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -30,6 +28,8 @@ void main() async {
     savedLogin: savedLogin,
     launchSessionId: launchSessionId(Uri.base, savedLogin),
     launchPairing: launchPairing,
+    relayUrl: await RelayServer.load(buildDefault: kRelayServerUrl),
+    launchRelayUrl: launchRelayUrl(Uri.base),
   ));
 }
 
@@ -39,11 +39,14 @@ final ThemeData darkTheme = buildCrDarkTheme();
 // App Root
 // ============================================================
 class MyApp extends StatelessWidget {
-  const MyApp({super.key, this.savedLogin, this.launchSessionId, this.launchPairing});
+  const MyApp({super.key, this.savedLogin, this.launchSessionId, this.launchPairing, this.relayUrl,
+      this.launchRelayUrl});
 
   final RelayLogin? savedLogin;
   final String? launchSessionId;
   final LaunchPairing? launchPairing;
+  final String? relayUrl;
+  final String? launchRelayUrl;
 
   // Dark-only, like Cursor's Agents window: the screens use fixed Cr colors.
   @override
@@ -53,13 +56,15 @@ class MyApp extends StatelessWidget {
       theme: darkTheme,
       darkTheme: darkTheme,
       themeMode: ThemeMode.dark,
-      home: HomePage(savedLogin: savedLogin, launchSessionId: launchSessionId, launchPairing: launchPairing),
+      home: HomePage(savedLogin: savedLogin, launchSessionId: launchSessionId, launchPairing: launchPairing,
+          relayUrl: relayUrl, launchRelayUrl: launchRelayUrl),
     );
   }
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key, this.savedLogin, this.launchSessionId, this.launchPairing});
+  const HomePage({super.key, this.savedLogin, this.launchSessionId, this.launchPairing, this.relayUrl,
+      this.launchRelayUrl});
 
   /// Read before the first frame, so a refresh goes straight to "Connecting…" instead of the landing page.
   final RelayLogin? savedLogin;
@@ -69,6 +74,12 @@ class HomePage extends StatefulWidget {
 
   /// A one-tap pairing link: connects with its code at once and replaces any saved login.
   final LaunchPairing? launchPairing;
+
+  /// The relay chosen earlier (or built in); null when none is set yet.
+  final String? relayUrl;
+
+  /// The relay a link asks for (`?relay=`); used only after the user confirms a change.
+  final String? launchRelayUrl;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -144,7 +155,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   ConnectionType _connectionType = ConnectionType.relay;
 
   // Transport (Local / Tunnel / Relay) and the Agents window state
-  late final CursorConnection _conn = CursorConnection(relayUrl: kRelayServerUrl);
+  late final CursorConnection _conn = CursorConnection(relayUrl: widget.relayUrl ?? '');
+  late final TextEditingController _relayController = TextEditingController(text: widget.relayUrl ?? '');
   late final ChatStore _chats =
       ChatStore(send: (command) async => (await _conn.send(command)).failure);
   String? get _sessionId => _conn.sessionId;
@@ -808,6 +820,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _connectionType == ConnectionType.tunnel) {
       _connectToLocal();
     } else {
+      final relay = normalizeRelayUrl(_relayController.text);
+      if (relay == null) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text(noRelayMessage)));
+        return;
+      }
+      if (relay != _conn.relayUrl) {
+        _useRelay(relay).then((_) { if (mounted) _connect(); });
+        return;
+      }
       final sessionId = _sessionIdController.text.trim();
       if (sessionId.isEmpty) {
         // Generate & Connect: create a relay session, then join it
@@ -1555,6 +1576,82 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String? get _launchSessionId =>
       widget.launchPairing?.sessionId ?? (widget.savedLogin == null ? widget.launchSessionId : null);
 
+  /// A link asked for a different relay and the "Use this relay?" question is open.
+  bool _confirmingRelay = false;
+
+  /// Starts from the link (one-tap pairing or a session ID) or the saved login, for the current relay.
+  void _startFromLaunch({required bool useLink}) {
+    final saved = widget.savedLogin;
+    final pairing = useLink ? widget.launchPairing : null;
+    if (pairing != null && _conn.hasRelay) {
+      _connectionType = ConnectionType.relay;
+      _sessionIdController.text = pairing.sessionId;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _conn.connectRelay(pairing.sessionId, pairing.code);
+      });
+    } else if (saved != null && _conn.hasRelay && saved.belongsTo(_conn.relayUrl)) {
+      if (!saved.expired) {
+        _hadConnection = true;
+        _restoringLogin = true;
+        _connectionType = ConnectionType.relay;
+        _sessionIdController.text = saved.sessionId;
+      }
+      // After the first frame: the connection notifies listeners as soon as it starts.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _conn.restoreRelayLogin(saved).whenComplete(() {
+          if (mounted) setState(() => _restoringLogin = false);
+        });
+      });
+    } else if (useLink && _launchSessionId != null) {
+      _connectionType = ConnectionType.relay;
+      _sessionIdController.text = _launchSessionId!;
+    }
+  }
+
+  Future<void> _useRelay(String relayUrl) async {
+    if (relayUrl == _conn.relayUrl) return;
+    if (_conn.connected || _conn.connecting) await _conn.logOut();
+    _conn.setRelayUrl(relayUrl);
+    _relayController.text = relayUrl;
+    await RelayServer.save(relayUrl);
+  }
+
+  /// A link may only switch relays with the user's say-so: a relay they don't run would see their
+  /// pairing code and could take over their Cursor.
+  Future<bool> _confirmLinkRelay(String relayUrl) async {
+    final host = Uri.parse(relayUrl).host;
+    final current = _conn.hasRelay ? Uri.parse(_conn.relayUrl).host : null;
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        backgroundColor: Cr.surface,
+        title: const Text('Use this relay?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('This link connects through the relay server'),
+            const SizedBox(height: 8),
+            SelectableText(host, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+            const SizedBox(height: 12),
+            Text(
+              'Only continue if this is the relay you set up (Cursor shows it in Cursor Remote: Set Up). '
+              "A relay you don't run could take over your Cursor."
+              '${current != null ? '\n\nYou are using $current now.' : ''}',
+              style: const TextStyle(color: Cr.textSecondary, height: 1.4),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Use this relay')),
+        ],
+      ),
+    );
+    return ok == true;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -1571,30 +1668,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           relay ? _showPinDialog() : _showLocalPairDialog())
       ..isBusy = (() => _chats.running || _chats.awaitingReply || _isWaitingForResponse)
       ..addListener(_onConnectionChanged);
-    final saved = widget.savedLogin;
-    final pairing = widget.launchPairing;
-    if (pairing != null) {
+    final linkRelay = widget.launchRelayUrl;
+    if (linkRelay != null && linkRelay != _conn.relayUrl) {
       _connectionType = ConnectionType.relay;
-      _sessionIdController.text = pairing.sessionId;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _conn.connectRelay(pairing.sessionId, pairing.code);
-      });
-    } else if (saved != null) {
-      if (!saved.expired) {
-        _hadConnection = true;
-        _restoringLogin = true;
-        _connectionType = ConnectionType.relay;
-        _sessionIdController.text = saved.sessionId;
-      }
-      // After the first frame: the connection notifies listeners as soon as it starts.
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _conn.restoreRelayLogin(saved).whenComplete(() {
-          if (mounted) setState(() => _restoringLogin = false);
+      _confirmingRelay = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        final ok = await _confirmLinkRelay(linkRelay);
+        if (!mounted) return;
+        if (ok) await _useRelay(linkRelay);
+        setState(() {
+          _confirmingRelay = false;
+          // Declined: the link's session and code were meant for that other relay, so they're dropped.
+          _startFromLaunch(useLink: ok);
         });
       });
-    } else if (_launchSessionId != null) {
-      _connectionType = ConnectionType.relay;
-      _sessionIdController.text = _launchSessionId!;
+    } else {
+      _startFromLaunch(useLink: true);
     }
     _loadConnectionSettings();
     // Apply the default agent mode from settings
@@ -1651,7 +1740,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final prefs = await SharedPreferences.getInstance();
 
       final connectionTypeStr = prefs.getString('connection_type');
-      if (connectionTypeStr != null && !_restoringLogin && _launchSessionId == null) {
+      if (connectionTypeStr != null && !_restoringLogin && !_confirmingRelay && _launchSessionId == null) {
         setState(() {
           _connectionType = connectionTypeStr == 'local'
               ? ConnectionType.local
@@ -1673,7 +1762,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
       // Last session ID (optional)
       final lastSessionId = prefs.getString('last_session_id');
-      if (lastSessionId != null && lastSessionId.isNotEmpty && !_restoringLogin && _launchSessionId == null) {
+      if (lastSessionId != null && lastSessionId.isNotEmpty && !_restoringLogin && !_confirmingRelay &&
+          _launchSessionId == null) {
         _sessionIdController.text = lastSessionId;
       }
     } catch (e) {
@@ -1814,6 +1904,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _chats.dispose();
     _commandController.dispose();
     _sessionIdController.dispose();
+    _relayController.dispose();
     _localIpController.dispose();
     _localPortController.dispose();
     _scrollController.dispose();
@@ -2073,6 +2164,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       hostController: _localIpController,
       portController: _localPortController,
       sessionIdController: _sessionIdController,
+      relayController: _relayController,
       hostFocus: _localIpFocusNode,
       sessionFocus: _sessionIdFocusNode,
       connecting: _isConnecting,

@@ -80,7 +80,7 @@ void main() {
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
     await http.runWithClient(() async {
-      await tester.pumpWidget(MyApp(savedLogin: login));
+      await tester.pumpWidget(MyApp(savedLogin: login, relayUrl: 'https://relay.test'));
       expect(find.text('Connect with Session ID'), findsNothing, reason: 'no landing page flash');
       await tester.pump();
       expect(find.text('Connecting…'), findsOneWidget);
@@ -159,7 +159,7 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(1100, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await http.runWithClient(() async {
-      await tester.pumpWidget(MyApp(savedLogin: old, launchPairing: LaunchPairing('ABC123', code)));
+      await tester.pumpWidget(MyApp(savedLogin: old, launchPairing: LaunchPairing('ABC123', code), relayUrl: 'https://relay.test'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 600));
     }, () => relay);
@@ -169,6 +169,61 @@ void main() {
     expect(connects.single.headers['Authorization'], isNull);
     final saved = RelayLogin.fromJson(jsonDecode((await SharedPreferences.getInstance()).getString(RelayLogin.storageKey)!))!;
     expect((saved.sessionId, saved.token), ('ABC123', 'n' * 43));
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets("a link to another relay asks first; Cancel drops the link's session and code",
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final requests = <http.Request>[];
+    final relay = MockClient((req) async { requests.add(req); return http.Response('{}', 500); });
+    await tester.binding.setSurfaceSize(const Size(1100, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await http.runWithClient(() async {
+      await tester.pumpWidget(MyApp(relayUrl: 'https://mine.example', launchRelayUrl: 'https://other.example',
+          launchPairing: LaunchPairing('ABC123', 'c' * 43)));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Use this relay?'), findsOneWidget);
+      expect(find.text('other.example'), findsOneWidget);
+      expect(find.textContaining('You are using mine.example now.'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+    }, () => relay);
+    expect(requests, isEmpty, reason: 'nothing goes to either relay');
+    expect((await SharedPreferences.getInstance()).getString(RelayServer.storageKey), isNull);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('confirming a link relay saves it and pairs through it', (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final code = 'c' * 43;
+    final hosts = <String>[];
+    final relay = MockClient((req) async {
+      hosts.add(req.url.host);
+      if (req.url.path == '/api/connect') {
+        return http.Response(jsonEncode({'success': true, 'protocolVersion': 2, 'data': {'deviceId': 'mobile-9',
+          'token': 'n' * 43, 'credentialExpiresAt': DateTime.now().add(const Duration(hours: 1)).millisecondsSinceEpoch}}), 200);
+      }
+      return http.Response(jsonEncode({'success': true, 'data': {'messages': []}}), 200);
+    });
+    await tester.binding.setSurfaceSize(const Size(1100, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await http.runWithClient(() async {
+      await tester.pumpWidget(MyApp(launchRelayUrl: 'https://mine.vercel.app', launchPairing: LaunchPairing('ABC123', code)));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('mine.vercel.app'), findsOneWidget);
+      await tester.tap(find.text('Use this relay'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+    }, () => relay);
+    expect(hosts.toSet(), {'mine.vercel.app'});
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString(RelayServer.storageKey), 'https://mine.vercel.app');
+    expect(RelayLogin.fromJson(jsonDecode(prefs.getString(RelayLogin.storageKey)!))!.relayUrl, 'https://mine.vercel.app');
     await tester.pumpWidget(const SizedBox());
     await tester.pump(const Duration(seconds: 1));
   });
@@ -224,7 +279,7 @@ void main() {
       addTearDown(tester.view.reset);
 
       await http.runWithClient(() async {
-        await tester.pumpWidget(MyApp(savedLogin: login));
+        await tester.pumpWidget(MyApp(savedLogin: login, relayUrl: 'https://relay.test'));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 600));
         expect(find.text('Relay'), findsOneWidget);

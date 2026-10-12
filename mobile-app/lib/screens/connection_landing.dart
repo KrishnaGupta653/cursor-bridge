@@ -10,6 +10,7 @@ class ConnectionLandingPage extends StatelessWidget {
   final TextEditingController hostController;
   final TextEditingController portController;
   final TextEditingController sessionIdController;
+  final TextEditingController? relayController;
   final FocusNode? hostFocus;
   final FocusNode? sessionFocus;
   final bool connecting;
@@ -32,6 +33,7 @@ class ConnectionLandingPage extends StatelessWidget {
     required this.hostController,
     required this.portController,
     required this.sessionIdController,
+    this.relayController,
     required this.connecting,
     required this.reconnecting,
     required this.recent,
@@ -112,6 +114,7 @@ class ConnectionLandingPage extends StatelessWidget {
                           : _RelaySetupPanel(
                               key: const ValueKey('relay'),
                               sessionIdController: sessionIdController,
+                              relayController: relayController,
                               sessionFocus: sessionFocus,
                               busy: _busy,
                               onJoin: onConnect,
@@ -622,6 +625,7 @@ class _TunnelSetupPanel extends StatelessWidget {
 /// Idle Relay: join a session created in Cursor.
 class _RelaySetupPanel extends StatelessWidget {
   final TextEditingController sessionIdController;
+  final TextEditingController? relayController;
   final FocusNode? sessionFocus;
   final bool busy;
   final VoidCallback onJoin;
@@ -631,6 +635,7 @@ class _RelaySetupPanel extends StatelessWidget {
     required this.sessionIdController,
     required this.busy,
     required this.onJoin,
+    this.relayController,
     this.sessionFocus,
   });
 
@@ -660,9 +665,9 @@ class _RelaySetupPanel extends StatelessWidget {
               ),
               SizedBox(height: 6),
               Text(
-                '1. In Cursor: connect to Relay to create the session\n'
-                '2. Run “Cursor Remote: Pair Relay Client”\n'
-                '3. Enter the Session ID below, then paste the pairing code',
+                '1. In Cursor run “Cursor Remote: Set Up” (it shows your relay)\n'
+                '2. Easiest: send /pair to your Telegram bot and tap the link\n'
+                '3. Or enter your relay and Session ID below, then paste the code from “Cursor Remote: Pair Relay Client”',
                 style: TextStyle(
                   color: Cr.textSecondary,
                   fontSize: 13,
@@ -673,6 +678,24 @@ class _RelaySetupPanel extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 20),
+        if (relayController != null) ...[
+          const _FieldLabel('Relay server'),
+          const SizedBox(height: 8),
+          TextField(
+            controller: relayController,
+            enabled: !busy,
+            keyboardType: TextInputType.url,
+            autocorrect: false,
+            enableSuggestions: false,
+            style: const TextStyle(color: Cr.text, fontSize: 15),
+            decoration: _fieldDecoration(
+              hint: 'https://your-relay.vercel.app',
+              prefix: Icons.dns_rounded,
+            ),
+            textInputAction: TextInputAction.next,
+          ),
+          const SizedBox(height: 16),
+        ],
         const _FieldLabel('Session ID'),
         const SizedBox(height: 8),
         TextField(

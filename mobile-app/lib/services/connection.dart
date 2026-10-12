@@ -53,6 +53,45 @@ String? launchSessionId(Uri uri, RelayLogin? savedLogin) {
   return session != null && RegExp(r'^[A-Z0-9]{6}$').hasMatch(session) ? session : null;
 }
 
+/// A relay origin typed in or taken from a link: https only (http just for localhost while developing),
+/// and nothing but scheme, host and port. Returns null for anything else.
+String? normalizeRelayUrl(String raw) {
+  final uri = Uri.tryParse(raw.trim());
+  if (uri == null || uri.host.isEmpty || uri.userInfo.isNotEmpty || uri.hasQuery || uri.hasFragment) return null;
+  if (uri.path.isNotEmpty && uri.path != '/') return null;
+  final local = uri.host == 'localhost' || uri.host == '127.0.0.1';
+  if (uri.scheme != 'https' && !(uri.scheme == 'http' && local)) return null;
+  return '${uri.scheme}://${uri.host}${uri.hasPort ? ':${uri.port}' : ''}';
+}
+
+/// The relay a link asks for (`?relay=https://…`); it is only used after the user confirms it.
+String? launchRelayUrl(Uri uri) {
+  final raw = uri.queryParameters['relay'];
+  return raw == null ? null : normalizeRelayUrl(raw);
+}
+
+/// The relay this app talks to: the user's choice, else the build's RELAY_URL (empty in the public app).
+class RelayServer {
+  static const storageKey = 'relay_server_v1';
+
+  static Future<String?> load({String buildDefault = ''}) async {
+    try {
+      final saved = (await SharedPreferences.getInstance()).getString(storageKey);
+      final chosen = saved == null ? null : normalizeRelayUrl(saved);
+      if (chosen != null) return chosen;
+    } catch (_) {}
+    return normalizeRelayUrl(buildDefault);
+  }
+
+  static Future<void> save(String relayUrl) async {
+    final normalized = normalizeRelayUrl(relayUrl);
+    if (normalized == null) return;
+    try {
+      await (await SharedPreferences.getInstance()).setString(storageKey, normalized);
+    } catch (_) {}
+  }
+}
+
 /// A one-tap pairing link from Telegram /pair: `/?session=ABC123#code=<code>`. web/index.html takes the
 /// code from the fragment (never sent to a server) and strips it before the app starts.
 class LaunchPairing {
@@ -85,9 +124,14 @@ class RelayLogin {
   final int expiresAt;
   /// The session's pairing code can be used again (a reusable code was used to pair).
   final bool reusableCode;
+  /// The relay that issued [token]; null for logins saved before the relay became configurable.
+  final String? relayUrl;
 
   const RelayLogin({required this.sessionId, required this.deviceId, required this.token,
-      required this.expiresAt, this.reusableCode = false});
+      required this.expiresAt, this.reusableCode = false, this.relayUrl});
+
+  /// Whether this login may be sent to [relay]. A token is never shown to a relay that did not issue it.
+  bool belongsTo(String relay) => relayUrl == null || relayUrl == relay;
 
   bool get expired => DateTime.now().millisecondsSinceEpoch >= expiresAt;
 
@@ -97,6 +141,7 @@ class RelayLogin {
         'token': token,
         'credentialExpiresAt': expiresAt,
         if (reusableCode) 'reusableCode': true,
+        if (relayUrl != null) 'relayUrl': relayUrl,
       };
 
   static RelayLogin? fromJson(Object? json) {
@@ -107,8 +152,10 @@ class RelayLogin {
         token is! String || token.length != 43 || expiresAt is! int) {
       return null;
     }
+    final relayUrl = json['relayUrl'];
     return RelayLogin(sessionId: sessionId, deviceId: deviceId, token: token, expiresAt: expiresAt,
-        reusableCode: json['reusableCode'] == true);
+        reusableCode: json['reusableCode'] == true,
+        relayUrl: relayUrl is String ? normalizeRelayUrl(relayUrl) : null);
   }
 
   /// The saved login, or null if there is none or it can't be read (an unreadable one is removed).
@@ -126,6 +173,8 @@ class RelayLogin {
   }
 }
 
+const noRelayMessage =
+    'Enter your relay server (https://…). Cursor shows it in Cursor Remote: Set Up.';
 const relaySessionEndedMessage =
     'This relay session ended. Get a new pairing code in Cursor (Cursor Remote: Pair Relay Client).';
 const pairingCodeUsedUpMessage = 'This pairing code was used on 3 devices. Get a new one in Cursor.';
@@ -133,9 +182,22 @@ const pairingCodeUsedUpMessage = 'This pairing code was used on 3 devices. Get a
 /// Transport to the Cursor extension over Local WebSocket, Cloudflare Tunnel or the Relay.
 /// Every inbound message, whatever the transport, reaches [onInbound] as one decoded map.
 class CursorConnection extends ChangeNotifier {
-  CursorConnection({required this.relayUrl});
+  CursorConnection({required String relayUrl}) : _relayUrl = relayUrl;
 
-  final String relayUrl;
+  String _relayUrl;
+  String get relayUrl => _relayUrl;
+  bool get hasRelay => _relayUrl.isNotEmpty;
+
+  /// Switches relays. Credentials are kept per session ID, so every one held for the old relay is
+  /// dropped first: a token must never reach a relay that did not issue it.
+  void setRelayUrl(String relayUrl) {
+    if (relayUrl == _relayUrl) return;
+    _relayCredentials.clear();
+    _relayDeviceIds.clear();
+    _relayExpiresAt.clear();
+    _reusableCodeSessions.clear();
+    _relayUrl = relayUrl;
+  }
 
   /// Relay polling cadence: fast while the user or the agent is active, slower otherwise,
   /// and none while the app is hidden (each poll costs the relay several Redis commands).
@@ -461,7 +523,7 @@ class CursorConnection extends ChangeNotifier {
   /// Reconnects with the saved relay login, without a pairing code. False if there was none to use.
   Future<bool> restoreRelayLogin([RelayLogin? saved]) async {
     final login = saved ?? await RelayLogin.load();
-    if (login == null) return false;
+    if (login == null || !hasRelay || !login.belongsTo(relayUrl)) return false;
     if (login.expired) {
       await _forgetRelayLogin(login.sessionId);
       _set(() => lastError = relaySessionEndedMessage);
@@ -481,7 +543,8 @@ class CursorConnection extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(RelayLogin.storageKey, jsonEncode(RelayLogin(sessionId: session, deviceId: device,
-          token: token, expiresAt: expiresAt, reusableCode: _reusableCodeSessions.contains(session)).toJson()));
+          token: token, expiresAt: expiresAt, reusableCode: _reusableCodeSessions.contains(session),
+          relayUrl: relayUrl).toJson()));
     } catch (_) {}
   }
 
@@ -510,6 +573,10 @@ class CursorConnection extends ChangeNotifier {
   Future<void> connectRelay(String rawSessionId, [String? pairingCode]) async {
     final session = rawSessionId.trim().toUpperCase();
     if (session.isEmpty) return;
+    if (!hasRelay) {
+      _set(() => lastError = noRelayMessage);
+      return;
+    }
     type = ConnectionType.relay;
     _relayTarget = session;
     final expiresAt = _relayExpiresAt[session];
