@@ -69,6 +69,36 @@ void main() {
     expect(groupChats(store.chats, query: 'nothing'), isEmpty);
   });
 
+  test('the live-off notice names what is off on the Mac and when the pins were read', () {
+    expect(liveOffNotice('session-control', null),
+        contains('Run “Cursor Remote: Restart Cursor with Session Control” there. Showing chats saved on the Mac.'));
+    expect(liveOffNotice('agents-window', DateTime(2026, 10, 12, 17, 5)),
+        'Live view off: the Agents window isn’t open on the Mac. Open it in Cursor. Pins and groups as of 5:05 PM.');
+    expect(liveOffNotice(null, DateTime(2026, 10, 12, 0, 30)), endsWith('as of 12:30 AM.'));
+  });
+
+  testWidgets('with session control off, the saved pins stay on top and the notice says how to fix it',
+      (WidgetTester tester) async {
+    final (store, _) = fakeStore();
+    store.applyInbound({
+      'type': 'chats',
+      'sidebar': false,
+      'liveOff': 'session-control',
+      'sidebarSavedAt': DateTime(2026, 10, 12, 17, 42).millisecondsSinceEpoch,
+      'offset': 0,
+      'chats': [row(chatA, 'Fix login', 'cursor-remote', pinned: true), row(chatC, 'Docs pass', 'website')],
+    });
+    expect(store.sections.map((s) => s.name), ['Pinned', 'website']);
+    await pumpShell(tester, store);
+    expect(find.text('Fix login'), findsOneWidget);
+    expect(find.textContaining('opened without session control'), findsOneWidget);
+    expect(find.textContaining('Pins and groups as of 5:42 PM.'), findsOneWidget);
+
+    store.applyInbound({'type': 'chats', 'sidebar': true, 'offset': 0, 'chats': [row(chatA, 'Fix login', 'cursor-remote', pinned: true)]});
+    expect([store.liveOffReason, store.sidebarSavedAt], [null, null]);
+    await finish(tester, store);
+  });
+
   test('unified diffs parse into numbered added, removed and context lines', () {
     final lines = parseUnifiedDiff('diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -3,2 +3,2 @@\n keep\n-old\n+new\n');
     expect(lines.map((l) => l.kind), [

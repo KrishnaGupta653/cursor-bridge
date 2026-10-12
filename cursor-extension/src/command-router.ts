@@ -7,7 +7,7 @@ import { WebSocketServer } from "./websocket-server";
 import { CommandMessage, CommandResult } from "./types";
 import * as vscode from "vscode";
 import { REMOTE_ACTIONS, remoteCommandError } from "./command-policy";
-import { AgentsWindow, CHAT_CHANGED, SidebarRow } from "./cdp/agents-window";
+import { AgentsWindow, CHAT_CHANGED, SidebarGroup, SidebarRow } from "./cdp/agents-window";
 import { ChatWatcher } from "./chat-watcher";
 import { TranscriptIndex } from "./transcripts/transcript-index";
 import { WorkspaceDiff, diffFromSnippets } from "./transcripts/workspace-diff";
@@ -20,7 +20,17 @@ export interface ChatServices {
   remoteActionsEnabled: () => boolean;
   /** Whether Cursor was started with session control (CDP) reachable. */
   sessionControl?: () => boolean;
+  /** The last sidebar read live, so pins and groups survive while the Agents window can't be read. */
+  sidebarCache?: { load(): SidebarSnapshot | null; save(snapshot: SidebarSnapshot): void };
 }
+
+export interface SidebarSnapshot {
+  rows: SidebarRow[];
+  groups: SidebarGroup[];
+  at: number;
+}
+
+const SIDEBAR_SNAPSHOT_ROWS = 300;
 
 export const SESSION_CONTROL_OFF =
   "Session control is off on your Mac. In Cursor, run “Cursor Remote: Restart Cursor with Session Control”, then try again.";
@@ -697,7 +707,17 @@ export class CommandRouter {
     const agents = chat.agents();
     if (command.expand === true && agents?.attached) await agents.expandMore();
     const sidebar = agents?.attached ? await agents.sidebar() : null;
-    const rows: SidebarRow[] = sidebar?.ok ? sidebar.rows : [];
+    const live = !!sidebar?.ok;
+    let snapshot: SidebarSnapshot | null = null;
+    if (sidebar?.ok) {
+      chat.sidebarCache?.save({ rows: sidebar.rows.slice(0, SIDEBAR_SNAPSHOT_ROWS), groups: sidebar.groups, at: Date.now() });
+    } else {
+      snapshot = chat.sidebarCache?.load() ?? null;
+    }
+    // A saved row's running or unread state is old news; only its place in the sidebar still holds.
+    const rows: SidebarRow[] = sidebar?.ok
+      ? sidebar.rows
+      : (snapshot?.rows ?? []).map((r) => ({ ...r, status: "done", unread: false, active: false }));
     const listed = chat.index.list({ limit: 500, query: command.query });
     const byId = new Map(listed.chats.map((c) => [c.id, c]));
     const q = command.query?.trim().toLowerCase();
@@ -718,8 +738,10 @@ export class CommandRouter {
     const payload = {
       type: "chats",
       chats: offset === 0 ? [...sidebarChats, ...more] : more,
-      groups: sidebar?.ok ? sidebar.groups : [],
-      sidebar: !!sidebar?.ok,
+      groups: sidebar?.ok ? sidebar.groups : snapshot?.groups ?? [],
+      sidebar: live,
+      sidebarSavedAt: live ? null : snapshot?.at ?? null,
+      liveOff: live ? null : chat.sessionControl && !chat.sessionControl() ? "session-control" : "agents-window",
       offset,
       hasMore: offset + limit < others.length,
       totalOthers: others.length,

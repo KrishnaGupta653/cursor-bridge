@@ -75,6 +75,21 @@ class SidebarSection {
 
 /// Pinned first, then one section per repository in the order rows arrive
 /// (Cursor's sidebar order, then transcript-only chats by recency).
+/// Why the live Agents sidebar is off, and what to do on the Mac.
+String liveOffReasonText(String? reason) => reason == 'session-control'
+    ? 'Live view off: Cursor on the Mac was opened without session control. '
+        'Run “Cursor Remote: Restart Cursor with Session Control” there.'
+    : 'Live view off: the Agents window isn’t open on the Mac. Open it in Cursor.';
+
+/// [liveOffReasonText] plus what the list shows meanwhile.
+String liveOffNotice(String? reason, DateTime? savedAt) {
+  final why = liveOffReasonText(reason);
+  if (savedAt == null) return '$why Showing chats saved on the Mac.';
+  final hour = savedAt.hour % 12 == 0 ? 12 : savedAt.hour % 12;
+  final time = '$hour:${savedAt.minute.toString().padLeft(2, '0')} ${savedAt.hour < 12 ? 'AM' : 'PM'}';
+  return '$why Pins and groups as of $time.';
+}
+
 List<SidebarSection> groupChats(List<ChatRow> rows, {String query = ''}) {
   final q = query.trim().toLowerCase();
   final visible = q.isEmpty

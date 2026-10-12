@@ -186,7 +186,7 @@ class _AgentsSidebarState extends State<AgentsSidebar> {
                 : Text(
                     store.sidebarLive
                         ? 'No chats yet. Tap New Chat to start one.'
-                        : 'No chats found on the Mac. Open the Cursor Agents window there, then pull to refresh.',
+                        : '${liveOffReasonText(store.liveOffReason)} Then pull to refresh.',
                     textAlign: TextAlign.center,
                     style: const TextStyle(color: Cr.textSecondary)),
           ),
@@ -279,12 +279,10 @@ class _AgentsSidebarState extends State<AgentsSidebar> {
           ),
         ),
         if (!store.sidebarLive && store.chats.isNotEmpty)
-          const Padding(
-            padding: EdgeInsets.fromLTRB(14, 0, 14, 6),
-            child: Text(
-                'Live view off — showing chats saved on the Mac. To control agents, open the Agents window '
-                'or run "Cursor Remote: Restart Cursor with Session Control" on the Mac.',
-                style: TextStyle(color: Cr.textFaint, fontSize: 11.5)),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 0, 14, 6),
+            child: Text(liveOffNotice(store.liveOffReason, store.sidebarSavedAt),
+                style: const TextStyle(color: Cr.textFaint, fontSize: 11.5)),
           ),
         Expanded(
           child: RefreshIndicator(

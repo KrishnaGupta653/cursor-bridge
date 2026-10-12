@@ -21,6 +21,12 @@ class ChatStore extends ChangeNotifier {
 
   List<ChatRow> chats = [];
   bool sidebarLive = false;
+
+  /// Why the live Agents sidebar isn't available: 'session-control' or 'agents-window'.
+  String? liveOffReason;
+
+  /// When the pins and groups shown were last read live, if they come from that saved copy.
+  DateTime? sidebarSavedAt;
   bool hasMoreChats = false;
   bool loadingChats = false;
   String query = '';
@@ -393,6 +399,9 @@ class ChatStore extends ChangeNotifier {
       chats = rows;
       _othersLoaded = rows.where((r) => !r.inSidebar).length;
       sidebarLive = data['sidebar'] == true;
+      liveOffReason = sidebarLive ? null : data['liveOff'] as String?;
+      final savedAt = data['sidebarSavedAt'];
+      sidebarSavedAt = !sidebarLive && savedAt is int ? DateTime.fromMillisecondsSinceEpoch(savedAt) : null;
     } else {
       final known = chats.map((c) => c.id).toSet();
       chats = [...chats, ...rows.where((r) => !known.contains(r.id))];

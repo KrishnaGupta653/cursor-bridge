@@ -2,14 +2,14 @@ import * as os from "os";
 import * as vscode from "vscode";
 import { WebSocketServer } from "./websocket-server";
 import { CommandHandler } from "./command-handler";
-import { CommandRouter } from "./command-router";
+import { CommandRouter, SidebarSnapshot } from "./command-router";
 import { StatusBarManager } from "./status-bar";
 import { NO_RELAY_SERVER, RELAY_LOCK_PATH, RelayClient, devicePairedMessage, pairingCodeTerms, relayForTelegram, resumeSavedRelaySession } from "./relay-client";
 import { normalizeRelayUrl } from "./links";
 import { SetupDeps, diagnose, runSetup } from "./setup/wizard";
 import { CONFIG } from "./config";
 import { CdpManager } from "./cdp/cdp-manager";
-import { claimOnce, cursorBinary, scheduleRelaunchWithCdp } from "./cdp/relaunch";
+import { claimAttempt, claimOnce, cursorBinary, scheduleRelaunchWithCdp } from "./cdp/relaunch";
 import { ChatWatcher } from "./chat-watcher";
 import { TranscriptIndex } from "./transcripts/transcript-index";
 import { WorkspaceDiff } from "./transcripts/workspace-diff";
@@ -336,6 +336,7 @@ export async function activate(context: vscode.ExtensionContext) {
     logError: (msg, err) =>
       outputChannel.appendLine(`${msg}${err ? ` - ${err instanceof Error ? err.message : String(err)}` : ""}`),
   });
+  let savedSidebar = { key: "", at: 0 };
   commandRouter.setChatServices({
     index: transcriptIndex,
     diff: new WorkspaceDiff(),
@@ -344,6 +345,15 @@ export async function activate(context: vscode.ExtensionContext) {
     remoteActionsEnabled: () =>
       vscode.workspace.getConfiguration("cursorRemote").get<string>("remoteActions", "enabled") !== "disabled",
     sessionControl: () => !!cdpManager?.getStatus().connected,
+    sidebarCache: {
+      load: () => context.globalState.get<SidebarSnapshot>("cursorRemote.sidebarSnapshot") ?? null,
+      save: (snapshot) => {
+        const key = JSON.stringify([snapshot.rows, snapshot.groups]);
+        if (key === savedSidebar.key && snapshot.at - savedSidebar.at < 60_000) return;
+        savedSidebar = { key, at: snapshot.at };
+        void context.globalState.update("cursorRemote.sidebarSnapshot", snapshot);
+      },
+    },
   });
   wsServer.onClientClosed((clientId) => chatWatcher?.forgetClient(clientId));
 
@@ -1173,10 +1183,20 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     const status = cdpManager?.getStatus();
     if (!status?.enabled || status.connected) return;
-    // The 10-minute claim also stops a loop when a relaunch still comes up without session control.
-    if (vscode.workspace.getConfiguration("cursorRemote").get<boolean>("autoRestartWithSessionControl", false) &&
-        claimOnce("cdp-auto-restart", 10 * 60 * 1000)) {
-      if (await autoRestartCountdown(10)) await restartWithSessionControl();
+    if (vscode.workspace.getConfiguration("cursorRemote").get<boolean>("autoRestartWithSessionControl", false)) {
+      // Every window of this launch gets here within seconds; only one acts.
+      if (!claimOnce("cdp-auto-restart-launch", 60 * 1000)) return;
+      // Two tries per 10 minutes: one more when Cursor reopened itself plainly (e.g. after an update), never a loop.
+      if (claimAttempt("cdp-auto-restart", 10 * 60 * 1000, 2)) {
+        if (await autoRestartCountdown(10)) await restartWithSessionControl();
+        return;
+      }
+      const again = await vscode.window.showWarningMessage(
+        "Cursor Remote: Cursor opened without session control again after restarting itself twice, so it won't retry for a few minutes. This happens when Cursor reopens itself, for example after an update.",
+        "Restart Cursor with Session Control",
+        "Not Now"
+      );
+      if (again === "Restart Cursor with Session Control") await restartWithSessionControl();
       return;
     }
     if (!claimOnce("cdp-offer", 2 * 60 * 1000)) return;
