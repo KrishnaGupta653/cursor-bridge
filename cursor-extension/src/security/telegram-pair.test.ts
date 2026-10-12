@@ -336,3 +336,15 @@ test("the start notice is sent at most once per 2 minutes, and not after the bot
   await stopped.bridge.announceStarted();
   assert.equal(stopped.messages().length, 0);
 });
+
+test("a window that quits while waiting for the relay doesn't silence the next window's notice", async () => {
+  const quitting = startFixture({ sessionId: null, connected: false });
+  quitting.bridge.wait = async () => { quitting.bridge.stopCount++; };
+  await quitting.bridge.announceStarted();
+  assert.equal(quitting.messages().length, 0);
+
+  const next = startFixture();
+  next.bridge.secretsPath = quitting.bridge.secretsPath;
+  await next.bridge.announceStarted();
+  assert.equal(next.messages().length, 1, "the restarted window still announces itself");
+});

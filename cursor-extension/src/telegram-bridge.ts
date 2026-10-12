@@ -499,7 +499,6 @@ export class TelegramBridge {
    */
   private async announceStarted(): Promise<void> {
     if (!vscode.workspace.getConfiguration("cursorRemote").get<boolean>("telegramStartNotice", true)) return;
-    if (!this.claimStartNotice()) return;
     const stops = this.stopCount;
     const deadline = this.now() + START_NOTICE_RELAY_WAIT_MS;
     let relay = this.relay?.status();
@@ -508,7 +507,8 @@ export class TelegramBridge {
       if (stops !== this.stopCount) return;
       relay = this.relay.status();
     }
-    if (stops !== this.stopCount || !this.running) return;
+    // Claimed only now: a window that quits while waiting (an auto-restart) must not silence the next one.
+    if (stops !== this.stopCount || !this.running || !this.claimStartNotice()) return;
     const host = escapeHtml(os.hostname().replace(/\.local$/i, ""));
     const sessionId = relay?.connected ? relay.sessionId : null;
     const text = (sessionId

@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **There is no built-in relay any more.** Each user runs their own; set `cursorRemote.relayServerUrl` or run Set Up. Relay commands without a relay offer Set Up instead of failing.
 - Changing `cursorRemote.relayServerUrl` takes effect at once, without reloading the window. The old relay's session is dropped, and logins stay stored per relay.
 
+### Fixed
+- The Telegram "Cursor Remote started" notice is no longer lost when Cursor quits while waiting for the relay (for example, an auto-restart with session control); the restarted window sends it.
+
 ## [0.6.4] - 2026-10-12
 
 ### Added
