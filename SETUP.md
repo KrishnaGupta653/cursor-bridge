@@ -166,6 +166,8 @@ The phone can only reach Cursor while the computer is awake and online. If it sl
 | From | What |
 |------|------|
 | Phone app | Pick a chat in the Agents sidebar, type to prompt it, approve or reject commands, stop runs |
+| Phone app, hover a chat (long-press on touch) | Pin, Unpin or Archive it, as in Cursor's sidebar |
+| Phone app → Settings → Notifications | A browser notification when a chat finishes or needs approval while the tab is in the background |
 | Telegram `/chats` | Chats grouped like Cursor's sidebar; tap `/c_3`, then just type |
 | Telegram `/last`, `/stop`, `/model` | Latest reply, stop the agent, switch models |
 | Telegram `/pair` | One-tap sign-in link for a phone (works once, 5 minutes) |

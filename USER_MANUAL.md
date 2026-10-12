@@ -345,7 +345,7 @@ Phone / Web app  ⇄  HTTPS polling  ⇄  Vercel relay (Upstash Redis)  ⇄  HTT
 
 - The app stores its login on the device until the session ends (the browser's localStorage on the web).
   Refreshing the page or restarting the app shows "Connecting…" and reconnects without a code
-- **Log out**: at the bottom of the Agents sidebar, the top-bar logout button, or Settings. After you confirm,
+- **Log out**: the top-bar logout button, or Settings. After you confirm,
   it revokes this phone's login on the relay and deletes the stored login. If the relay cannot be reached,
   the login is still deleted on the phone, and the relay's copy expires when the session ends
 - When the session ends (24 hours, **Start New Relay Session**, **Revoke Relay Session**) the app says
